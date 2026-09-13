@@ -297,3 +297,254 @@ impl Overlay {
         (prior, prior_gen, Generation(new_val))
     }
 }
+
+#[cfg(test)]
+mod concurrency {
+    //! F2.8: the shared-`Arc<Overlay>` hammer, plus the §1.1 guard-discipline
+    //! fence. Worker counts 1 and 8 are fixed as **explicit rayon pools**
+    //! (`ThreadPoolBuilder::num_threads`), which control the real worker
+    //! count regardless of environment — the `RAYON_NUM_THREADS=1/8` runs
+    //! the gates add exercise the same code through the env knob. The
+    //! torn-read detector was mutation-checked: a writer injecting a foreign
+    //! buffer fails this test.
+
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use rayon::prelude::*;
+
+    use super::{Generation, Overlay};
+    use crate::vfs::error::{VfsError, VfsResult};
+    use crate::vfs::fs::{DirEntry, ProjectFs, ReadDirSnapshot};
+    use crate::vfs::stat::Stat;
+    use crate::vfs::test_util::MemFs;
+
+    const PATTERN_A_LEN: usize = 512;
+    const PATTERN_B_LEN: usize = 256;
+
+    fn pattern_a() -> Arc<[u8]> {
+        Arc::from(vec![b'A'; PATTERN_A_LEN])
+    }
+
+    fn pattern_b() -> Arc<[u8]> {
+        Arc::from(vec![b'B'; PATTERN_B_LEN])
+    }
+
+    fn hammer_paths() -> Vec<String> {
+        ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| format!("/proj/src/{n}.rs"))
+            .collect()
+    }
+
+    /// One hammer round: a single writer hammers `set`/`delete` (with
+    /// tombstone transitions) on four overlapping paths while 8 rayon
+    /// workers take `read_file`/`current_gen`/`read_dir` snapshots. Valid
+    /// reader observations: exactly pattern A, exactly pattern B, or the
+    /// transient typed `BufferDeleted` — anything else is a torn read. The
+    /// writer asserts its returned generations strictly increase per path;
+    /// readers assert their samples never regress.
+    fn hammer_round(threads: usize, writer_iters: usize, reader_iters: usize) {
+        let paths = hammer_paths();
+        let a = pattern_a();
+        let b = pattern_b();
+
+        let mut fs = MemFs::new().with_dir("/proj").with_dir("/proj/src");
+        for path in &paths {
+            fs = fs.with_file(path, &a);
+        }
+        let overlay = Arc::new(Overlay::new(Arc::new(fs)));
+
+        let violations: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        let writer_overlay = Arc::clone(&overlay);
+        let writer_paths = paths.clone();
+        let writer_a = Arc::clone(&a);
+        let writer_b = Arc::clone(&b);
+        let writer = thread::spawn(move || {
+            let mut last_gen: HashMap<String, Generation> = HashMap::new();
+            for i in 0..writer_iters {
+                for (pi, path) in writer_paths.iter().enumerate() {
+                    let g = writer_overlay
+                        .set(
+                            path,
+                            if (i + pi) % 2 == 0 {
+                                &writer_a
+                            } else {
+                                &writer_b
+                            },
+                        )
+                        .unwrap();
+                    assert!(
+                        last_gen.get(path).is_none_or(|&l| g > l),
+                        "writer generation regressed on {path}"
+                    );
+                    last_gen.insert(path.clone(), g);
+
+                    // Tombstone transitions on a subset: delete is a valid
+                    // transient state readers must observe typed, and the
+                    // next iteration's set resurrects the file.
+                    if i % 3 == 0 && pi % 2 == 0 {
+                        let g = writer_overlay.delete(path).unwrap();
+                        assert!(
+                            g > last_gen[path],
+                            "writer generation regressed on {path} (delete)"
+                        );
+                        last_gen.insert(path.clone(), g);
+                    }
+                }
+            }
+        });
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let reader_overlay = Arc::clone(&overlay);
+        pool.install(|| {
+            (0..8usize).into_par_iter().for_each(|reader| {
+                let mut last: HashMap<String, Generation> = HashMap::new();
+                for k in 0..reader_iters {
+                    let path = &paths[(reader + k) % paths.len()];
+                    match reader_overlay.read_file(path) {
+                        Ok(bytes) => {
+                            if bytes != a && bytes != b {
+                                violations
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("torn read on {path}: {} bytes", bytes.len()));
+                            }
+                        }
+                        Err(VfsError::BufferDeleted { .. }) => {}
+                        Err(err) => violations
+                            .lock()
+                            .unwrap()
+                            .push(format!("unexpected read error on {path}: {err}")),
+                    }
+                    let g = reader_overlay.current_gen(path).unwrap();
+                    if let Some(&l) = last.get(path)
+                        && g < l
+                    {
+                        violations
+                            .lock()
+                            .unwrap()
+                            .push(format!("generation regressed on {path}: {l:?} -> {g:?}"));
+                    }
+                    last.insert(path.clone(), g);
+                    if k % 64 == 0 {
+                        // Listings run concurrently too: pure base, but the
+                        // call itself must never wedge behind the writer.
+                        reader_overlay.read_dir("/proj/src").unwrap();
+                    }
+                }
+            });
+        });
+
+        writer.join().unwrap();
+        let found = violations.lock().unwrap();
+        assert!(
+            found.is_empty(),
+            "{} violation(s) under {threads} rayon thread(s): {found:#?}",
+            found.len()
+        );
+    }
+
+    /// The mandated concurrency gate: run the hammer under 1 and 8 explicit
+    /// rayon worker threads. Completing at all is the no-deadlock proof —
+    /// enforced with a hard outer timeout so a deadlock fails the test
+    /// instead of hanging CI.
+    #[test]
+    fn concurrent_writer_and_readers_no_torn_reads_no_deadlock_monotonic_gens() {
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            hammer_round(1, 1_500, 800);
+            hammer_round(8, 1_500, 800);
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("deadlock suspected: hammer did not finish in 60s");
+    }
+
+    /// §1.1 guard discipline, deterministically: a base whose `read_file`
+    /// blocks until released. The overlay's read fallback must have dropped
+    /// its buffer guard *before* entering base I/O — if it had not, the
+    /// concurrent `set` below would deadlock against the held read guard,
+    /// and the timeout turns that into a test failure instead of a hang.
+    #[test]
+    fn read_guards_are_never_held_across_base_io() {
+        /// Blocks on `exit` whenever `/missing` is read; everything else is
+        /// inert. `Receiver` is `Send` but not `Sync`, hence the `Mutex`.
+        struct BlockFs {
+            enter: mpsc::Sender<()>,
+            exit: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl ProjectFs for BlockFs {
+            fn read_dir(&self, _path: &Path) -> VfsResult<ReadDirSnapshot> {
+                Ok(ReadDirSnapshot::new(vec![DirEntry {
+                    name: "static".to_owned(),
+                    is_dir: false,
+                }]))
+            }
+
+            fn read_file(&self, path: &Path) -> VfsResult<Arc<[u8]>> {
+                if path == Path::new("/missing") {
+                    self.enter.send(()).ok();
+                    self.exit.lock().unwrap().recv().ok();
+                    return Err(VfsError::NotFound {
+                        path: path.display().to_string(),
+                    });
+                }
+                Ok(Arc::from(b"present".as_slice()))
+            }
+
+            fn stat(&self, _path: &Path) -> VfsResult<Stat> {
+                Ok(Stat {
+                    len: 7,
+                    is_file: true,
+                    is_dir: false,
+                    is_virtual: false,
+                })
+            }
+        }
+
+        let (enter_tx, enter_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let overlay = Arc::new(Overlay::new(Arc::new(BlockFs {
+            enter: enter_tx,
+            exit: Mutex::new(exit_rx),
+        })));
+
+        // Reader A: falls through the (empty) buffer into the blocking base.
+        let overlay_a = Arc::clone(&overlay);
+        let reader = thread::spawn(move || overlay_a.read_file("/missing"));
+
+        // A is now inside the base call.
+        enter_rx.recv().unwrap();
+
+        // Writer B: needs the buffer write lock. If A still held its read
+        // guard across the base I/O, B would block forever.
+        let overlay_b = Arc::clone(&overlay);
+        thread::spawn(move || {
+            overlay_b.set("/other", b"unrelated").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "guard discipline violated: set() blocked while a read fallback sat in base I/O",
+        );
+
+        // Release A and confirm it observed the typed fallback result.
+        exit_tx.send(()).unwrap();
+        assert!(matches!(
+            reader.join().unwrap(),
+            Err(VfsError::NotFound { .. })
+        ));
+    }
+}
