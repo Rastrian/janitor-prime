@@ -1,0 +1,5 @@
+/target
+.claude/worktrees/
+*.log
+LOG.txt
+.janitor/
