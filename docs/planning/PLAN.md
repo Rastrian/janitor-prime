@@ -10,7 +10,7 @@
 
 All external facts (crate versions, tree-sitter API, OptMem, refactree) were verified against primary sources on 2026-09-13 — Appendix A carries the evidence trail. Remaining `[VERIFY]` markers are items that can only be settled by *execution* (F0/F1), not research.
 
-**Section status** — §0 ✅ · §1 ✅ · §2 ✅ · §3 ✅ · §4 ✅ · §5 ✅ · §6 ✅ · §7 ✅ · §8 ✅ · §9 ✅ · §10 ✅ · Appendix A ✅ (A.5 filled at F0 execution)
+**Section status** — §0 ✅ · §1 ✅ · §2 ✅ · §3 ✅ · §4 ✅ · §5 ✅ · §6 ✅ · §7 ✅ · §8 ✅ · §9 ✅ · §10 ✅ · Appendix A ✅ (A.5 filled at F0 execution, 2026-09-13)
 
 ---
 
@@ -836,9 +836,25 @@ Key verified facts feeding §1.5 and ADR-0006/0013: single-file Python tool, **n
 
 Go CLI `rft` ("semantic relations on code and mechanical deterministic refactorings"), **MIT**, pre-v1, early-stage. Facts feeding this plan: **`Rule → Match → []Edit`** as the single rewrite primitive (mv's symbol-identity planner emits site rules into the *same* engine — one matcher, no second engine); **byte-span model**: half-open `[StartByte, EndByte)` UTF-8 ranges, text never stored on spans, **edits applied per file back-to-front** so earlier offsets stay valid, minimal-diff via common prefix/suffix; **staged overlay writes**: `StageEdits` (in-memory overlay, no disk) → `ValidateStagedProject` (re-ingest of staged content; clears the per-file cache "so overlay content is not masked") → `CommitOverlay` (empty content = delete) — the direct precedent for our `apply` loop; matcher = **"token stream + pattern NFA"** (precedent for ADR-0005), DSL: literals, `/regex/`, `$name`, `$name:@ref` (semantic hyperlink holes), `Multi *` suffix; `rft grep --format jsonl` (`GrepHit{File, Line, Col, Match, Captures}`) = machine surface; **no persistent index** (on-demand dir/seed/hop walks; in-process per-file cache; mtime caching only in long-lived sessions) — precedent for ADR-0007; LSP = stdio *server* (DidOpen/DidChange feed the overlay; last-good snapshot) — the F10 template; fixture-driven pattern tests (`op.json`: pattern + replacement + expected match count) and an offline invariant fuzz harness — borrowed for F4.9/F7; import hygiene computed on original-source offsets, applied after body edits — noted for future rewrite features. Caveats from its own docs: early software, best-effort writes ("keep git ready"); bus-factor-1 risk **realized** — the repo is deleted (confirmed, 2026-09-13), making the module-proxy archive the source of record (cite pkg.go.dev / proxy.golang.org, never GitHub). Sources: pkg.go.dev module + package pages (root, cmd/rft, pkg/{pattern,ingest,projectfs,reference,web,web/graphql}, internal/{lsp,fuzzy}), go.mod via proxy.golang.org.
 
-### A.5 F0 pin-check results — (empty until execution)
+### A.5 F0 pin-check results — executed 2026-09-13
 
-The executed F0 records here: lang-all × core 0.27.0 build outcome (expected green per A.3.8), musl toolchain choice, THIRD_PARTY manifest snapshot.
+Execution environment: rustc/cargo **1.98.0** (stable; the same version `rust-toolchain.toml` pins for local dev), Linux x86_64. CI additionally runs the MSRV leg on 1.90.0 via `RUSTUP_TOOLCHAIN`.
+
+**lang-all × tree-sitter 0.27.0 (KP-5 fence) — GREEN.** All seven grammar crates (`=0.24.2/=0.25.0/=0.25.0/=0.25.0/=0.23.2/=0.23.5/=0.24.2`) resolve, compile, and link against core `=0.27.0` — no `links = "tree-sitter-language"` collision, as A.3.8 predicted. Evidence: `cargo build --features lang-all` green, and the binary's envelope reports the full list:
+
+```json
+{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","java","c"]}}
+```
+
+Scope note: this is a **build/link-level** fence (dependency resolution + C compilation + linkage). Runtime language registration (`set_language`) is first exercised by F3's `ffi_shim`; the KP-5 kind dump (F1.5) upgrades this fence to a runtime check. The CI job `pin-check` re-runs it on every PR.
+
+**Full F0 gate suite (local, 1.98.0):** `cargo fmt --check` green · `cargo clippy --all-targets -- -D warnings` green (default features) · same with `--all-features` green · `cargo test` green (13/13, also under `--all-features`) · `cargo build --no-default-features` green (`--version` then reports `"grammars": []`). CI confirmed the same suite on the F0 PR: `gates (1.90.0)` and `gates (stable)` both green (the MSRV leg is CI-only — the local sandbox has no 1.90 toolchain), and the `pin-check` job green.
+
+**Registry errata vs A.1 (live crates.io, re-checked at execution):** the crates.io package name is `smol_str` (underscores; PLAN §2 writes `smol-str` — cargo cannot resolve the dashed name); `proptest` 1.8.2 and `criterion` 0.11.0 were **never published** (real latest: 1.11.0 / 0.8.2). The manifest therefore pins `smol_str = "=0.3.6"` (version unchanged from §2), `proptest = "=1.11.0"`, `criterion = "=0.8.2"` — the latter two are dev-deps; every production pin matched §2 verbatim (verified crate-by-crate against the API).
+
+**musl toolchain decision: cargo-zigbuild (preferred) with musl-gcc fallback.** Rationale: zig's bundled self-contained CC removes the system `musl-tools` dependency, is the upstream-documented install path (`pip install ziglang` + `cargo install cargo-zigbuild --locked`), and extends to the macOS cross builds the release pipeline eventually wants. Wired as: CI job `musl-smoke` tries cargo-zigbuild first; on its failure a conditional step installs `musl-tools` and falls back to plain `cargo build --target x86_64-unknown-linux-musl`; the job then smoke-tests the artifact (`--version` envelope via jq) and is `continue-on-error` (best-effort per F0.5/R18). No local musl run: the execution sandbox has no musl/zig toolchain; first real execution was the `musl-smoke` job on the F0 PR — **passed via cargo-zigbuild** (static artifact answered `--version` with the janitor.v1 envelope; the musl-gcc fallback step was not needed).
+
+**THIRD_PARTY manifest snapshot: deferred to F7.3** (cargo-about in CI, PLAN §3 F7.3/R13); NOTICE carries the manual credits meanwhile (§10).
 
 ## Appendix B — Eval reconciliation record (2026-09-13)
 

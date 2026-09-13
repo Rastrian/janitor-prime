@@ -1,0 +1,25 @@
+janitor-prime
+Copyright 2026 Janitor Prime contributors
+Dual-licensed under MIT OR Apache-2.0 (see LICENSE-MIT, LICENSE-APACHE).
+
+This product builds on the work of others. Credits and provenance
+(PLAN §10):
+
+- OptMem (Victor Taelin) — inspiration for the memory model: the append-only
+  log with position-derived ids, the block-tiling `wake` recall with
+  present-bias, and the synchronous `nap` compression protocol in which the
+  consuming agent writes each summary. OptMem ships no license: ideas and
+  formats only — zero code copied, no derivative assets.
+
+- refactree (lucasew, MIT) — inspiration for the ingest -> pattern -> match
+  -> edits pipeline shape, the byte-span edit model applied back-to-front,
+  and the staged-overlay -> validate -> commit discipline. The GitHub
+  repository has been deleted (confirmed 2026-09-13); the source of record
+  is the pkg.go.dev / proxy.golang.org module archive
+  (v0.0.0-20260723-8593d0168fc5).
+
+- tree-sitter (Max Brunsfeld et al., MIT) and the bundled grammar crates —
+  tree-sitter-rust, tree-sitter-python, tree-sitter-go,
+  tree-sitter-javascript, tree-sitter-typescript, tree-sitter-java,
+  tree-sitter-c (MIT) — the parsing infrastructure. A machine-generated
+  THIRD_PARTY manifest (cargo-about) lands in CI at F7 (PLAN §3 F7.3).

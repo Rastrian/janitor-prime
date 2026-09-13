@@ -1,0 +1,7 @@
+# Local development pins the current stable (PLAN §3 F0.1).
+# CI overrides per-job with RUSTUP_TOOLCHAIN (1.90.0 MSRV leg + stable leg),
+# which takes precedence over this file.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
