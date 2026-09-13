@@ -50,6 +50,11 @@ lang-java = ["dep:tree-sitter-java"]
 lang-c = ["dep:tree-sitter-c"]
 lang-all = ["lang-rust", "lang-python", "lang-go", "lang-javascript",
             "lang-typescript", "lang-java", "lang-c"]
+# F1 kill-point spikes (PLAN §3 F1): self-contained measurement harnesses,
+# compiled only on demand and deleted at F3 entry. Deliberately NOT default
+# and NOT part of `lang-all` — a dedicated CI job builds/tests this feature
+# so the spike code keeps compiling for as long as it lives.
+spikes = ["lang-rust"]
 
 [dev-dependencies]
 tempfile = "=3.27.0"

@@ -83,7 +83,7 @@ fn gamma() -> u32 {
         .to_vec()
         .into();
 
-        let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let language = crate::ast::ffi_shim::rust_language();
         let mut parser = tree_sitter::Parser::new();
         parser
             .set_language(&language)
