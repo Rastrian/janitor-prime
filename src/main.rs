@@ -11,9 +11,13 @@
 //! the `janitor.v1` envelope, diagnostics go to stderr via `tracing`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod ast;
 mod cli;
 mod envelope;
 mod error;
+mod memory;
+mod orchestrator;
+mod vfs;
 
 use clap::Parser;
 use std::process::ExitCode;
