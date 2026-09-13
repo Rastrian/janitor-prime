@@ -11,18 +11,10 @@
 use serde_json::Value;
 use thiserror::Error;
 
-/// VFS domain errors (PLAN §1.3).
-#[derive(Debug, Error)]
-pub enum VfsError {
-    #[error("path not found: {path}")]
-    NotFound { path: String },
-    #[error("permission denied: {path}")]
-    Permission { path: String },
-    #[error("io error on {path}: {message}")]
-    Io { path: String, message: String },
-    #[error("invalid path: {path}")]
-    InvalidPath { path: String },
-}
+/// VFS domain errors — defined in and re-exported from `crate::vfs::error`
+/// since F2.1 (the phase that owns them), so the taxonomy below stays the
+/// single umbrella while the VFS slice grows next to its module.
+pub use crate::vfs::VfsError;
 
 /// Parse-layer errors (PLAN §1.2, F3).
 #[derive(Debug, Error)]
@@ -148,6 +140,12 @@ impl JanitorError {
             Self::Vfs(VfsError::Permission { .. }) => "E_VFS_PERMISSION",
             Self::Vfs(VfsError::Io { .. }) => "E_VFS_IO",
             Self::Vfs(VfsError::InvalidPath { .. }) => "E_VFS_INVALID_PATH",
+            Self::Vfs(VfsError::BufferDeleted { .. }) => "E_VFS_BUFFER_DELETED",
+            Self::Vfs(VfsError::InvalidUtf8 { .. }) => "E_VFS_INVALID_UTF8",
+            Self::Vfs(VfsError::NotStaged { .. }) => "E_VFS_NOT_STAGED",
+            // Shared with `ValidateError::FlushPartial` (the F5 wrapper over
+            // this same condition): one agent-facing code, by plan.
+            Self::Vfs(VfsError::FlushPartial { .. }) => "E_FLUSH_PARTIAL",
             Self::Parse(ParseError::NoGrammarForLang { .. }) => "E_PARSE_NO_GRAMMAR_FOR_LANG",
             Self::Parse(ParseError::LanguageMismatch { .. }) => "E_PARSE_LANGUAGE_MISMATCH",
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
@@ -176,6 +174,18 @@ impl JanitorError {
     /// variant carries any.
     pub fn details(&self) -> Option<Value> {
         match self {
+            Self::Vfs(VfsError::NotFound { path })
+            | Self::Vfs(VfsError::Permission { path })
+            | Self::Vfs(VfsError::InvalidPath { path })
+            | Self::Vfs(VfsError::BufferDeleted { path })
+            | Self::Vfs(VfsError::NotStaged { path }) => Some(serde_json::json!({ "path": path })),
+            Self::Vfs(VfsError::Io { path, message }) => {
+                Some(serde_json::json!({ "path": path, "message": message }))
+            }
+            Self::Vfs(VfsError::InvalidUtf8 { path }) => {
+                Some(serde_json::json!({ "path": path, "encoding": "utf-8" }))
+            }
+            Self::Vfs(VfsError::FlushPartial { report }) => serde_json::to_value(report).ok(),
             Self::Dsl(DslError::Lex { pos, expected }) => {
                 Some(serde_json::json!({ "position": pos, "expected": expected }))
             }
@@ -230,6 +240,25 @@ mod tests {
     #[test]
     fn plan_named_codes_are_exact() {
         let cases: Vec<(JanitorError, &str)> = vec![
+            (
+                VfsError::BufferDeleted { path: "p".into() }.into(),
+                "E_VFS_BUFFER_DELETED",
+            ),
+            (
+                VfsError::InvalidUtf8 { path: "p".into() }.into(),
+                "E_VFS_INVALID_UTF8",
+            ),
+            (
+                VfsError::NotStaged { path: "p".into() }.into(),
+                "E_VFS_NOT_STAGED",
+            ),
+            (
+                VfsError::FlushPartial {
+                    report: crate::vfs::FlushReport::default(),
+                }
+                .into(),
+                "E_FLUSH_PARTIAL",
+            ),
             (
                 EditError::Mismatch {
                     path: "p".into(),

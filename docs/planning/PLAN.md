@@ -206,7 +206,7 @@ enum BufferEntry {
 
 1. **Read-through:** `read_file`/`stat` consult the buffer **first**; miss falls to `base_fs`. A staged file returns staged bytes even if a different file exists on disk.
 2. **Anti-phantom:** `read_dir` **ignores the buffer entirely** and calls only `base_fs`. Virtual files never appear in listings. This is deliberate: directory listings stay a faithful mirror of disk, so an agent can never mistake a staged file for a persisted one. (refactree's `projectfs.Overlay` follows the same philosophy of keeping disk truth and staged content clearly separated, A.4.)
-3. **Tombstone delete:** `delete()` writes a `Tombstone`. Subsequent `read_file` is `Err(VfsError::NotFound)` **even if the base file exists on disk** (the delete must win over the fallback), while `read_dir` output is unchanged (the on-disk file still lists). A bare `HashMap::remove` would violate the mandated test semantics — hence `BufferEntry::Tombstone` instead of the BRIEF's `HashMap<PathBuf, Vec<u8>>` sketch (ADR-0009).
+3. **Tombstone delete:** `delete()` writes a `Tombstone`. Subsequent `read_file` is a typed not-found error **even if the base file exists on disk** (the delete must win over the fallback), while `read_dir` output is unchanged (the on-disk file still lists). A bare `HashMap::remove` would violate the mandated test semantics — hence `BufferEntry::Tombstone` instead of the BRIEF's `HashMap<PathBuf, Vec<u8>>` sketch (ADR-0009). *(F2 outcome, 2026-09-13: the typed error is `VfsError::BufferDeleted` (`E_VFS_BUFFER_DELETED`), not `NotFound` — a staged delete must stay distinguishable from "never existed" for the agent reading the error; shadowing semantics otherwise exactly as sketched here.)*
 4. **Fallback:** with no buffer entry, behavior is byte-identical to `Os`.
 
 **Beyond the BRIEF's sketch (hidden sub-scope called out by eval-2 §3.1):**
@@ -538,6 +538,8 @@ Gates apply to every phase unless noted: `cargo fmt --check` · `cargo clippy --
 8. Concurrency test: rayon hammering `read_file`/`read_dir`/`set` on a shared `Arc<Overlay>` under the guard-discipline rule (§1.1); no deadlock, no torn reads.
 
 **Gate:** all gates; the four invariant tests green. **Commit:** `F2: transactional overlay with anti-phantom invariants`.
+
+**F2 outcome (2026-09-13): done.** The founding TDD requirement was executed as an explicit two-commit red→green pair (stub overlay whose `read_dir` leaked buffer files, then the real overlay). Three deviations from the sketches above, all recorded in the F2 commits: (a) the invariant tests live in `src/vfs.rs` itself (the founding brief mandates the anti-phantom test *in* that file) rather than item 5's `tests/vfs_invariants.rs`; (b) tombstone reads are the typed `VfsError::BufferDeleted` (§1.3 invariant 3 note above); (c) F2.8's 1/8 worker counts run as explicit rayon pools with `RAYON_NUM_THREADS=1/8` full-suite runs at gate time — same code, both knobs. The torn-read detector was mutation-checked (a foreign-buffer writer fails the hammer); the guard-discipline rule of §1.1 additionally has a deterministic blocking-base fence test. 40 tests green across the matrix.
 
 ### F3 — Parse layer over Overlay *(v0.1)*
 
