@@ -848,7 +848,7 @@ Execution environment: rustc/cargo **1.98.0** (stable; the same version `rust-to
 
 Scope note: this is a **build/link-level** fence (dependency resolution + C compilation + linkage). Runtime language registration (`set_language`) is first exercised by F3's `ffi_shim`; the KP-5 kind dump (F1.5) upgrades this fence to a runtime check. The CI job `pin-check` re-runs it on every PR.
 
-**Full F0 gate suite (local, 1.98.0):** `cargo fmt --check` green · `cargo clippy --all-targets -- -D warnings` green (default features) · same with `--all-features` green · `cargo test` green (13/13, also under `--all-features`) · `cargo build --no-default-features` green (`--version` then reports `"grammars": []`).
+**Full F0 gate suite (local, 1.98.0):** `cargo fmt --check` green · `cargo clippy --all-targets -- -D warnings` green (default features) · same with `--all-features` green · `cargo test` green (13/13, also under `--all-features`) · `cargo build --no-default-features` green (`--version` then reports `"grammars": []`). CI confirmed the same suite on the F0 PR: `gates (1.90.0)` and `gates (stable)` both green (the MSRV leg is CI-only — the local sandbox has no 1.90 toolchain), and the `pin-check` job green.
 
 **Registry errata vs A.1 (live crates.io, re-checked at execution):** the crates.io package name is `smol_str` (underscores; PLAN §2 writes `smol-str` — cargo cannot resolve the dashed name); `proptest` 1.8.2 and `criterion` 0.11.0 were **never published** (real latest: 1.11.0 / 0.8.2). The manifest therefore pins `smol_str = "=0.3.6"` (version unchanged from §2), `proptest = "=1.11.0"`, `criterion = "=0.8.2"` — the latter two are dev-deps; every production pin matched §2 verbatim (verified crate-by-crate against the API).
 
