@@ -174,11 +174,19 @@ impl Overlay {
         self.base_fs.read_dir(key.as_path())
     }
 
-    /// Disk-stat passthrough for now; F2.7 fills in the synthetic half
-    /// (`is_virtual: true`, staged length) with its own tests.
+    /// Buffer-first stat (F2.7): staged entries stat synthetic
+    /// (`Stat::virtual_file`, `is_virtual: true`, staged length), tombstones
+    /// stat deleted, and a miss falls to the base — disk truth,
+    /// `is_virtual: false`.
     pub fn stat(&self, path: impl AsRef<Path>) -> VfsResult<Stat> {
         let key = VfsPath::new(path)?;
-        self.base_fs.stat(key.as_path())
+        match self.entry(&key)? {
+            Some(BufferEntry::File(bytes)) => Ok(Stat::virtual_file(bytes.len() as u64)),
+            Some(BufferEntry::Tombstone) => Err(VfsError::BufferDeleted {
+                path: key.to_string(),
+            }),
+            None => self.base_fs.stat(key.as_path()),
+        }
     }
 
     /// The explicit virtual-file visibility surface: staged `File` paths
