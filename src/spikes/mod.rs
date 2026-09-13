@@ -31,6 +31,7 @@
 
 pub mod incremental_reparse;
 pub mod point_semantics;
+pub mod validity_gate;
 
 use thiserror::Error;
 
