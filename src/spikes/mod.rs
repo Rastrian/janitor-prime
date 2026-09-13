@@ -29,6 +29,7 @@
 //! nothing more.
 #![allow(dead_code)]
 
+pub mod incremental_reparse;
 pub mod point_semantics;
 
 use thiserror::Error;
@@ -44,6 +45,10 @@ pub enum SpikeError {
     NoTree { what: String },
     #[error("refusing to edit a shared tree: Arc::strong_count == {count}")]
     SharedTree { count: usize },
+    #[error("corpus anchor {needle:?} not found")]
+    AnchorMissing { needle: String },
+    #[error("correctness divergence between full and incremental paths: {detail}")]
+    CorrectnessDivergence { detail: String },
 }
 
 /// Parser primed with the Rust grammar via the ffi_shim boundary — one
@@ -58,4 +63,62 @@ pub fn rust_parser() -> Result<tree_sitter::Parser, SpikeError> {
             message: err.to_string(),
         })?;
     Ok(parser)
+}
+
+// --- shared edit plumbing (the KP-3-locked byte math) ---------------------
+//
+// `point_at`/`input_edit_for` are the reference implementation of PLAN
+// §1.2.1 step 4; the KP-3 fence tests in `point_semantics` pin them against
+// the real parser, and KP-1/KP-4 build their edits on the same math so all
+// spikes agree with what F3's `ffi_shim` will embed.
+
+/// Byte-based `Point` derivation: row = newline count before `byte`,
+/// column = `byte` minus the start of that row. Column units are BYTES
+/// (A.3.4), never chars and never UTF-16 code units.
+pub fn point_at(source: &[u8], byte: usize) -> tree_sitter::Point {
+    let byte = byte.min(source.len());
+    let mut row = 0_usize;
+    let mut row_start = 0_usize;
+    for (i, b) in source[..byte].iter().enumerate() {
+        if *b == b'\n' {
+            row += 1;
+            row_start = i + 1;
+        }
+    }
+    tree_sitter::Point {
+        row,
+        column: byte - row_start,
+    }
+}
+
+/// A byte splice: replace `[start_byte, old_end_byte)` of the old source
+/// with `new_text` (half-open UTF-8 byte ranges, ADR-0014's span model).
+pub struct Splice {
+    pub start_byte: usize,
+    pub old_end_byte: usize,
+    pub new_text: Vec<u8>,
+}
+
+/// Apply a splice, producing the new source bytes.
+pub fn splice(old: &[u8], edit: &Splice) -> Vec<u8> {
+    let mut out = Vec::with_capacity(old.len() + edit.new_text.len());
+    out.extend_from_slice(&old[..edit.start_byte]);
+    out.extend_from_slice(&edit.new_text);
+    out.extend_from_slice(&old[edit.old_end_byte..]);
+    out
+}
+
+/// Derive the `InputEdit` for a splice using byte-based points only
+/// (PLAN §1.2.1 step 4). If tree-sitter's `Point` units ever disagree with
+/// this math, the KP-3 round-trip tests fail.
+pub fn input_edit_for(old: &[u8], new: &[u8], edit: &Splice) -> tree_sitter::InputEdit {
+    let new_end_byte = edit.start_byte + edit.new_text.len();
+    tree_sitter::InputEdit {
+        start_byte: edit.start_byte,
+        old_end_byte: edit.old_end_byte,
+        new_end_byte,
+        start_position: point_at(old, edit.start_byte),
+        old_end_position: point_at(old, edit.old_end_byte),
+        new_end_position: point_at(new, new_end_byte),
+    }
 }

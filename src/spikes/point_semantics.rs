@@ -12,58 +12,12 @@
 //! parser agree, both after a cold parse and after an
 //! edit → `Tree::edit` → incremental re-parse round trip on content
 //! containing emoji, CJK, combining marks and regional indicators.
+//!
+//! [`point_at`] and friends live in the spikes module root: they are the
+//! shared reference implementation of the §1.2.1-step-4 math that KP-1 and
+//! KP-4 build their edits on, pinned here against the real parser.
 
-/// Byte-based `Point` derivation — the exact math `ffi_shim` implements for
-/// `InputEdit` (PLAN §1.2.1 step 4): row = newline count before `byte`,
-/// column = `byte` minus the start of that row. Column units are BYTES
-/// (A.3.4), never chars and never UTF-16 code units.
-pub fn point_at(source: &[u8], byte: usize) -> tree_sitter::Point {
-    let byte = byte.min(source.len());
-    let mut row = 0_usize;
-    let mut row_start = 0_usize;
-    for (i, b) in source[..byte].iter().enumerate() {
-        if *b == b'\n' {
-            row += 1;
-            row_start = i + 1;
-        }
-    }
-    tree_sitter::Point {
-        row,
-        column: byte - row_start,
-    }
-}
-
-/// A byte splice: replace `[start_byte, old_end_byte)` of the old source
-/// with `new_text` (half-open UTF-8 byte ranges, ADR-0014's span model).
-pub struct Splice {
-    pub start_byte: usize,
-    pub old_end_byte: usize,
-    pub new_text: Vec<u8>,
-}
-
-/// Apply a splice, producing the new source bytes.
-pub fn splice(old: &[u8], edit: &Splice) -> Vec<u8> {
-    let mut out = Vec::with_capacity(old.len() + edit.new_text.len());
-    out.extend_from_slice(&old[..edit.start_byte]);
-    out.extend_from_slice(&edit.new_text);
-    out.extend_from_slice(&old[edit.old_end_byte..]);
-    out
-}
-
-/// Derive the `InputEdit` for a splice using byte-based points only
-/// (PLAN §1.2.1 step 4). If tree-sitter's `Point` units ever disagree with
-/// this math, the round-trip tests below fail.
-pub fn input_edit_for(old: &[u8], new: &[u8], edit: &Splice) -> tree_sitter::InputEdit {
-    let new_end_byte = edit.start_byte + edit.new_text.len();
-    tree_sitter::InputEdit {
-        start_byte: edit.start_byte,
-        old_end_byte: edit.old_end_byte,
-        new_end_byte,
-        start_position: point_at(old, edit.start_byte),
-        old_end_position: point_at(old, edit.old_end_byte),
-        new_end_position: point_at(new, new_end_byte),
-    }
-}
+use super::point_at;
 
 /// Corpus with the multibyte classes that break naive point math: emoji
 /// (4-byte UTF-8), CJK (3-byte), a combining mark (e + U+0301 — written as
@@ -185,6 +139,8 @@ fn cold_parse_positions_are_byte_based() {
 /// against the new bytes.
 #[test]
 fn input_edit_round_trip_is_byte_based() {
+    use super::{Splice, input_edit_for, splice};
+
     let source = corpus();
     let mut parser = rust_parser().expect("ABI-verified pair (A.3.8)");
 
