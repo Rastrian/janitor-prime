@@ -1,0 +1,117 @@
+{
+  "files": [
+    {
+      "name": "deleted-fn-close-brace",
+      "edit_start": 46,
+      "edit_new_end": 52,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "deleted-let-semicolon",
+      "edit_start": 25,
+      "edit_new_end": 34,
+      "errors_total": 0,
+      "missing_total": 1,
+      "errors_in_range": 0,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": true
+    },
+    {
+      "name": "deleted-call-close-paren",
+      "edit_start": 36,
+      "edit_new_end": 44,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "missing-initializer",
+      "edit_start": 25,
+      "edit_new_end": 34,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "extra-open-brace",
+      "edit_start": 25,
+      "edit_new_end": 37,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "deleted-let-equals",
+      "edit_start": 25,
+      "edit_new_end": 34,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "deleted-match-arrow",
+      "edit_start": 49,
+      "edit_new_end": 53,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "unterminated-string",
+      "edit_start": 34,
+      "edit_new_end": 41,
+      "errors_total": 1,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "deleted-array-close-bracket",
+      "edit_start": 34,
+      "edit_new_end": 44,
+      "errors_total": 0,
+      "missing_total": 1,
+      "errors_in_range": 0,
+      "missing_in_range": 1,
+      "min_distance": 0,
+      "false_negative": false
+    },
+    {
+      "name": "deleted-fn-name",
+      "edit_start": 0,
+      "edit_new_end": 3,
+      "errors_total": 2,
+      "missing_total": 0,
+      "errors_in_range": 1,
+      "missing_in_range": 0,
+      "min_distance": 0,
+      "false_negative": false
+    }
+  ],
+  "files_with_real_errors": 10,
+  "false_negatives": 1,
+  "false_negative_rate": 0.1
+}

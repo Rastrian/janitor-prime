@@ -2,9 +2,15 @@
 #
 # gates      — fmt + clippy (-D warnings; default and --all-features) + test
 #              + no-default-features build, on the MSRV (1.90.0) and stable.
+#              The --all-features legs include the `spikes` feature, so the
+#              F1 spike code is linted with the same deny set.
 # pin-check  — the ABI fence (PLAN F0.6 / KP-5 / ADR-0015 / R1): lang-all
 #              build against tree-sitter 0.27.0, plus a --version envelope
 #              assertion so the embedded grammar list is exercised for real.
+# spikes     — F1 kill-point fence (PLAN §3 F1): build + test with
+#              --features spikes so the measurement harnesses keep compiling
+#              until they are deleted at F3 entry. The feature is
+#              deliberately absent from default and from lang-all.
 # musl-smoke — best-effort static musl build: cargo-zigbuild preferred,
 #              musl-gcc fallback (decision recorded in PLAN Appendix A.5);
 #              continue-on-error per F0.5.
@@ -84,6 +90,27 @@ jobs:
             and .ok == true
             and .data.grammars == ["rust","python","go","javascript","typescript","java","c"]
           '
+
+  spikes:
+    name: F1 spikes fence (build + test)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Toolchain (dtolnay/rust-toolchain@master)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+      - name: Cache (Swatinem/rust-cache v2.9.2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Build with --features spikes
+        run: cargo build --features spikes
+      - name: Test with --features spikes
+        # Heavy measurement legs are #[ignore]d; this runs the fast
+        # correctness fences of every spike (PLAN §3 F1 gate).
+        run: cargo test --features spikes
 
   musl-smoke:
     name: musl static build smoke (best-effort)

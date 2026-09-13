@@ -17,6 +17,8 @@ mod envelope;
 mod error;
 mod memory;
 mod orchestrator;
+#[cfg(feature = "spikes")]
+mod spikes;
 mod vfs;
 
 use clap::Parser;

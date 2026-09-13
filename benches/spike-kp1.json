@@ -1,0 +1,159 @@
+{
+  "file_bytes": 3146176,
+  "units": 3993,
+  "samples": 20,
+  "warmup": 3,
+  "profile": "release",
+  "edits": [
+    {
+      "name": "tiny-rename",
+      "old_bytes": 3146176,
+      "new_bytes": 3146184,
+      "full": {
+        "min_us": 531150,
+        "p50_us": 569419,
+        "p90_us": 576638,
+        "max_us": 578717
+      },
+      "incremental": {
+        "min_us": 84380,
+        "p50_us": 85436,
+        "p90_us": 87407,
+        "max_us": 89798
+      },
+      "speedup_p50": 6.664860246266211,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    },
+    {
+      "name": "small-statement",
+      "old_bytes": 3146176,
+      "new_bytes": 3146208,
+      "full": {
+        "min_us": 503964,
+        "p50_us": 505715,
+        "p90_us": 506486,
+        "max_us": 510373
+      },
+      "incremental": {
+        "min_us": 77293,
+        "p50_us": 83338,
+        "p90_us": 87158,
+        "max_us": 89218
+      },
+      "speedup_p50": 6.068240178550001,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    },
+    {
+      "name": "medium-fn",
+      "old_bytes": 3146176,
+      "new_bytes": 3146507,
+      "full": {
+        "min_us": 504717,
+        "p50_us": 506785,
+        "p90_us": 510318,
+        "max_us": 511366
+      },
+      "incremental": {
+        "min_us": 70319,
+        "p50_us": 74226,
+        "p90_us": 75046,
+        "max_us": 76296
+      },
+      "speedup_p50": 6.827594104491688,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    },
+    {
+      "name": "large-block",
+      "old_bytes": 3146176,
+      "new_bytes": 3147270,
+      "full": {
+        "min_us": 506464,
+        "p50_us": 510490,
+        "p90_us": 524088,
+        "max_us": 524586
+      },
+      "incremental": {
+        "min_us": 65874,
+        "p50_us": 69076,
+        "p90_us": 70504,
+        "max_us": 71134
+      },
+      "speedup_p50": 7.3902657941976955,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    },
+    {
+      "name": "xlarge-block",
+      "old_bytes": 3146176,
+      "new_bytes": 3162656,
+      "full": {
+        "min_us": 508185,
+        "p50_us": 511166,
+        "p90_us": 521545,
+        "max_us": 526913
+      },
+      "incremental": {
+        "min_us": 75609,
+        "p50_us": 84967,
+        "p90_us": 86585,
+        "max_us": 90294
+      },
+      "speedup_p50": 6.01605329127779,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    },
+    {
+      "name": "whole-block",
+      "old_bytes": 3146176,
+      "new_bytes": 3277334,
+      "full": {
+        "min_us": 554087,
+        "p50_us": 578612,
+        "p90_us": 592286,
+        "max_us": 595488
+      },
+      "incremental": {
+        "min_us": 90764,
+        "p50_us": 96702,
+        "p90_us": 109970,
+        "max_us": 110943
+      },
+      "speedup_p50": 5.983454323592066,
+      "correctness": {
+        "kind_id_equal": true,
+        "byte_range_equal": true,
+        "has_error_equal": true,
+        "has_error": false,
+        "sexp_equal": true
+      }
+    }
+  ]
+}
