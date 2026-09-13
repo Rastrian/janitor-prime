@@ -40,7 +40,7 @@ Five curated real-world idioms:
 Corpora: (a) five crafted snippets, each containing the idiom once clean
 and once with a comment deliberately interleaved between exactly the
 pattern siblings — hand-computed (strict, skip) asserted exactly;
-(b) this repository's own `src/` — 16 files, 109,075 B of real,
+(b) this repository's own `src/` — 16 files, 109,192 B of real,
 comment-heavy Rust (the tree-sitter crate's fixtures are not vendored).
 
 ## Results
