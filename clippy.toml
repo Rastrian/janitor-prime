@@ -1,0 +1,8 @@
+# Clippy configuration (PLAN §1.1, §3 F0.1).
+# MSRV must match Cargo.toml `rust-version` (tree-sitter 0.27.0 floor).
+msrv = "1.90"
+
+# The no-unwrap/expect/panic policy targets production code only; test code
+# is exempted (PLAN §1.1: "with #[allow] scoped to tests").
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

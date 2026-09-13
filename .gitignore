@@ -1,5 +1,16 @@
+# Rust build artifacts
 /target
-.claude/worktrees/
-*.log
-LOG.txt
+/debug
+/release
+
+# janitor local memory layer (PLAN §1.5; opt-in for teams that want shared memory)
 .janitor/
+LOG.txt
+
+# Multi-agent worktrees (this repo is developed in git worktrees)
+.claude/worktrees/
+
+# Editor / OS noise
+*.log
+*.swp
+.DS_Store
