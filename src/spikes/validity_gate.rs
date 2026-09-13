@@ -317,8 +317,8 @@ fn validity_gate_corpus_is_sound_and_measured() {
     // (whole-file gate) is taken in the memo if it is not — recorded, not
     // assumed either way here.
     let json = serde_json::to_string_pretty(&outcome).expect("outcome serializes");
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/spike-kp4-outcome.json");
+    // Test-path writes go to temp; benches/spike-kp4-outcome.json is frozen F1 evidence.
+    let path = std::env::temp_dir().join("janitor-spike-kp4-outcome.json");
     std::fs::write(&path, json).expect("write outcome json");
     println!("wrote {}", path.display());
 }

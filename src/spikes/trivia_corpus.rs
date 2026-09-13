@@ -402,8 +402,10 @@ fn trivia_adjacency_semantics_measured() {
     }
 
     let json = serde_json::to_string_pretty(&outcome).expect("outcome serializes");
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("benches/spike-kp6-outcome.json");
+    // Tests must not dirty the worktree: the committed benches/spike-kp6-outcome.json
+    // is the FROZEN F1 evidence (its repo corpus is this repo's src/, which grows every
+    // phase). Live runs write to temp; re-measurement updates the artifact deliberately.
+    let path = std::env::temp_dir().join("janitor-spike-kp6-outcome.json");
     std::fs::write(&path, json).expect("write outcome json");
     println!("wrote {}", path.display());
 }
