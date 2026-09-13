@@ -109,20 +109,8 @@ impl Overlay {
     /// caller bug, and the buffer is left untouched.
     pub fn delete(&self, path: impl AsRef<Path>) -> VfsResult<Generation> {
         let key = VfsPath::new(path)?;
-        let new_val = self.global_gen.fetch_add(1, Ordering::AcqRel) + 1;
-        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
-        match buffer.get(&key) {
-            Some(BufferEntry::File(_)) => {
-                buffer.insert(key.clone(), BufferEntry::Tombstone);
-                // Keep the buffer guard across the bump (see module docs).
-                let mut gens = self.gens.write().unwrap_or_else(|e| e.into_inner());
-                gens.insert(key, Generation(new_val));
-                Ok(Generation(new_val))
-            }
-            _ => Err(VfsError::NotStaged {
-                path: key.to_string(),
-            }),
-        }
+        let (_, _, new_gen) = self.swap_delete(&key)?;
+        Ok(new_gen)
     }
 
     /// Pure buffer lookup (no disk fallback): `Ok(None)` = not staged,
@@ -226,6 +214,69 @@ impl Overlay {
         // the test's failure, not a VFS error.
         let buffer = self.buffer.read().unwrap_or_else(|e| e.into_inner());
         Ok(buffer.get(key).cloned())
+    }
+
+    /// The tombstone swap behind [`Self::delete`], exposing the journal
+    /// triple (prior entry, prior generation, new generation) that
+    /// transactions roll back to. Same critical-section shape as
+    /// [`Self::mutate`]: the `gens` bump happens under the `buffer` write
+    /// guard.
+    pub(crate) fn swap_delete(
+        &self,
+        key: &VfsPath,
+    ) -> VfsResult<(Option<BufferEntry>, Generation, Generation)> {
+        let new_val = self.global_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
+        match buffer.get(key) {
+            Some(BufferEntry::File(prior_bytes)) => {
+                let prior = Some(BufferEntry::File(Arc::clone(prior_bytes)));
+                buffer.insert(key.clone(), BufferEntry::Tombstone);
+                let mut gens = self.gens.write().unwrap_or_else(|e| e.into_inner());
+                let prior_gen = gens.get(key).copied().unwrap_or_default();
+                gens.insert(key.clone(), Generation(new_val));
+                Ok((prior, prior_gen, Generation(new_val)))
+            }
+            _ => Err(VfsError::NotStaged {
+                path: key.to_string(),
+            }),
+        }
+    }
+
+    /// Rewind one journal entry: put `prior` (or nothing) back and restore
+    /// the generation it had. Txn rollback/flush-failure path only — the
+    /// content returns to its pre-stage state, and so does its T4 key.
+    pub(crate) fn restore(
+        &self,
+        key: &VfsPath,
+        prior: Option<BufferEntry>,
+        generation: Generation,
+    ) {
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
+        match prior {
+            Some(entry) => {
+                buffer.insert(key.clone(), entry);
+            }
+            None => {
+                buffer.remove(key);
+            }
+        }
+        drop(buffer);
+        let mut gens = self.gens.write().unwrap_or_else(|e| e.into_inner());
+        gens.insert(key.clone(), generation);
+    }
+
+    /// Drop a successfully flushed buffer entry (commit success path). The
+    /// generation is deliberately left alone: disk now holds the same bytes
+    /// the buffer did, so (generation, content) cache pairs stay valid.
+    pub(crate) fn clear_entry(&self, key: &VfsPath) {
+        let mut buffer = self.buffer.write().unwrap_or_else(|e| e.into_inner());
+        buffer.remove(key);
+    }
+
+    /// Buffer snapshot for `key` (transactions read what a stage left).
+    pub(crate) fn buffer_entry(&self, key: &VfsPath) -> Option<BufferEntry> {
+        let buffer = self.buffer.read().unwrap_or_else(|e| e.into_inner());
+        buffer.get(key).cloned()
     }
 
     /// Insert `entry` at `key`, returning (prior entry, prior generation,

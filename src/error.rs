@@ -143,6 +143,9 @@ impl JanitorError {
             Self::Vfs(VfsError::BufferDeleted { .. }) => "E_VFS_BUFFER_DELETED",
             Self::Vfs(VfsError::InvalidUtf8 { .. }) => "E_VFS_INVALID_UTF8",
             Self::Vfs(VfsError::NotStaged { .. }) => "E_VFS_NOT_STAGED",
+            // Shared with `ValidateError::FlushPartial` (the F5 wrapper over
+            // this same condition): one agent-facing code, by plan.
+            Self::Vfs(VfsError::FlushPartial { .. }) => "E_FLUSH_PARTIAL",
             Self::Parse(ParseError::NoGrammarForLang { .. }) => "E_PARSE_NO_GRAMMAR_FOR_LANG",
             Self::Parse(ParseError::LanguageMismatch { .. }) => "E_PARSE_LANGUAGE_MISMATCH",
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
@@ -182,6 +185,7 @@ impl JanitorError {
             Self::Vfs(VfsError::InvalidUtf8 { path }) => {
                 Some(serde_json::json!({ "path": path, "encoding": "utf-8" }))
             }
+            Self::Vfs(VfsError::FlushPartial { report }) => serde_json::to_value(report).ok(),
             Self::Dsl(DslError::Lex { pos, expected }) => {
                 Some(serde_json::json!({ "position": pos, "expected": expected }))
             }
@@ -247,6 +251,13 @@ mod tests {
             (
                 VfsError::NotStaged { path: "p".into() }.into(),
                 "E_VFS_NOT_STAGED",
+            ),
+            (
+                VfsError::FlushPartial {
+                    report: crate::vfs::FlushReport::default(),
+                }
+                .into(),
+                "E_FLUSH_PARTIAL",
             ),
             (
                 EditError::Mismatch {

@@ -12,8 +12,9 @@
 //!   `Tombstone` (ADR-0009), plus per-path generations feeding cache
 //!   invalidation (Rule T4);
 //! - `stat` — the [`Stat`] shape with `is_virtual` (F2.7);
-//! - `txn` (F2.6) — `stage(ops) / commit() / rollback()` with ordered
-//!   tmp+rename flush and an `E_FLUSH_PARTIAL` report on partial OS failure.
+//! - `txn` — [`Transaction`]: `stage(ops) / commit() / rollback()` with
+//!   ordered tmp+rename flush and an `E_FLUSH_PARTIAL` report on partial OS
+//!   failure (F2.6).
 //!
 //! The four mandated invariants (each with a named test below, per the
 //! founding F2 requirement that they live *in this file*): read-through,
@@ -28,6 +29,7 @@ mod fs;
 mod overlay;
 mod path;
 mod stat;
+mod txn;
 
 // The facade exists for the F3-F5 consumers (parse cache keys, scan walk,
 // apply loop); until then only `VfsError` has an outside reader.
@@ -36,11 +38,13 @@ pub use error::{VfsError, VfsResult};
 #[allow(unused_imports)]
 pub use fs::{DirEntry, Os, ProjectFs, ReadDirSnapshot};
 #[allow(unused_imports)]
-pub use overlay::{BufferEntry, Overlay};
+pub use overlay::{BufferEntry, Generation, Overlay};
 #[allow(unused_imports)]
 pub use path::VfsPath;
 #[allow(unused_imports)]
 pub use stat::Stat;
+#[allow(unused_imports)]
+pub use txn::{CommitReport, FlushFailure, FlushReport, Transaction, TxnOp};
 
 #[cfg(test)]
 pub(crate) mod test_util {

@@ -37,4 +37,13 @@ pub enum VfsError {
     /// a caller bug, not a missing file.
     #[error("path not staged in the overlay buffer: {path}")]
     NotStaged { path: String },
+    /// A transaction flush persisted only part of the staged set. The
+    /// per-file report lists persisted vs. rolled-back paths — honest
+    /// reporting, never silent partial state (PLAN §1.3). Carries the frozen
+    /// `E_FLUSH_PARTIAL` code, shared with the F5 `ValidateError` wrapper
+    /// over this same condition.
+    #[error("flush partially persisted: {} file operation(s) failed", report.failures.len())]
+    FlushPartial {
+        report: crate::vfs::txn::FlushReport,
+    },
 }

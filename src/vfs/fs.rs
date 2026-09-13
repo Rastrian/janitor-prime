@@ -7,6 +7,7 @@
 //! never through the read trait the overlay virtualizes.
 use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -81,6 +82,43 @@ impl Os {
                 path: shown,
                 message: err.to_string(),
             },
+        }
+    }
+
+    /// Persist `bytes` at `path` via a sibling tmp file + rename — the same
+    /// discipline ADR-0016 (8) fixes for `STATE.json`: readers see either the
+    /// old or the new whole file, never a torn one. Crash-durability fsync
+    /// is deliberately out of scope for v0.1 (no journal; the txn reports
+    /// honestly instead, PLAN §7). Single-writer assumption: the tmp name is
+    /// deterministic, so concurrent writers to one path would race.
+    pub fn write_atomic(&self, path: &Path, bytes: &[u8]) -> VfsResult<()> {
+        let name = path.file_name().ok_or_else(|| VfsError::InvalidPath {
+            path: path.display().to_string(),
+        })?;
+        let tmp = path.with_file_name(format!("{}.janitor-tmp", name.to_string_lossy()));
+        let write = || -> io::Result<()> {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(bytes)?;
+            drop(file);
+            fs::rename(&tmp, path)
+        };
+        match write() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Best-effort cleanup; the typed error is the report.
+                let _ = fs::remove_file(&tmp);
+                Err(Self::map_io(err, path))
+            }
+        }
+    }
+
+    /// Remove `path` from disk. A path that is already gone is success
+    /// (committing a tombstone over a never-persisted file is idempotent).
+    pub fn remove_file(&self, path: &Path) -> VfsResult<()> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(Self::map_io(err, path)),
         }
     }
 }
