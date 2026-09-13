@@ -1,0 +1,120 @@
+# Continuous integration (PLAN §3 F0.5).
+#
+# gates      — fmt + clippy (-D warnings; default and --all-features) + test
+#              + no-default-features build, on the MSRV (1.90.0) and stable.
+# pin-check  — the ABI fence (PLAN F0.6 / KP-5 / ADR-0015 / R1): lang-all
+#              build against tree-sitter 0.27.0, plus a --version envelope
+#              assertion so the embedded grammar list is exercised for real.
+# musl-smoke — best-effort static musl build: cargo-zigbuild preferred,
+#              musl-gcc fallback (decision recorded in PLAN Appendix A.5);
+#              continue-on-error per F0.5.
+#
+# Supply chain: all third-party actions pinned by commit SHA (PLAN §10).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: gates (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.90.0", "stable"]
+    env:
+      # Takes precedence over rust-toolchain.toml (which pins 1.98.0 for
+      # local dev) so each leg tests the toolchain it claims.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - name: Checkout (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Toolchain (dtolnay/rust-toolchain@master)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - name: Cache (Swatinem/rust-cache v2.9.2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (all features = lang-all)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test
+      - name: build with no default features
+        run: cargo build --no-default-features
+
+  pin-check:
+    name: lang-all ABI pin-check (KP-5 fence)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Toolchain (dtolnay/rust-toolchain@master)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+      - name: Cache (Swatinem/rust-cache v2.9.2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Build all grammars against tree-sitter 0.27.0
+        run: cargo build --features lang-all
+      - name: "--version envelope lists all seven grammars"
+        run: |
+          ./target/debug/janitor --version | jq -e '
+            .schema == "janitor.v1"
+            and .ok == true
+            and .data.grammars == ["rust","python","go","javascript","typescript","java","c"]
+          '
+
+  musl-smoke:
+    name: musl static build smoke (best-effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Toolchain (dtolnay/rust-toolchain@master)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - name: Cache (Swatinem/rust-cache v2.9.2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: cargo-zigbuild (preferred)
+        id: zigbuild
+        run: |
+          python3 -m pip install ziglang
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild --release --target x86_64-unknown-linux-musl --features lang-all
+      - name: musl-gcc fallback
+        if: ${{ failure() && steps.zigbuild.outcome == 'failure' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo build --release --target x86_64-unknown-linux-musl --features lang-all
+      - name: "Smoke: static binary emits the envelope"
+        run: |
+          file target/x86_64-unknown-linux-musl/release/janitor
+          target/x86_64-unknown-linux-musl/release/janitor --version \
+            | jq -e '.schema == "janitor.v1" and .ok == true'
