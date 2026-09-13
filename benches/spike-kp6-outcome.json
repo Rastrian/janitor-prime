@@ -1,0 +1,58 @@
+{
+  "curated": [
+    {
+      "pattern": "let-statement-adjacency",
+      "strict": 1,
+      "skip": 2
+    },
+    {
+      "pattern": "match-arm-adjacency",
+      "strict": 1,
+      "skip": 2
+    },
+    {
+      "pattern": "attribute-on-item",
+      "strict": 0,
+      "skip": 1
+    },
+    {
+      "pattern": "method-chain-link",
+      "strict": 2,
+      "skip": 3
+    },
+    {
+      "pattern": "if-else-adjacency",
+      "strict": 1,
+      "skip": 2
+    }
+  ],
+  "repo_files": 16,
+  "repo_bytes": 109071,
+  "repo": [
+    {
+      "pattern": "let-statement-adjacency",
+      "strict": 114,
+      "skip": 124
+    },
+    {
+      "pattern": "match-arm-adjacency",
+      "strict": 37,
+      "skip": 37
+    },
+    {
+      "pattern": "attribute-on-item",
+      "strict": 11,
+      "skip": 11
+    },
+    {
+      "pattern": "method-chain-link",
+      "strict": 175,
+      "skip": 175
+    },
+    {
+      "pattern": "if-else-adjacency",
+      "strict": 11,
+      "skip": 11
+    }
+  ]
+}
