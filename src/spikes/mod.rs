@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod incremental_reparse;
+pub mod parse_latency;
 pub mod point_semantics;
 pub mod trivia_corpus;
 pub mod validity_gate;

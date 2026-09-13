@@ -1,0 +1,43 @@
+{
+  "repo_url": "https://github.com/rust-lang/rust-analyzer",
+  "machine": {
+    "cpu_model": "Intel(R) Xeon(R) CPU E31270 @ 3.40GHz",
+    "cores": 8,
+    "mem_total_kib": 32801212
+  },
+  "clone_secs": 3.180700467,
+  "files": 1484,
+  "bytes_total": 17460517,
+  "wall_secs": 2.208762033,
+  "files_per_sec": 671.8695712024672,
+  "mb_per_sec": 7.538904764429508,
+  "files_with_error_nodes": 274,
+  "peak_rss_kib": 15680,
+  "slowest": [
+    {
+      "path": "/tmp/janitor-kp10-61523/crates/syntax/src/ast/generated/nodes.rs",
+      "bytes": 348942,
+      "micros": 61987
+    },
+    {
+      "path": "/tmp/janitor-kp10-61523/crates/ide-db/src/generated/lints.rs",
+      "bytes": 738072,
+      "micros": 49357
+    },
+    {
+      "path": "/tmp/janitor-kp10-61523/crates/hir/src/lib.rs",
+      "bytes": 230001,
+      "micros": 39431
+    },
+    {
+      "path": "/tmp/janitor-kp10-61523/crates/rust-analyzer/src/config.rs",
+      "bytes": 181653,
+      "micros": 20572
+    },
+    {
+      "path": "/tmp/janitor-kp10-61523/crates/hir-def/src/expr_store/lower.rs",
+      "bytes": 158828,
+      "micros": 19871
+    }
+  ]
+}
