@@ -10,8 +10,12 @@
 //! - `ast` — the parse layer over tree-sitter (F3): ffi boundary, language
 //!   registry, snapshot parsing with the guarded edit/re-parse
 //!   choreography, the generation-keyed cache, error counting, pooled
-//!   traversal; the DSL and evaluator are F4;
-//! - `memory`, `orchestrator` — typed skeletons for F6/F4.
+//!   traversal — plus the F4 DSL, compiler, scoped-NFA evaluator, and
+//!   match-set layer;
+//! - `scan` — the F4 vertical slice's orchestrator: walk, skip policy,
+//!   rayon match, canonical janitor.v1 report;
+//! - `memory`, `orchestrator` — `memory` is a typed skeleton for F6;
+//!   `orchestrator` is the F4 `Session` composition root.
 //!
 //! Hard rules in force from F0 (PLAN §1.1): no `unwrap`/`expect`/`panic`
 //! in production code (clippy-denied; tests exempt), stdout is 100% JSON
@@ -27,6 +31,7 @@ pub mod envelope;
 pub mod error;
 pub mod memory;
 pub mod orchestrator;
+pub mod scan;
 #[cfg(feature = "spikes")]
 pub mod spikes;
 pub mod vfs;

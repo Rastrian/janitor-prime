@@ -59,7 +59,15 @@ pub enum DslError {
         suggestion: Option<String>,
     },
     #[error("unknown node kind {kind:?} for language {lang:?}")]
-    UnknownKind { lang: String, kind: String },
+    UnknownKind {
+        lang: String,
+        kind: String,
+        /// Nearest known kind name when one is close (F4: the agent-retry
+        /// surface docs/DSL.md §7 contracts; absent when nothing is close).
+        /// Only this field was appended to the F3 skeleton — the envelope's
+        /// `details` grows by key, never renames.
+        suggestion: Option<String>,
+    },
     #[error("rule failed to compile: {message}")]
     Compile { message: String },
     /// ADR-0016: `unify` is v0.2 (F8); a rule using it fails rule-compile
@@ -222,8 +230,20 @@ impl JanitorError {
                 "expected": expected,
                 "suggestion": suggestion,
             })),
-            Self::Dsl(DslError::UnknownKind { lang, kind }) => {
-                Some(serde_json::json!({ "lang": lang, "kind": kind }))
+            Self::Dsl(DslError::UnknownKind {
+                lang,
+                kind,
+                suggestion,
+            }) => {
+                // `suggestion` appears only when one exists (append-only key).
+                let mut details = serde_json::json!({ "lang": lang, "kind": kind });
+                if let Some(hint) = suggestion {
+                    details["suggestion"] = serde_json::json!(hint);
+                }
+                Some(details)
+            }
+            Self::Dsl(DslError::UnsupportedVersion { feature, version }) => {
+                Some(serde_json::json!({ "feature": feature, "version": version }))
             }
             Self::Edit(EditError::StaleView { path, expected_sha }) => {
                 Some(serde_json::json!({ "path": path, "expected_sha": expected_sha }))

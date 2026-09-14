@@ -29,7 +29,7 @@ use crate::error::{DslError, ParseError};
 
 /// Index into a [`LangRegistry`]; handed out only by the registry itself, so
 /// it is always in range for the registry that minted it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LangId(usize);
 
 /// One enabled language: its grammar, its file extensions, and the bundled
@@ -39,6 +39,10 @@ pub struct LangSpec {
     extensions: &'static [&'static str],
     language: Language,
     fixture: &'static str,
+    /// Comment-class kind names excluded from `Seq` adjacency by default
+    /// (ADR-0010; the KP-6-pinned rust table plus the seeded v0.1 tables
+    /// for the other grammars — full conformance lands at F9).
+    trivia: &'static [&'static str],
 }
 
 impl LangSpec {
@@ -55,6 +59,12 @@ impl LangSpec {
     /// The registered grammar.
     pub fn language(&self) -> &Language {
         &self.language
+    }
+
+    /// Comment-class kind names for ADR-0010's default adjacency
+    /// (docs/DSL.md §5 carries the same table).
+    pub fn trivia_kinds(&self) -> &'static [&'static str] {
+        self.trivia
     }
 }
 
@@ -80,6 +90,12 @@ impl KindTable {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+
+    /// Iterate every id↔name pair (compile-time suggestions; deterministic
+    /// order is not required, only coverage of the grammar's symbol table).
+    pub fn iter(&self) -> impl Iterator<Item = (&u16, &SmolStr)> {
+        self.names.iter()
+    }
 }
 
 /// The registry of every grammar the build enabled (ADR-0015: one cargo
@@ -104,6 +120,7 @@ impl LangRegistry {
             extensions: &["rs"],
             language: ffi_shim::rust_language(),
             fixture: include_str!("lang/fixtures/rust.rs"),
+            trivia: &["line_comment", "block_comment"],
         });
         #[cfg(feature = "lang-python")]
         specs.push(LangSpec {
@@ -111,6 +128,7 @@ impl LangRegistry {
             extensions: &["py", "pyi"],
             language: ffi_shim::python_language(),
             fixture: include_str!("lang/fixtures/python.py"),
+            trivia: &["comment"],
         });
         #[cfg(feature = "lang-go")]
         specs.push(LangSpec {
@@ -118,6 +136,7 @@ impl LangRegistry {
             extensions: &["go"],
             language: ffi_shim::go_language(),
             fixture: include_str!("lang/fixtures/go.go"),
+            trivia: &["comment"],
         });
         #[cfg(feature = "lang-javascript")]
         specs.push(LangSpec {
@@ -125,6 +144,7 @@ impl LangRegistry {
             extensions: &["js", "jsx", "mjs", "cjs"],
             language: ffi_shim::javascript_language(),
             fixture: include_str!("lang/fixtures/javascript.js"),
+            trivia: &["comment"],
         });
         #[cfg(feature = "lang-typescript")]
         specs.push(LangSpec {
@@ -132,6 +152,7 @@ impl LangRegistry {
             extensions: &["ts", "tsx"],
             language: ffi_shim::typescript_language(),
             fixture: include_str!("lang/fixtures/typescript.ts"),
+            trivia: &["comment"],
         });
         #[cfg(feature = "lang-java")]
         specs.push(LangSpec {
@@ -139,6 +160,7 @@ impl LangRegistry {
             extensions: &["java"],
             language: ffi_shim::java_language(),
             fixture: include_str!("lang/fixtures/java.java"),
+            trivia: &["line_comment", "block_comment"],
         });
         #[cfg(feature = "lang-c")]
         specs.push(LangSpec {
@@ -146,6 +168,7 @@ impl LangRegistry {
             extensions: &["c", "h"],
             language: ffi_shim::c_language(),
             fixture: include_str!("lang/fixtures/c.c"),
+            trivia: &["comment"],
         });
         let kind_tables = specs.iter().map(|_| OnceLock::new()).collect();
         Self { specs, kind_tables }
@@ -164,6 +187,13 @@ impl LangRegistry {
     /// The spec for `id`, if this registry minted it.
     pub fn spec(&self, id: LangId) -> Option<&LangSpec> {
         self.specs.get(id.0)
+    }
+
+    /// Every enabled language's id, in canonical registry order — the only
+    /// way outside this module to enumerate the enabled set (ids are minted
+    /// here and nowhere else).
+    pub fn ids(&self) -> impl Iterator<Item = LangId> {
+        (0..self.specs.len()).map(LangId)
     }
 
     /// Resolve a file extension (case-insensitive) to its language.
@@ -214,6 +244,7 @@ impl LangRegistry {
         self.kind_id(id, kind).ok_or_else(|| DslError::UnknownKind {
             lang: self.name(id).unwrap_or("<unknown>").to_owned(),
             kind: kind.to_owned(),
+            suggestion: None,
         })
     }
 

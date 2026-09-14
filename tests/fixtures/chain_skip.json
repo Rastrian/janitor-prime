@@ -1,0 +1,7 @@
+{
+  "rule": "(under field_expression (seq (kind call_expression) (kind field_identifier)))",
+  "file": "chain.rs",
+  "lang": "rust",
+  "trivia": "skip",
+  "count": 3
+}
