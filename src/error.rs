@@ -30,6 +30,11 @@ pub enum ParseError {
     /// silently — the caller must take exclusive ownership first.
     #[error("refusing to edit a shared tree: Arc::strong_count == {count}")]
     SharedTree { count: usize },
+    /// Priming a parser with a registered grammar failed at runtime (the
+    /// KP-5 ABI fence's runtime leg; build-time drift is CI `pin-check`'s
+    /// job, this catches the rest loudly).
+    #[error("parser setup failed for {lang:?}: {message}")]
+    Setup { lang: String, message: String },
 }
 
 /// DSL front-end and rule-compile errors (PLAN §1.4.1, F4).
@@ -155,6 +160,7 @@ impl JanitorError {
             Self::Parse(ParseError::LanguageMismatch { .. }) => "E_PARSE_LANGUAGE_MISMATCH",
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
             Self::Parse(ParseError::SharedTree { .. }) => "E_PARSE_SHARED_TREE",
+            Self::Parse(ParseError::Setup { .. }) => "E_PARSE_SETUP",
             Self::Dsl(DslError::Lex { .. }) => "E_DSL_LEX",
             Self::Dsl(DslError::Parse { .. }) => "E_DSL_PARSE",
             Self::Dsl(DslError::UnknownKind { .. }) => "E_DSL_UNKNOWN_KIND",
@@ -218,6 +224,9 @@ impl JanitorError {
             }
             Self::Parse(ParseError::SharedTree { count }) => {
                 Some(serde_json::json!({ "strong_count": count }))
+            }
+            Self::Parse(ParseError::Setup { lang, message }) => {
+                Some(serde_json::json!({ "lang": lang, "message": message }))
             }
             Self::Validate(ValidateError::FlushPartial { report, .. }) => Some(report.clone()),
             Self::Memory(MemoryError::PointerDangling { path, span }) => {
@@ -363,6 +372,17 @@ mod tests {
         assert_eq!(
             err.details(),
             Some(serde_json::json!({ "strong_count": 2 }))
+        );
+
+        let err: JanitorError = ParseError::Setup {
+            lang: "rust".into(),
+            message: "version mismatch".into(),
+        }
+        .into();
+        assert_eq!(err.code(), "E_PARSE_SETUP");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "lang": "rust", "message": "version mismatch" }))
         );
     }
 }

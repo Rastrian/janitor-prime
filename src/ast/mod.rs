@@ -11,6 +11,7 @@
 //! through `ffi_shim`'s re-exports — pinned by the fence test below, so a
 //! future core pin-swap is a one-file edit by construction, not by hope.
 pub mod ffi_shim;
+pub mod lang;
 pub mod send_assert;
 
 // TODO(F3): lang registry, parse layer, generation-keyed ParseCache.
