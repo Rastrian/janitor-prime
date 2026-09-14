@@ -1,15 +1,19 @@
-//! KP-8 fence, F3 walk leg (PLAN §5 KP-8, §3 F3.6): the pooled-cursor
-//! traversal's allocation budget, asserted with a counting global allocator.
+//! KP-8 fence (PLAN §5 KP-8; F3 walk leg at §3 F3.6, re-anchored onto the
+//! F4 matcher by eval-2 amendment 7): the allocation budget of the
+//! pooled-cursor traversal **and** the scoped-NFA matcher, asserted with a
+//! counting global allocator.
 //!
-//! **Budget (measured 2026-09-13, rustc 1.98.0, tree-sitter 0.27.0):** a
+//! **Budget (measured 2026-09-13/14, rustc 1.98.0, tree-sitter 0.27.0):** a
 //! steady-state traversal of a warmed `CursorPool` over a ~2.7k-node tree
 //! performs **0** heap allocation events — cursors and stack storage are
 //! recycled through the pool, and the result vector is pre-reserved. The
-//! assertion carries a small explicit allowance (8) rather than a hard zero
-//! so stray harness noise on a busy CI runner cannot flake the fence; the
-//! *meaningful* bound is structural: a per-node leak would allocate
-//! thousands of events here, not single digits. F4 re-arms this fence on
-//! the matcher itself (eval-2 amendment 7) and tightens it there.
+//! F4 leg holds the matcher to the same standard: warmed pools (node
+//! buffer, DP frames, child cursors, scope cache) make a full match of the
+//! same tree allocate **0** events beyond the pre-reserved result vector.
+//! The assertions carry a small explicit allowance (8) rather than a hard
+//! zero so stray harness noise on a busy CI runner cannot flake the fence;
+//! the *meaningful* bound is structural: a per-node leak would allocate
+//! thousands of events here, not single digits.
 //!
 //! `#[global_allocator]` requires an `unsafe impl GlobalAlloc` — the one
 //! piece of unsafe in this repository, confined to this test binary and
@@ -156,6 +160,78 @@ fn pooled_traversal_steady_state_allocates_nothing_per_node() {
         "steady-state traversal allocated {best} times (measured 0 locally; \
          budget {ALLOWANCE}, see module docs)"
     );
+}
+
+/// The KP-8 F4 leg (eval-2 amendment 7): the fence re-anchored onto the
+/// matcher itself. After one warmup run fills the matcher's pools (node
+/// buffer, depth-pooled DP frames, child cursors, scope cache), repeated
+/// full matches of the same tree must allocate **nothing per visited
+/// node** — the only growing allocations allowed are the *result vectors*
+/// (the reports out-buffer, pre-reserved by warmup, and each report's
+/// captures, which this capture-free pattern keeps at zero). A per-node
+/// leak in the matcher would allocate thousands of events here, not
+/// single digits.
+#[test]
+#[cfg(feature = "lang-rust")]
+fn matcher_steady_state_allocates_nothing_per_node() {
+    use janitor_prime::ast::compile::{TriviaPolicy, compile_rule};
+    use janitor_prime::ast::dsl::parse_rule;
+    use janitor_prime::ast::eval::{MatchReport, Matcher};
+
+    let registry = LangRegistry::new();
+    let id: LangId = registry
+        .for_extension("rs")
+        .expect("this test binary builds with lang-rust");
+    let rule = parse_rule("(under block (seq (kind let_declaration) (kind let_declaration)))")
+        .expect("fence rule parses");
+    let program =
+        compile_rule(&rule, &registry, id, TriviaPolicy::Skip).expect("fence rule compiles");
+    let tree = parsed_corpus();
+    let path = smol_path("fence.rs");
+
+    let mut matcher = Matcher::new(&program, &tree, 0);
+    let mut reports: Vec<MatchReport> = Vec::new();
+
+    // Warmup: fills every pool to this tree's maxima and reserves the
+    // reports vector to its steady size.
+    matcher
+        .matches(&path, &mut reports)
+        .expect("warmup match runs");
+    assert!(
+        !reports.is_empty(),
+        "the corpus must match the adjacency rule for the fence to bite"
+    );
+    let steady_len = reports.len();
+
+    let mut best = usize::MAX;
+    for _ in 0..8 {
+        reports.clear();
+        ALLOC_EVENTS.store(0, Ordering::Relaxed);
+        matcher.matches(&path, &mut reports).expect("match runs");
+        best = best.min(ALLOC_EVENTS.load(Ordering::Relaxed));
+        assert_eq!(
+            reports.len(),
+            steady_len,
+            "every run of the same tree yields the same match set"
+        );
+        assert!(
+            reports.iter().all(|r| r.captures.is_empty()),
+            "capture-free pattern: no per-report capture vectors"
+        );
+    }
+
+    assert!(
+        best <= ALLOWANCE,
+        "steady-state matcher allocated {best} times across a whole run \
+         (measured 0 locally; budget {ALLOWANCE}, see module docs)"
+    );
+}
+
+/// An inline `SmolStr` path — short paths never touch the heap, keeping
+/// per-report path clones out of the allocation budget.
+#[cfg(feature = "lang-rust")]
+fn smol_path(name: &str) -> smol_str::SmolStr {
+    smol_str::SmolStr::from(name)
 }
 
 /// The counting allocator is genuinely installed in this binary (startup

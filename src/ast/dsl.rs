@@ -471,8 +471,8 @@ fn did_you_mean(input: &str) -> Option<&'static str> {
 }
 
 /// Plain two-row Levenshtein distance (no dependency; bounded input — rule
-/// text is small).
-fn edit_distance(a: &str, b: &str) -> usize {
+/// text is small). Shared with `compile`'s nearest-kind suggestions.
+pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
     let b_chars: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
     let mut curr = vec![0_usize; b_chars.len() + 1];
