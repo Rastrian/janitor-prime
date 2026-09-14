@@ -24,9 +24,6 @@
 //! the F5 apply loop's job; this primitive is the single-edit core it folds
 //! over. `child_count()` being `u32` in 0.27 (A.3.5) is invisible here: the
 //! choreography only ever deals in byte offsets and trees.
-#![allow(dead_code)] // scaffold: the F3.4 cache and the F4 scan are the
-// production consumers; the bin crate has no live root for them until the
-// lib target (F3.6) — same precedent as src/vfs.rs at F2.
 
 use std::sync::Arc;
 

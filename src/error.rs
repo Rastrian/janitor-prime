@@ -5,8 +5,6 @@
 //! and are frozen from F0 onward. Payloads are typed skeletons: placeholder
 //! `serde_json::Value` fields marked `TODO(...)` become their real report
 //! types when the owning phase lands, without touching the code names.
-#![allow(dead_code)] // scaffold: variants are constructed from F2+; the frozen
-// E_* surface is the deliverable of F0 (PLAN §1.7)
 
 use serde_json::Value;
 use thiserror::Error;

@@ -17,13 +17,11 @@
 //!
 //! Reports are plain copied values (Rule T4a): no `Node` handles cross the
 //! work item, nothing outlives its `Arc<Tree>`.
-#![allow(dead_code)] // scaffold: F5's apply gate and E_PARSE_INVALID payload
-// are the production consumers of the report queries; the bin crate has no
-// live root until the lib target (F3.6) — same precedent as src/vfs.rs.
 
 use std::ops::Range;
 
 use crate::ast::ffi_shim::{Node, Point};
+use crate::ast::walk::CursorPool;
 
 /// One ERROR or MISSING node, as copied values (Rule T4a) — the
 /// `E_PARSE_INVALID` payload shape for F5.
@@ -72,25 +70,22 @@ pub fn errors_in_range(root: Node<'_>, range: Range<usize>) -> Vec<ErrorReport> 
         .collect()
 }
 
-/// Walk `node`, collecting ERROR/MISSING nodes as plain values. Recursion
-/// only enters subtrees whose `has_error` flag is set, and depth is bounded
-/// by the grammar's recovery nesting; F3.6's pooled traversal takes over
-/// the engine's general walks.
-fn collect_error_reports(node: Node<'_>, out: &mut Vec<ErrorReport>) {
-    if node.is_error() || node.is_missing() {
-        out.push(ErrorReport {
-            kind_id: node.kind_id(),
-            is_missing: node.is_missing(),
-            start_byte: node.start_byte(),
-            end_byte: node.end_byte(),
-            start_point: node.start_position(),
-            end_point: node.end_position(),
-        });
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.has_error() {
-            collect_error_reports(child, out);
+/// Walk the whole tree with the pooled cursors (Rule T5), collecting
+/// ERROR/MISSING nodes as plain values. The `has_error` root gate (the
+/// callers') keeps clean files walk-free; a dirty file pays one
+/// allocation-free traversal.
+fn collect_error_reports(root: Node<'_>, out: &mut Vec<ErrorReport>) {
+    let mut pool = CursorPool::new();
+    for node in pool.dfs(root) {
+        if node.is_error() || node.is_missing() {
+            out.push(ErrorReport {
+                kind_id: node.kind_id(),
+                is_missing: node.is_missing(),
+                start_byte: node.start_byte(),
+                end_byte: node.end_byte(),
+                start_point: node.start_position(),
+                end_point: node.end_position(),
+            });
         }
     }
 }

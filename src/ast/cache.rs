@@ -23,9 +23,6 @@
 //! dashmap×rayon insertion rule (ADR-0016 note 7): workers never hold shard
 //! guards across a `par_iter` join — `get` scopes its guard to the clone
 //! and inserts happen at collection. The race test pins both.
-#![allow(dead_code)] // scaffold: the F4 scan and F5 apply are the production
-// consumers; the bin crate has no live root until the lib target (F3.6) —
-// same precedent as src/vfs.rs at F2.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

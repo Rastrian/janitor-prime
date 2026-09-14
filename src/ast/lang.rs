@@ -18,10 +18,6 @@
 //!
 //! One parser per language per worker is the §1.2 ownership-map shape;
 //! [`LangRegistry::parser`] is the factory the F4 scan pool will draw from.
-#![allow(dead_code)] // F3.2 delivers the tested surface; the parse layer
-// (F3.3+) and the F4 scan are the production consumers — the same scaffold
-// precedent as `src/vfs.rs` at F2.
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;

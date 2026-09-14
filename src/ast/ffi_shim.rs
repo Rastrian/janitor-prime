@@ -32,11 +32,6 @@
 //!
 //! No `unsafe` will ever live in janitor code (Rule T6): all C pointer
 //! management stays inside the upstream crate.
-// Scaffold: every fn here has an in-crate production caller from F3.2/F3.3
-// on, but until the lib target lands (F3.6) the bin crate has no live root
-// for them; the allow dies with the lib split.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use crate::error::ParseError;
@@ -44,10 +39,6 @@ use crate::error::ParseError;
 /// The tree-sitter surface the rest of `src/ast` is allowed to name. Re-exported
 /// here (not used directly elsewhere) so a core pin-swap re-types the whole
 /// engine from this file (ADR-0015 / R22; fence test in `src/ast/mod.rs`).
-// `Node`/`TreeCursor` gain their first in-crate consumers with F3.2 (fixture
-// kind collection) and F3.6 (pooled walk); until the lib target exists every
-// `pub use` here is dead to the compiler even though it is the contract.
-#[allow(unused_imports)]
 pub use tree_sitter::{InputEdit, Language, Node, Parser, Point, Tree, TreeCursor};
 
 // --- grammar registration (one fn per enabled cargo feature) ----------------

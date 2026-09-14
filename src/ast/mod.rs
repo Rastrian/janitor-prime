@@ -16,8 +16,8 @@ pub mod ffi_shim;
 pub mod lang;
 pub mod parse;
 pub mod send_assert;
+pub mod walk;
 
-// TODO(F3): pooled walk.
 // TODO(F4): s-expression DSL, scoped state-machine evaluator, exec.
 
 #[cfg(test)]
