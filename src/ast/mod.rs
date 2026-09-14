@@ -12,9 +12,10 @@
 //! future core pin-swap is a one-file edit by construction, not by hope.
 pub mod ffi_shim;
 pub mod lang;
+pub mod parse;
 pub mod send_assert;
 
-// TODO(F3): lang registry, parse layer, generation-keyed ParseCache.
+// TODO(F3): generation-keyed ParseCache, error counting, pooled walk.
 // TODO(F4): s-expression DSL, scoped state-machine evaluator, exec.
 
 #[cfg(test)]

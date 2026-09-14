@@ -32,9 +32,9 @@
 //!
 //! No `unsafe` will ever live in janitor code (Rule T6): all C pointer
 //! management stays inside the upstream crate.
-// Transient (same scaffold precedent as F0/F1): F3.2's registry takes the
-// language constructors and the fixture-seeding parse; F3.3's choreography
-// takes the snapshot parse, edit math and guard. The allow is deleted then.
+// Scaffold: every fn here has an in-crate production caller from F3.2/F3.3
+// on, but until the lib target lands (F3.6) the bin crate has no live root
+// for them; the allow dies with the lib split.
 #![allow(dead_code)]
 
 use std::sync::Arc;

@@ -35,6 +35,18 @@ pub enum ParseError {
     /// job, this catches the rest loudly).
     #[error("parser setup failed for {lang:?}: {message}")]
     Setup { lang: String, message: String },
+    /// The C parse boundary returned no tree (e.g. a cancelled parse).
+    #[error("parse returned no tree ({detail})")]
+    NoTree { detail: String },
+    /// §1.2.1 step 2's structural half: an edit range that is inverted or
+    /// beyond the old bytes. The expected-bytes half is F5's payload
+    /// validation (`E_EDIT_MISMATCH`).
+    #[error("edit range [{start}, {old_end}) is invalid for {len}-byte source")]
+    EditRange {
+        start: usize,
+        old_end: usize,
+        len: usize,
+    },
 }
 
 /// DSL front-end and rule-compile errors (PLAN §1.4.1, F4).
@@ -161,6 +173,8 @@ impl JanitorError {
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
             Self::Parse(ParseError::SharedTree { .. }) => "E_PARSE_SHARED_TREE",
             Self::Parse(ParseError::Setup { .. }) => "E_PARSE_SETUP",
+            Self::Parse(ParseError::NoTree { .. }) => "E_PARSE_NO_TREE",
+            Self::Parse(ParseError::EditRange { .. }) => "E_PARSE_EDIT_RANGE",
             Self::Dsl(DslError::Lex { .. }) => "E_DSL_LEX",
             Self::Dsl(DslError::Parse { .. }) => "E_DSL_PARSE",
             Self::Dsl(DslError::UnknownKind { .. }) => "E_DSL_UNKNOWN_KIND",
@@ -228,6 +242,11 @@ impl JanitorError {
             Self::Parse(ParseError::Setup { lang, message }) => {
                 Some(serde_json::json!({ "lang": lang, "message": message }))
             }
+            Self::Parse(ParseError::EditRange {
+                start,
+                old_end,
+                len,
+            }) => Some(serde_json::json!({ "start": start, "old_end": old_end, "len": len })),
             Self::Validate(ValidateError::FlushPartial { report, .. }) => Some(report.clone()),
             Self::Memory(MemoryError::PointerDangling { path, span }) => {
                 Some(serde_json::json!({ "path": path, "span": [span.0, span.1] }))
@@ -383,6 +402,18 @@ mod tests {
         assert_eq!(
             err.details(),
             Some(serde_json::json!({ "lang": "rust", "message": "version mismatch" }))
+        );
+
+        let err: JanitorError = ParseError::EditRange {
+            start: 9,
+            old_end: 3,
+            len: 12,
+        }
+        .into();
+        assert_eq!(err.code(), "E_PARSE_EDIT_RANGE");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "start": 9, "old_end": 3, "len": 12 }))
         );
     }
 }
