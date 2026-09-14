@@ -29,7 +29,7 @@ use crate::error::{DslError, ParseError};
 
 /// Index into a [`LangRegistry`]; handed out only by the registry itself, so
 /// it is always in range for the registry that minted it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LangId(usize);
 
 /// One enabled language: its grammar, its file extensions, and the bundled

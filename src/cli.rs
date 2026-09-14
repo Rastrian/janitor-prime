@@ -10,6 +10,7 @@ use clap::Parser;
 use clap::error::ErrorKind;
 use serde::Serialize;
 use serde_json::Value;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::envelope::{self, Envelope};
@@ -48,6 +49,50 @@ pub struct Cli {
     /// Pretty-print the JSON envelope (stdout stays JSON either way).
     #[arg(long)]
     pub pretty: bool,
+
+    /// The command to run (F4 wires `scan`; apply lands at F5, the memory
+    /// commands at F6).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// The command set (PLAN §1.6) — growing by phase, superflat and
+/// agent-friendly.
+#[derive(Debug, Parser)]
+pub enum Command {
+    /// Parallel structural search: rule in, match coordinates out
+    /// (see docs/DSL.md for the rule language and the report shape).
+    #[command(verbatim_doc_comment)]
+    Scan(ScanArgs),
+}
+
+/// `janitor scan` (PLAN §3 F4.7, docs/DSL.md §8).
+#[derive(Debug, Parser)]
+pub struct ScanArgs {
+    /// The DSL rule, s-expression form (docs/DSL.md). Required.
+    #[arg(long)]
+    pub rule: String,
+
+    /// Scan root (default: the current directory).
+    pub path: Option<PathBuf>,
+
+    /// Restrict to one canonical language name (e.g. rust); a grammar this
+    /// build does not embed is a typed error.
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// Include overlay-staged virtual files (default OFF: scan reports
+    /// disk reality, ADR-0016).
+    #[arg(long)]
+    pub include_virtual: bool,
+
+    /// Byte-strict Seq adjacency (default: comment-skipping, ADR-0010).
+    #[arg(long)]
+    pub strict_trivia: bool,
+
+    /// Skip files larger than this many bytes (default 4 MiB).
+    #[arg(long, default_value_t = crate::scan::DEFAULT_MAX_FILE_SIZE)]
+    pub max_file_size: u64,
 }
 
 /// Map a clap error onto (envelope, exit code) without emitting it.
@@ -165,5 +210,46 @@ mod tests {
                 .unwrap_or_default()
                 .contains("--version")
         );
+    }
+
+    /// F4: `scan` parses with every flag and its defaults (docs/DSL.md §8);
+    /// the root path is optional; a missing --rule is a usage error.
+    #[test]
+    fn scan_subcommand_parses_with_defaults() {
+        let cli = Cli::try_parse_from(["janitor", "scan", "--rule", "(under block (seq _ _))"])
+            .expect("scan with only --rule");
+        let Command::Scan(args) = cli.command.expect("scan subcommand");
+        assert_eq!(args.rule, "(under block (seq _ _))");
+        assert_eq!(args.path, None);
+        assert_eq!(args.lang, None);
+        assert!(!args.include_virtual);
+        assert!(!args.strict_trivia);
+        assert_eq!(args.max_file_size, crate::scan::DEFAULT_MAX_FILE_SIZE);
+
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "scan",
+            "--rule",
+            "_",
+            "src",
+            "--lang",
+            "rust",
+            "--include-virtual",
+            "--strict-trivia",
+            "--max-file-size",
+            "1024",
+        ])
+        .expect("scan with every flag");
+        let Command::Scan(args) = cli.command.expect("scan subcommand");
+        assert_eq!(args.path.as_deref(), Some(std::path::Path::new("src")));
+        assert_eq!(args.lang.as_deref(), Some("rust"));
+        assert!(args.include_virtual && args.strict_trivia);
+        assert_eq!(args.max_file_size, 1024);
+
+        // --rule is required: usage error envelope, exit 2.
+        let err = Cli::try_parse_from(["janitor", "scan"]).expect_err("--rule is required");
+        let (envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+        assert!(!envelope.ok);
     }
 }
