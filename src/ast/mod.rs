@@ -11,14 +11,16 @@
 //! through `ffi_shim`'s re-exports — pinned by the fence test below, so a
 //! future core pin-swap is a one-file edit by construction, not by hope.
 pub mod cache;
+pub mod dsl;
 pub mod errors;
 pub mod ffi_shim;
 pub mod lang;
 pub mod parse;
+pub mod pattern;
 pub mod send_assert;
 pub mod walk;
 
-// TODO(F4): s-expression DSL, scoped state-machine evaluator, exec.
+// TODO(F4): compile (Pattern → Program), eval (scoped NFA), matchset.
 
 #[cfg(test)]
 mod tests {
