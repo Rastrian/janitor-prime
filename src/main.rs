@@ -1,31 +1,14 @@
-//! janitor-prime: deterministic refactoring engine, transactional VFS and
-//! persistent memory for autonomous agents (PLAN §0).
-//!
-//! F0 scaffold (PLAN §3 F0): crate layout, versioned JSON envelope, error
-//! taxonomy, and `--version` as the only command. The domain modules
-//! (`vfs`, `ast`, `memory`, `orchestrator`) are typed skeletons; their
-//! phases (F2+) fill them in.
-//!
-//! Hard rules in force from this commit (PLAN §1.1): no `unwrap`/`expect`/
-//! `panic` in production code (clippy-denied), stdout is 100% JSON through
-//! the `janitor.v1` envelope, diagnostics go to stderr via `tracing`.
+//! The `janitor` binary: CLI entry point over the `janitor_prime` library
+//! (PLAN §0, §1.6). The library target landed at F3.6 for the integration
+//! tests; this file is intentionally thin — parse arguments, emit the
+//! versioned JSON envelope, exit.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-
-mod ast;
-mod cli;
-mod envelope;
-mod error;
-mod memory;
-mod orchestrator;
-#[cfg(feature = "spikes")]
-mod spikes;
-mod vfs;
 
 use clap::Parser;
 use std::process::ExitCode;
 
-use crate::cli::VersionData;
-use crate::envelope::Envelope;
+use janitor_prime::cli::{self, VersionData};
+use janitor_prime::envelope::{EXIT_SUCCESS, EXIT_USAGE, Envelope};
 
 fn main() -> ExitCode {
     init_diagnostics();
@@ -40,7 +23,7 @@ fn main() -> ExitCode {
             version: env!("CARGO_PKG_VERSION"),
             grammars: cli::ENABLED_GRAMMARS,
         };
-        return cli::emit(&Envelope::ok(data), cli.pretty, envelope::EXIT_SUCCESS);
+        return cli::emit(&Envelope::ok(data), cli.pretty, EXIT_SUCCESS);
     }
 
     // F0: --version is the only command. Anything else is a usage error —
@@ -50,7 +33,7 @@ fn main() -> ExitCode {
         "no command given; this F0 scaffold provides only --version (see --help)",
         None,
     );
-    cli::emit(&usage, cli.pretty, envelope::EXIT_USAGE)
+    cli::emit(&usage, cli.pretty, EXIT_USAGE)
 }
 
 /// stderr-only diagnostics, env-gated via `RUST_LOG` (default: `warn`).

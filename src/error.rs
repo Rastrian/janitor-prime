@@ -5,8 +5,6 @@
 //! and are frozen from F0 onward. Payloads are typed skeletons: placeholder
 //! `serde_json::Value` fields marked `TODO(...)` become their real report
 //! types when the owning phase lands, without touching the code names.
-#![allow(dead_code)] // scaffold: variants are constructed from F2+; the frozen
-// E_* surface is the deliverable of F0 (PLAN §1.7)
 
 use serde_json::Value;
 use thiserror::Error;
@@ -25,6 +23,28 @@ pub enum ParseError {
     LanguageMismatch { expected: String, actual: String },
     #[error("source is not valid UTF-8: {path}")]
     SourceDecoding { path: String },
+    /// Rule T1's exclusivity guard (§1.2.1 step 5, E3(b)): `Tree::edit` was
+    /// attempted while other `Arc<Tree>` handles exist. Never retried
+    /// silently — the caller must take exclusive ownership first.
+    #[error("refusing to edit a shared tree: Arc::strong_count == {count}")]
+    SharedTree { count: usize },
+    /// Priming a parser with a registered grammar failed at runtime (the
+    /// KP-5 ABI fence's runtime leg; build-time drift is CI `pin-check`'s
+    /// job, this catches the rest loudly).
+    #[error("parser setup failed for {lang:?}: {message}")]
+    Setup { lang: String, message: String },
+    /// The C parse boundary returned no tree (e.g. a cancelled parse).
+    #[error("parse returned no tree ({detail})")]
+    NoTree { detail: String },
+    /// §1.2.1 step 2's structural half: an edit range that is inverted or
+    /// beyond the old bytes. The expected-bytes half is F5's payload
+    /// validation (`E_EDIT_MISMATCH`).
+    #[error("edit range [{start}, {old_end}) is invalid for {len}-byte source")]
+    EditRange {
+        start: usize,
+        old_end: usize,
+        len: usize,
+    },
 }
 
 /// DSL front-end and rule-compile errors (PLAN §1.4.1, F4).
@@ -149,6 +169,10 @@ impl JanitorError {
             Self::Parse(ParseError::NoGrammarForLang { .. }) => "E_PARSE_NO_GRAMMAR_FOR_LANG",
             Self::Parse(ParseError::LanguageMismatch { .. }) => "E_PARSE_LANGUAGE_MISMATCH",
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
+            Self::Parse(ParseError::SharedTree { .. }) => "E_PARSE_SHARED_TREE",
+            Self::Parse(ParseError::Setup { .. }) => "E_PARSE_SETUP",
+            Self::Parse(ParseError::NoTree { .. }) => "E_PARSE_NO_TREE",
+            Self::Parse(ParseError::EditRange { .. }) => "E_PARSE_EDIT_RANGE",
             Self::Dsl(DslError::Lex { .. }) => "E_DSL_LEX",
             Self::Dsl(DslError::Parse { .. }) => "E_DSL_PARSE",
             Self::Dsl(DslError::UnknownKind { .. }) => "E_DSL_UNKNOWN_KIND",
@@ -210,6 +234,17 @@ impl JanitorError {
             Self::Validate(ValidateError::ParseInvalid { nodes, .. }) => {
                 Some(serde_json::json!({ "nodes": nodes }))
             }
+            Self::Parse(ParseError::SharedTree { count }) => {
+                Some(serde_json::json!({ "strong_count": count }))
+            }
+            Self::Parse(ParseError::Setup { lang, message }) => {
+                Some(serde_json::json!({ "lang": lang, "message": message }))
+            }
+            Self::Parse(ParseError::EditRange {
+                start,
+                old_end,
+                len,
+            }) => Some(serde_json::json!({ "start": start, "old_end": old_end, "len": len })),
             Self::Validate(ValidateError::FlushPartial { report, .. }) => Some(report.clone()),
             Self::Memory(MemoryError::PointerDangling { path, span }) => {
                 Some(serde_json::json!({ "path": path, "span": [span.0, span.1] }))
@@ -342,5 +377,41 @@ mod tests {
         let err: JanitorError = OutputError::Io("broken pipe".into()).into();
         assert_eq!(err.exit_code(), 1);
         assert_eq!(err.code(), "E_OUTPUT");
+    }
+
+    /// F3 parse-layer additions follow the `E_<DOMAIN>_<VARIANT>` convention
+    /// and carry structured details (the frozen surface grows only by
+    /// append, per the F0 contract note).
+    #[test]
+    fn f3_parse_error_codes_and_details() {
+        let err: JanitorError = ParseError::SharedTree { count: 2 }.into();
+        assert_eq!(err.code(), "E_PARSE_SHARED_TREE");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "strong_count": 2 }))
+        );
+
+        let err: JanitorError = ParseError::Setup {
+            lang: "rust".into(),
+            message: "version mismatch".into(),
+        }
+        .into();
+        assert_eq!(err.code(), "E_PARSE_SETUP");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "lang": "rust", "message": "version mismatch" }))
+        );
+
+        let err: JanitorError = ParseError::EditRange {
+            start: 9,
+            old_end: 3,
+            len: 12,
+        }
+        .into();
+        assert_eq!(err.code(), "E_PARSE_EDIT_RANGE");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "start": 9, "old_end": 3, "len": 12 }))
+        );
     }
 }

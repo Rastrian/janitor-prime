@@ -23,7 +23,6 @@
 //! `virtual_paths()` is the explicit opt-in visibility surface that keeps
 //! the anti-phantom invariant pure while letting `scan --include-virtual`
 //! (default OFF, ADR-0016) union staged files in later, as a separate walk.
-#![allow(dead_code)] // F2 delivers the tested surface; consumers arrive with F3-F5
 mod error;
 mod fs;
 mod overlay;
@@ -31,19 +30,11 @@ mod path;
 mod stat;
 mod txn;
 
-// The facade exists for the F3-F5 consumers (parse cache keys, scan walk,
-// apply loop); until then only `VfsError` has an outside reader.
-#[allow(unused_imports)]
 pub use error::{VfsError, VfsResult};
-#[allow(unused_imports)]
 pub use fs::{DirEntry, Os, ProjectFs, ReadDirSnapshot};
-#[allow(unused_imports)]
 pub use overlay::{BufferEntry, Generation, Overlay};
-#[allow(unused_imports)]
 pub use path::VfsPath;
-#[allow(unused_imports)]
 pub use stat::Stat;
-#[allow(unused_imports)]
 pub use txn::{CommitReport, FlushFailure, FlushReport, Transaction, TxnOp};
 
 #[cfg(test)]
