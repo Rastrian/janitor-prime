@@ -1,0 +1,7 @@
+{
+  "rule": "(under if_expression (seq _ (kind block) (kind else_clause)))",
+  "file": "if_else.rs",
+  "lang": "rust",
+  "trivia": "strict",
+  "count": 1
+}

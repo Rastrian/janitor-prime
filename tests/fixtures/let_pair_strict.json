@@ -1,0 +1,7 @@
+{
+  "rule": "(under block (seq (kind let_declaration) (kind let_declaration)))",
+  "file": "let_pair.rs",
+  "lang": "rust",
+  "trivia": "strict",
+  "texts": ["let a = v;\n    let b = a;"]
+}

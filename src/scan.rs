@@ -274,6 +274,19 @@ pub fn scan(
         });
     }
 
+    // Structural compile checks are file-independent (duplicate capture
+    // symbols, unify refusal) and must fire even when the file set is
+    // empty — a rule that cannot compile never reports success. Probed
+    // against the filter language or the first enabled one; per-language
+    // `UnknownKind` is NOT a failure here (that is the E5 skip path).
+    let probe_lang = allowed.or_else(|| registry.ids().next());
+    if let Some(lang) = probe_lang {
+        match compile::compile_rule(&rule, registry, lang, trivia) {
+            Ok(_) | Err(DslError::UnknownKind { .. }) => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
     // Compile once per language present; `UnknownKind` for a language
     // means its files are skipped and counted (E5) — before any parsing.
     let mut programs: BTreeMap<LangId, Program> = BTreeMap::new();

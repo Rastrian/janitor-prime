@@ -242,6 +242,9 @@ impl JanitorError {
                 }
                 Some(details)
             }
+            Self::Dsl(DslError::UnsupportedVersion { feature, version }) => {
+                Some(serde_json::json!({ "feature": feature, "version": version }))
+            }
             Self::Edit(EditError::StaleView { path, expected_sha }) => {
                 Some(serde_json::json!({ "path": path, "expected_sha": expected_sha }))
             }

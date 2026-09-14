@@ -1,0 +1,8 @@
+{
+  "rule": "(under function_item (seq (capture @name identifier) (kind parameters)))",
+  "file": "fn_capture.rs",
+  "lang": "rust",
+  "trivia": "skip",
+  "count": 2,
+  "captures": ["alpha", "beta"]
+}
