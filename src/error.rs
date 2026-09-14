@@ -25,6 +25,11 @@ pub enum ParseError {
     LanguageMismatch { expected: String, actual: String },
     #[error("source is not valid UTF-8: {path}")]
     SourceDecoding { path: String },
+    /// Rule T1's exclusivity guard (§1.2.1 step 5, E3(b)): `Tree::edit` was
+    /// attempted while other `Arc<Tree>` handles exist. Never retried
+    /// silently — the caller must take exclusive ownership first.
+    #[error("refusing to edit a shared tree: Arc::strong_count == {count}")]
+    SharedTree { count: usize },
 }
 
 /// DSL front-end and rule-compile errors (PLAN §1.4.1, F4).
@@ -149,6 +154,7 @@ impl JanitorError {
             Self::Parse(ParseError::NoGrammarForLang { .. }) => "E_PARSE_NO_GRAMMAR_FOR_LANG",
             Self::Parse(ParseError::LanguageMismatch { .. }) => "E_PARSE_LANGUAGE_MISMATCH",
             Self::Parse(ParseError::SourceDecoding { .. }) => "E_PARSE_SOURCE_DECODING",
+            Self::Parse(ParseError::SharedTree { .. }) => "E_PARSE_SHARED_TREE",
             Self::Dsl(DslError::Lex { .. }) => "E_DSL_LEX",
             Self::Dsl(DslError::Parse { .. }) => "E_DSL_PARSE",
             Self::Dsl(DslError::UnknownKind { .. }) => "E_DSL_UNKNOWN_KIND",
@@ -209,6 +215,9 @@ impl JanitorError {
             }
             Self::Validate(ValidateError::ParseInvalid { nodes, .. }) => {
                 Some(serde_json::json!({ "nodes": nodes }))
+            }
+            Self::Parse(ParseError::SharedTree { count }) => {
+                Some(serde_json::json!({ "strong_count": count }))
             }
             Self::Validate(ValidateError::FlushPartial { report, .. }) => Some(report.clone()),
             Self::Memory(MemoryError::PointerDangling { path, span }) => {
@@ -342,5 +351,18 @@ mod tests {
         let err: JanitorError = OutputError::Io("broken pipe".into()).into();
         assert_eq!(err.exit_code(), 1);
         assert_eq!(err.code(), "E_OUTPUT");
+    }
+
+    /// F3 parse-layer additions follow the `E_<DOMAIN>_<VARIANT>` convention
+    /// and carry structured details (the frozen surface grows only by
+    /// append, per the F0 contract note).
+    #[test]
+    fn f3_parse_error_codes_and_details() {
+        let err: JanitorError = ParseError::SharedTree { count: 2 }.into();
+        assert_eq!(err.code(), "E_PARSE_SHARED_TREE");
+        assert_eq!(
+            err.details(),
+            Some(serde_json::json!({ "strong_count": 2 }))
+        );
     }
 }
