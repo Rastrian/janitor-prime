@@ -33,7 +33,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::ast::ffi_shim::{Node, Tree};
+use crate::ast::errors::error_count;
+use crate::ast::ffi_shim::Tree;
 use crate::vfs::{Generation, VfsPath};
 
 /// One parsed snapshot, version-pinned (Rule T2: bytes and tree die
@@ -59,7 +60,7 @@ impl ParseEntry {
     /// Pin a fresh parse: computes `error_count` and the content hash here
     /// so no consumer can forget them.
     pub fn new(generation: Generation, bytes: Arc<[u8]>, tree: Tree) -> Self {
-        let error_count = count_errors(tree.root_node());
+        let error_count = error_count(tree.root_node());
         Self {
             generation,
             content_hash: content_hash(&bytes),
@@ -155,28 +156,6 @@ fn content_hash(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
-}
-
-/// Whole-file ERROR/MISSING count (KP-4). `has_error` is the O(1) subtree
-/// flag — clean files (the common case) never walk; dirty files pay one
-/// traversal. Temporary home: F3.5's `errors` module becomes the canonical
-/// counter and this delegates to it.
-fn count_errors(root: Node<'_>) -> u32 {
-    if !root.has_error() {
-        return 0;
-    }
-    count_errors_inner(root)
-}
-
-fn count_errors_inner(node: Node<'_>) -> u32 {
-    let mut total = u32::from(node.is_error() || node.is_missing());
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.has_error() {
-            total += count_errors_inner(child);
-        }
-    }
-    total
 }
 
 #[cfg(test)]
@@ -454,7 +433,7 @@ mod tests {
             "the grammar recovers with error nodes"
         );
         assert_eq!(
-            count_errors(mangled.tree.root_node()),
+            crate::ast::errors::error_count(mangled.tree.root_node()),
             mangled.error_count,
             "the stored count matches a fresh walk"
         );
