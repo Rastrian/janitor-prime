@@ -1,0 +1,416 @@
+# The janitor rule DSL — complete contract (v0.1)
+
+This document is the **complete and self-sufficient** contract for writing
+structural match rules for `janitor scan`. It is written for an LLM agent
+that has never seen the janitor source: everything needed to author, run,
+and interpret rules is on this page. If a rule you write fails, the typed
+error you get back is documented in [§7](#7-error-codes-the-full-table)
+with a fixing recipe.
+
+* Schema version: `janitor.v1`
+* Languages: **rust** is the supported, CI-tested language of v0.1. Other
+  grammars (python, go, javascript, typescript, java, c) may be enabled at
+  build time; kind-name behavior for them follows [§4](#4-kinds-per-language)
+  and their trivia tables are seeded but not yet conformance-tested (F9).
+* A rule describes **structure** — node kinds and their adjacency — never
+  text. There is no regex, no string matching, no field names in v0.1.
+
+---
+
+## 1. The model in one paragraph
+
+A parse tree is a tree of **nodes**. Every node has a *kind* (a name from
+the language's grammar, e.g. `function_item`, `identifier`, `block`) and a
+byte span. Some nodes are **named** (they carry a grammar name and appear
+in structural views: `function_item`) and some are **anonymous** (punctuation
+and operators: `;`, `(`, `+`). A rule says: *find a container node of kind
+K (the pivot), then match a sequence of its children, one pattern element
+per child, in strict left-to-right adjacency*. The scoping is the point: a
+rule never "reaches across" the pivot — the pattern runs only over that
+pivot's own child list, so what a rule means is fixed and its worst-case
+cost is linear in tree size (no catastrophic backtracking, by construction).
+
+## 2. Grammar
+
+```
+rule        := "(" "under" pivot body constraints? ")"
+             | seq_form
+             | atom
+seq_form    := "(" "seq" atom+ ")"
+atom        := "(" "kind" IDENTIFIER ")"
+             | "(" "capture" SYMBOL atom ")"
+             | "(" "any-of" atom atom+ ")"
+             | rule                      ; nested (under ...) descends a scope
+             | IDENTIFIER                ; sugar for (kind IDENTIFIER)
+             | "_"                       ; wildcard: any single node
+pivot       := IDENTIFIER | "_"
+body        := atom
+constraints := "(" "constraints" "(" "unify" SYMBOL SYMBOL ")"* ")"
+
+SYMBOL      := "@" [A-Za-z0-9_-]+        ; e.g. @fn, @lhs
+IDENTIFIER  := [A-Za-z_][A-Za-z0-9_-]*   ; a *named* node kind of some grammar
+comment     := ";" ... end of line
+```
+
+Lexical rules:
+
+* Whitespace separates tokens; `;` starts a comment to end of line.
+* `(`, `)`, `_`, `@sym`, identifiers are the only token classes. There are
+  no strings, numbers, or operators.
+* The reserved words `under`, `seq`, `capture`, `kind`, `any-of`,
+  `constraints`, `unify` are reserved **only as list heads**. A bare
+  identifier atom is always a kind name.
+
+## 3. Operators
+
+### `(under <kind-or-_> <atom>)` — the structural pivot
+
+Everything below is scoped to nodes of kind `<kind>`: the executor visits
+**every** node of that kind in the file (anywhere in the tree, at any
+depth) and runs `<atom>` over that node's child list. `_` as the pivot
+means every node is a pivot. One rule produces at most one match per
+(child-list) start position per pivot — see [§6](#6-match-set-semantics).
+
+```scheme
+(under function_item
+  (seq (capture @fn identifier)     ; first child: the fn name, captured
+       block))                      ; strictly adjacent second child: the body
+```
+
+### `(seq <atom>+)` — strict adjacency among siblings
+
+The elements must match **consecutive** children of the current scope, in
+order, one child per element. `(seq a b c)` = child of kind `a`
+immediately followed by child of kind `b` immediately followed by child of
+kind `c`. Comments between them do **not** break adjacency by default
+([§5](#5-trivia-semantics-adr-0010)). An empty `(seq)` is a parse error.
+
+### `(capture @sym <atom>)` — bind the matched span
+
+Matches exactly what `<atom>` matches and records the covered byte span
+under `@sym`. Captures appear in the report's `captures` list. Each symbol
+may be captured **once** per rule (a duplicate is `E_DSL_COMPILE`).
+
+### `(kind <name>)` and bare `<name>` — one node of a kind
+
+`identifier` and `(kind identifier)` are the same atom: matches a single
+child whose kind is exactly `name`. Only **named** kinds are addressable —
+anonymous punctuation/operators (`;`, `+`) are never pattern targets in
+v0.1. Kind resolution and unknown-kind behavior: [§4](#4-kinds-per-language).
+
+### `_` — wildcard
+
+Matches any single node (of any kind). As a pivot (`(under _ …)`) every
+node becomes a scope.
+
+### `(any-of <atom> <atom>+)` — alternation
+
+Matches one child that any of the alternatives matches. Alternatives may
+consume different numbers of children (e.g. `(any-of identifier (seq
+identifier ","))`); the match set rule in [§6](#6-match-set-semantics)
+picks the longest. At least two alternatives are required.
+
+### `(constraints (unify @a @b) …)` — **rejected in v0.1**
+
+Parses, then always fails rule-compile with `E_UNSUPPORTED_VERSION`:
+isomorphism constraints land in v0.2 (F8). Never a silent no-match.
+
+### Nesting: `(under …)` as a `seq` element
+
+A nested `under` descends one scope level. As an element it consumes one
+child that (a) has the pivot kind and (b) whose **own** child list matches
+the nested body:
+
+```scheme
+; a block whose first statement is an if_expression containing else
+(under block
+  (seq (under if_expression
+         (seq _ block else_clause))))
+```
+
+Scoping applies at every level the matcher enters — a comment breaking the
+inner adjacency also matters (KP-6).
+
+### Top-level shapes and what they mean
+
+| top-level rule                 | meaning                                                            |
+|--------------------------------|--------------------------------------------------------------------|
+| `(under K body)`               | every node of kind `K` is a pivot; body runs over its children     |
+| `(under _ body)`               | every node is a pivot                                              |
+| `(seq …)` (bare at top level)  | same as `(under _ (seq …))`                                        |
+| a **single-node** atom at top level (`identifier`, `_`, `(capture @x identifier)`, an `any-of` of single-node atoms) | matches every node satisfying it — **including the root** (a *unit* match; the report span is the node itself) |
+
+A "single-node" atom is one that consumes exactly one child on every
+path: `kind`, `_`, `under` (the nested body is a *condition* on the
+consumed child, not extra consumption), `capture` of a single-node atom,
+`any-of` of single-node atoms. Anything containing a top-level `seq` of
+2+ elements runs in every node's child list instead.
+
+## 4. Kinds per language
+
+Node kinds are **per-grammar strings** (`function_item` in rust,
+`function_declaration` in python). There is no cross-language kind
+vocabulary in v0.1. Resolution follows one behavior:
+
+1. **At rule-compile time**, every kind named in the rule is checked
+   against the set of *build-enabled* grammars. A kind unknown to **every**
+   enabled language fails loudly with `E_DSL_UNKNOWN_KIND` — the rule is
+   wrong everywhere; fix the kind name (the error carries the nearest
+   known kind name as a suggestion when one is close).
+2. Otherwise, resolution is **per scanned file**: when scanning a file of
+   language L, each kind resolves against L. If any kind in the rule is
+   unknown in L, the rule provably cannot match in L, so **every file of
+   language L is skipped and counted** in `skipped_for_language` — never a
+   silent zero-match. Restricting the run with `--lang rust` scopes both
+   the scan and this accounting.
+3. The `--lang` flag accepts exactly the canonical names (`rust`, `python`,
+   `go`, `javascript`, `typescript`, `java`, `c`); a name whose grammar is
+   not in the build fails with `E_PARSE_NO_GRAMMAR_FOR_LANG`.
+
+Kind matching in the hot loop is by integer kind id, but that is invisible
+to rule authors: you always write names, reports always carry both `kind`
+(name, resolved at serialization) and `kind_id`.
+
+## 5. Trivia semantics (ADR-0010)
+
+Adjacency is defined over the **named** children of a scope, and by
+default comment-class kinds are removed from that sibling list before
+matching (the KP-6-measured default: byte-strict adjacency silently loses
+real matches wherever comments are idiomatic). The filter applies in
+**every** scope the matcher enters, not just statement level.
+
+* default (`trivia: "skip"`): trivia kinds are invisible — `(seq a b)`
+  matches `a /*c*/ b`.
+* `--strict-trivia` (`trivia: "strict"`): trivia kinds stay in the sibling
+  list — a comment between two pattern siblings breaks the sequence.
+* Trivia kinds per grammar (v0.1 table):
+
+| language    | trivia kinds                      |
+|-------------|-----------------------------------|
+| rust        | `line_comment`, `block_comment`   |
+| python      | `comment`                         |
+| go          | `comment`                         |
+| javascript  | `comment`                         |
+| typescript  | `comment`                         |
+| java        | `line_comment`, `block_comment`   |
+| c           | `comment`                         |
+
+Anonymous nodes (punctuation, operators) are never in the sibling list in
+either mode — both modes are defined over named children.
+
+## 6. Match-set semantics
+
+One match is reported per *(pivot, start position)* whose pattern run
+accepts, and the report is the **longest** accepting run from that start
+(the *local maximum* — alternation can offer shorter runs; the longest
+wins). Consequences:
+
+* Overlapping matches from different pivots are **both reported**; any
+  match whose byte span intersects another match's span in the same file
+  carries `"overlap": true`. Nesting is not deduplicated away.
+* Within one file, matches are sorted canonically by
+  `(start_byte, end_byte, rule_id)`. Files are ordered by path. Output is
+  **byte-identical regardless of thread count** (asserted in CI under
+  `RAYON_NUM_THREADS=1` vs `=8`).
+* **Capture priority**: when several accepting paths would bind the same
+  symbol, the earliest-position binding wins (Pike-VM-style thread
+  priority — alternation branches are explored left to right, first path
+  to bind a symbol keeps it).
+* The reported `kind`/`kind_id` of a match is the **pivot's** kind (the
+  container), not the first child's.
+* Spans are half-open `[start_byte, end_byte)` UTF-8 byte offsets into the
+  file; points are `{row, column}` with `column` measured in **bytes**.
+
+## 7. Error codes — the full table
+
+Every failure is a `janitor.v1` envelope with `ok: false` and a stable
+`error.code`. Rule-authoring codes first:
+
+### `E_DSL_LEX` — the rule text is not lexable
+
+`details: {position, expected}` — `position` is the byte offset of the
+offending character.
+
+```json
+{"schema":"janitor.v1","ok":false,"error":{"code":"E_DSL_LEX",
+ "message":"lex error at byte 21: expected one of [\"(\", \")\", \"@symbol\", \"identifier\", \"_\"]",
+ "details":{"position":21,"expected":["(",")","@symbol","identifier","_"]}}}
+```
+
+Cause: `(under block (seq a #))` — `#` is not a token.
+
+### `E_DSL_PARSE` — the tokens do not form a rule
+
+`details: {position, expected, suggestion}`. `suggestion` is present
+whenever the parser recognizes a near-miss and is the fastest fix.
+
+```json
+{"schema":"janitor.v1","ok":false,"error":{"code":"E_DSL_PARSE",
+ "message":"parse error at byte 6: expected a kind name after (under",
+ "details":{"position":6,"expected":["identifier","_"],
+            "suggestion":"did you mean: (under block (seq a b))? (sq) is not an operator — wrap multiple atoms in (seq …)"}}}
+```
+
+Recurring causes and fixes:
+
+| you wrote                          | error                            | fix                                    |
+|------------------------------------|----------------------------------|----------------------------------------|
+| `(sq a b)`                         | `E_DSL_PARSE` + did-you-mean `seq`| spell `(seq a b)`                      |
+| `(under block (kind a) (kind b))`  | `E_DSL_PARSE` two atoms in body  | `(under block (seq (kind a) (kind b)))`|
+| `(capture fn identifier)`          | `E_DSL_PARSE` symbol missing `@` | `(capture @fn identifier)`             |
+| `(seq)` / `(any-of a)`             | `E_DSL_PARSE` too few elements   | a `seq` needs ≥1 and an `any-of` ≥2 atoms |
+| unclosed `(`                       | `E_DSL_PARSE` at end of input    | balance the parentheses                |
+| `unify` outside `constraints`      | `E_DSL_PARSE`                    | unify only appears inside `(constraints …)` |
+
+### `E_DSL_UNKNOWN_KIND` — the kind is unknown to every enabled grammar
+
+`details: {lang, kind}` (`lang` lists the enabled languages it was checked
+against; `suggestion`-style nearest-kind help is in the message when
+close). Cause: `(under function_itm …)` with `function_itm` unknown
+everywhere. Fix: use a kind the grammar really has (the rust grammar's
+common ones: `source_file`, `function_item`, `identifier`, `block`,
+`let_declaration`, `match_expression`, `match_block`, `match_arm`,
+`if_expression`, `else_clause`, `attribute_item`, `call_expression`,
+`field_expression`, `field_identifier`, `struct_item`, `impl_item`,
+`expression_statement`, `line_comment`, `block_comment`).
+
+### `E_DSL_COMPILE` — the rule parses but cannot compile
+
+`details: {message}`. Causes: the same capture symbol used twice
+(`(seq (capture @x a) (capture @x b))` → rename one); an `any-of` or
+`seq` that compiled to zero width.
+
+### `E_UNSUPPORTED_VERSION` — parsed, reserved for a later schema
+
+`details` carries `{feature: "unify", version: "janitor.v1"}`. Cause: any
+`(constraints (unify @a @b) …)`. Remove the constraints block in v0.1.
+
+### Errors you can hit at scan time (not rule-authoring bugs)
+
+| code | meaning |
+|------|---------|
+| `E_USAGE` (exit 2) | bad CLI usage — clap's message is inside the envelope |
+| `E_VFS_NOT_FOUND` / `E_VFS_PERMISSION` / `E_VFS_IO` | the scan root could not be walked |
+| `E_PARSE_NO_GRAMMAR_FOR_LANG` | `--lang name` names a grammar this build does not embed |
+| `E_PARSE_NO_TREE` | a parse returned no tree (cancelled/unsatisfiable) — operational, retry |
+
+Exit codes: `0` success (zero matches is success), `1` operational error,
+`2` usage error.
+
+## 8. Running a scan
+
+```
+janitor scan --rule "<rule>" [PATH] [--lang rust] [--strict-trivia]
+             [--include-virtual] [--max-file-size BYTES] [--pretty]
+```
+
+* `PATH` (default `.`) is the scan root; it is walked recursively.
+* Files whose extension has no enabled grammar are ignored (not reported).
+* **Hidden entries** (name starting with `.`) are never walked — `.git`,
+  `.janitor`, `.hidden.rs` are all invisible to scan.
+* **Binary skip**: a NUL byte in the first 8 KiB ⇒ `skipped` with
+  `reason: "binary"`.
+* **Size skip**: files larger than `--max-file-size` (default `4194304` =
+  4 MiB) ⇒ `skipped` with `reason: "size"`. Every skip is listed, so
+  exclusions are visible, never silent.
+* **Virtual files** (staged in the overlay, not on disk) are excluded by
+  default — scan reports disk reality (anti-phantom). `--include-virtual`
+  unions them in; their matches carry `"virtual": true`.
+
+Report shape (success envelope; `--pretty` reformats, never restructures):
+
+```json
+{"schema":"janitor.v1","ok":true,"data":{
+  "rule":"(under block (seq let_declaration let_declaration))",
+  "trivia":"skip",
+  "matches":[
+    {"path":"src/main.rs","virtual":false,
+     "start_byte":20,"end_byte":88,
+     "start_point":{"row":2,"column":4},"end_point":{"row":5,"column":1},
+     "kind":"block","kind_id":132,"overlap":false,
+     "captures":[
+       {"symbol":"@a","start_byte":21,"end_byte":30,
+        "start_point":{"row":2,"column":5},"end_point":{"row":2,"column":14},
+        "kind":"let_declaration","kind_id":87}]}],
+  "skipped_for_language":{"python": 3},
+  "skipped":[{"path":"assets/logo.png","reason":"binary"},
+             {"path":"big/generated.rs","reason":"size"}],
+  "stats":{"files":12,"bytes":340008,"wall_ms":41,
+           "files_matched":3,"matches":5,"langs":{"rust":12}}}}
+```
+
+`skipped_for_language` maps language name → number of files skipped
+because some rule kind does not exist in that language ([§4](#4-kinds-per-language)).
+`wall_ms` is wall-clock and may vary between runs; everything else is
+deterministic.
+
+## 9. Worked examples — the five KP-6 idioms (copy-pasteable)
+
+Each rule is paired with its measured counts on its curated snippet
+(strict = `--strict-trivia`, skip = default). These five are regression
+fixtures: `tests/fixtures/` carries them with these exact expectations.
+
+**1. Consecutive `let` statements in a body** — strict 1, skip 2:
+
+```scheme
+(under block
+  (seq (kind let_declaration) (kind let_declaration)))
+```
+
+**2. Neighboring match arms** — strict 1, skip 2:
+
+```scheme
+(under match_block
+  (seq (kind match_arm) (kind match_arm)))
+```
+
+**3. An attribute attached to a function** — strict 0, skip 1 (the only
+attr→fn pair in the corpus is comment-separated; this pattern is the
+reason comment-skipping is the default):
+
+```scheme
+(under source_file
+  (seq (kind attribute_item) (kind function_item)))
+```
+
+**4. A chained method call link** (base call, then the next method's
+field) — strict 2, skip 3:
+
+```scheme
+(under field_expression
+  (seq (kind call_expression) (kind field_identifier)))
+```
+
+**5. An `if` with an `else`** — strict 1, skip 2. Note `_` as the first
+element (the condition) and the nested-scope subtlety: the seq runs over
+the `if_expression`'s own children:
+
+```scheme
+(under if_expression
+  (seq _ (kind block) (kind else_clause)))
+```
+
+Two more shapes worth internalizing:
+
+```scheme
+;; capture the function name of every fn that has a block body
+(under function_item
+  (seq (capture @name identifier) (kind block)))
+
+;; a block whose first statement is an if that has an else — nested scope
+(under block
+  (seq (under if_expression
+         (seq _ (kind block) (kind else_clause)))))
+```
+
+## 10. Authoring checklist
+
+1. One `(under …)` at the top unless you truly mean every-scope matching.
+2. Kinds are per-grammar snake_case named kinds — check [§4](#4-kinds-per-language)
+   against the language you scan; unknown-in-every-language fails loud.
+3. Adjacency is comment-tolerant by default; add `--strict-trivia` only if
+   you mean byte-strict.
+4. Capture symbols start with `@`, are used at most once each.
+5. No `unify` in v0.1 — it fails with `E_UNSUPPORTED_VERSION`.
+6. Read the report's `skipped`/`skipped_for_language` before concluding a
+   rule matches nothing — exclusions are always listed.
