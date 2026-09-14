@@ -350,16 +350,20 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
             frame.prepare(n, w, nsyms);
         }
 
-        // Pre-pass: settle every `Under` test for this scope. The tests
-        // recurse into nested scopes (cache-guarded), so the frame borrow
-        // is released around each call — children are `Copy` handles.
+        // Pre-pass: settle every `Under` test for this scope, restricted to
+        // the entered region — other regions' instructions are unreachable
+        // here, and testing them would make deep rules quadratic in pattern
+        // depth. The tests recurse into nested scopes (cache-guarded), so
+        // the frame borrow is released around each call — children are
+        // `Copy` handles.
+        let region_exit = program.region_exit(entry) as usize;
         let mut i = 0;
         while i < n {
             let child = match self.frames.get(depth).and_then(|f| f.children.get(i)) {
                 Some(child) => *child,
                 None => break,
             };
-            for pc in 0..w {
+            for pc in entry as usize..=region_exit.min(w.saturating_sub(1)) {
                 if let Instr::Under(kind, sub_entry, _) = program.instrs()[pc] {
                     let kind_ok = kind.is_none_or(|k| child.kind_id() == k);
                     let accepted = if kind_ok {
@@ -375,9 +379,10 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
             i += 1;
         }
 
-        // The DP: for each (i, pc) — children descending, pc descending
-        // within a row (epsilon targets are forward-only by construction).
-        // Pure table work: no recursion, no allocation.
+        // The DP: for each (i, pc) of the region — children descending, pc
+        // descending within a row (epsilon targets are forward-only by
+        // construction, and confined to the region). Pure table work: no
+        // recursion, no allocation.
         let accepts_any;
         {
             let frame = match self.frames.get_mut(depth) {
@@ -390,7 +395,7 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
             };
             let instrs = program.instrs();
             for i in (0..=n).rev() {
-                for pc in (0..w).rev() {
+                for pc in (entry as usize..=region_exit.min(w.saturating_sub(1))).rev() {
                     let (ok, cons) = match instrs[pc] {
                         Instr::Match => (true, 0),
                         Instr::Jmp(t) => {

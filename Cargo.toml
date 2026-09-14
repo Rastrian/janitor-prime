@@ -68,6 +68,10 @@ criterion = "=0.8.2"               # PLAN §2 pins 0.11.0 — never published; r
 name = "engine"
 harness = false
 
+[[bench]]
+name = "matcher_linearity"
+harness = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

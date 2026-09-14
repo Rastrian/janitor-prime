@@ -102,6 +102,12 @@ pub struct Program {
     /// Comment-class kind ids removed from sibling lists under
     /// [`TriviaPolicy::Skip`] (empty under `Strict` — nothing to skip).
     pub trivia_skip: Vec<u16>,
+    /// `(entry, exit)` per region — the main region and each `Under`
+    /// sub-program — sorted by entry. The evaluator restricts a scope's
+    /// DP and `Under` pre-pass to the entered region: without this, every
+    /// scope would test every region's `Under` instructions against its
+    /// children, making deep rules quadratic in pattern depth.
+    regions: Vec<(u32, u32)>,
 }
 
 impl Program {
@@ -120,6 +126,20 @@ impl Program {
     /// at least its `Match`).
     pub fn is_empty(&self) -> bool {
         self.instrs.is_empty()
+    }
+
+    /// The inclusive exit pc of the region entered at `entry` (its
+    /// `Match`); the whole region is the contiguous span `[entry, exit]`.
+    pub fn region_exit(&self, entry: u32) -> u32 {
+        match self.regions.binary_search_by_key(&entry, |(e, _)| *e) {
+            Ok(idx) => self.regions[idx].1,
+            Err(_) => self.instrs.len() as u32 - 1,
+        }
+    }
+
+    /// Every `(entry, exit)` region, for tests and diagnostics.
+    pub fn regions(&self) -> &[(u32, u32)] {
+        &self.regions
     }
 }
 
@@ -190,12 +210,16 @@ pub fn compile_rule(
         instrs: Vec::new(),
         symbols: Vec::new(),
         pending: Vec::new(),
+        regions: Vec::new(),
     };
     emitter.compile_element(main, registry, lang)?;
-    emitter.emit(Instr::Match); // main region terminator
+    let main_exit = emitter.emit(Instr::Match); // main region terminator
+    emitter.regions.push((0, main_exit));
 
     // Sub-programs: FIFO for a deterministic layout; compiling a body may
-    // enqueue deeper `Under`s, so the cursor walks a growing queue.
+    // enqueue deeper `Under`s, so the cursor walks a growing queue. Each
+    // region is contiguous — a deeper `Under` scheduled from this body
+    // compiles after this region's `Match`.
     let mut cursor = 0;
     while cursor < emitter.pending.len() {
         let (at, kind, body) = emitter.pending[cursor].clone();
@@ -204,6 +228,7 @@ pub fn compile_rule(
         emitter.compile_element(&body, registry, lang)?;
         let exit_pc = emitter.emit(Instr::Match);
         emitter.instrs[at as usize] = Instr::Under(kind, entry_pc, exit_pc);
+        emitter.regions.push((entry_pc, exit_pc));
     }
 
     let trivia_skip = match trivia {
@@ -226,6 +251,7 @@ pub fn compile_rule(
         entry,
         symbols: emitter.symbols,
         trivia_skip,
+        regions: emitter.regions,
     })
 }
 
@@ -237,6 +263,8 @@ struct Emitter {
     symbols: Vec<SmolStr>,
     /// `(placeholder_pc, pivot kind, body)` — one per `Under` element.
     pending: Vec<(u32, Option<u16>, Pattern)>,
+    /// `(entry, exit)` per region, appended as regions close.
+    regions: Vec<(u32, u32)>,
 }
 
 impl Emitter {
@@ -557,7 +585,9 @@ mod tests {
                     lang,
                     kind,
                     suggestion: Some(hint),
-                } if lang == "rust" && kind == "function_itm" && hint == "function_item"
+                } if lang.split(", ").any(|l| l == "rust")
+                    && kind == "function_itm"
+                    && hint == "function_item"
             ),
             "nearest known kind within distance 2, got {err:?}"
         );
