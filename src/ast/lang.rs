@@ -883,7 +883,10 @@ mod tests {
         assert_eq!(a.for_extension("exs"), Some(id));
         assert_eq!(a.for_extension("ExS"), Some(id));
         assert_eq!(a.for_path(Path::new("/proj/lib/widgetry.ex")), Some(id),);
-        assert_eq!(a.for_path(Path::new("/proj/test/widgetry_test.exs")), Some(id),);
+        assert_eq!(
+            a.for_path(Path::new("/proj/test/widgetry_test.exs")),
+            Some(id),
+        );
 
         // Kind names verified against tree-sitter-elixir 0.3.5's
         // node-types.json (45 named kinds) — the norm-table and KP-6
@@ -977,7 +980,7 @@ mod tests {
     }
 
     /// F9a, E5 fence for python: the kind table is a function of the
-/// grammar alone — order-independent seeding, round-tripping ids, and
+    /// grammar alone — order-independent seeding, round-tripping ids, and
     /// seeded from the bundled fixture corpus (never first-scan bias). The
     /// python fixture exercises decorators, classes, if/elif/else and
     /// comprehensions, so the fixture leg cross-checks a real parse too.
