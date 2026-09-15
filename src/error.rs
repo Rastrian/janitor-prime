@@ -123,12 +123,44 @@ pub enum ValidateError {
 pub enum MemoryError {
     #[error("syntax pointer dangles: {path} {span:?}")]
     PointerDangling { path: String, span: (u64, u64) },
+    /// The pending compression request rides in `request` (slot, source
+    /// material, instruction) so an agent can act on the refusal directly
+    /// (§1.5.2 — refuse with the request, never serve holes).
     #[error("compression slot {slot:?} pending; write it via nap before wake")]
-    NapPending { slot: String },
+    NapPending { slot: String, request: Value },
     #[error("memory log corrupt; trailing line quarantined to {quarantined}")]
     LogCorrupt { quarantined: String },
+    /// Corruption *before* the trailing line: quarantining would renumber
+    /// every later fact (position is identity, ADR-0006), so the log is
+    /// refused, never repaired (§1.5.1).
+    #[error(
+        "log corruption at line {line} (before the trailing line); refusing — repair would renumber every later fact"
+    )]
+    LogUnrecoverable { line: u64 },
     #[error("invalid budget: {detail}")]
     BudgetInvalid { detail: String },
+    /// `note` text discipline: one line, ≤ 280 bytes (OptMem-derived line
+    /// budget the wake math depends on, §1.5.3).
+    #[error("note rejected: {detail}")]
+    NoteInvalid { detail: String },
+    #[error("memory not initialized at {root}; run `janitor init` first")]
+    NotInitialized { root: String },
+    #[error("memory already initialized at {root}; pass --force to reset")]
+    AlreadyInitialized { root: String },
+    /// The CLI pointer notation itself is malformed (`path:start-end:kind`
+    /// / commit hex — SCHEMA.md); distinct from `PointerDangling`, which
+    /// means the notation parsed but will not anchor (ADR-0012).
+    #[error("pointer notation invalid: {detail}")]
+    PointerNotation { detail: String },
+    #[error("commit pointer {sha:?} invalid: {detail}")]
+    CommitInvalid { sha: String, detail: String },
+    /// nap slot discipline: notation, ordering (dense prefix), idempotent
+    /// resubmission with different text, or the ≤ 256-byte one-line summary
+    /// limit (§1.5.4).
+    #[error("slot {slot:?} rejected: {detail}")]
+    SlotInvalid { slot: String, detail: String },
+    #[error("tree store corrupt: {detail}")]
+    TreeCorrupt { detail: String },
 }
 
 /// Envelope emission errors (stderr diagnostics; stdout unreachable).
@@ -201,7 +233,15 @@ impl JanitorError {
             Self::Memory(MemoryError::PointerDangling { .. }) => "E_POINTER_DANGLING",
             Self::Memory(MemoryError::NapPending { .. }) => "E_NAP_PENDING",
             Self::Memory(MemoryError::LogCorrupt { .. }) => "E_LOG_CORRUPT",
+            Self::Memory(MemoryError::LogUnrecoverable { .. }) => "E_LOG_UNRECOVERABLE",
             Self::Memory(MemoryError::BudgetInvalid { .. }) => "E_BUDGET_INVALID",
+            Self::Memory(MemoryError::NoteInvalid { .. }) => "E_NOTE_INVALID",
+            Self::Memory(MemoryError::NotInitialized { .. }) => "E_NOT_INITIALIZED",
+            Self::Memory(MemoryError::AlreadyInitialized { .. }) => "E_ALREADY_INITIALIZED",
+            Self::Memory(MemoryError::PointerNotation { .. }) => "E_POINTER_INVALID",
+            Self::Memory(MemoryError::CommitInvalid { .. }) => "E_COMMIT_INVALID",
+            Self::Memory(MemoryError::SlotInvalid { .. }) => "E_SLOT_INVALID",
+            Self::Memory(MemoryError::TreeCorrupt { .. }) => "E_TREE_CORRUPT",
             Self::Output(OutputError::Serialization(_)) => "E_OUTPUT",
             Self::Output(OutputError::Io(_)) => "E_OUTPUT",
         }
@@ -281,11 +321,29 @@ impl JanitorError {
             Self::Memory(MemoryError::PointerDangling { path, span }) => {
                 Some(serde_json::json!({ "path": path, "span": [span.0, span.1] }))
             }
-            Self::Memory(MemoryError::NapPending { slot }) => {
-                Some(serde_json::json!({ "slot": slot }))
+            Self::Memory(MemoryError::NapPending { slot, request }) => {
+                Some(serde_json::json!({ "slot": slot, "request": request }))
             }
             Self::Memory(MemoryError::LogCorrupt { quarantined }) => {
                 Some(serde_json::json!({ "quarantined": quarantined }))
+            }
+            Self::Memory(MemoryError::LogUnrecoverable { line }) => {
+                Some(serde_json::json!({ "line": line }))
+            }
+            Self::Memory(MemoryError::NoteInvalid { detail })
+            | Self::Memory(MemoryError::PointerNotation { detail })
+            | Self::Memory(MemoryError::TreeCorrupt { detail }) => {
+                Some(serde_json::json!({ "detail": detail }))
+            }
+            Self::Memory(MemoryError::NotInitialized { root })
+            | Self::Memory(MemoryError::AlreadyInitialized { root }) => {
+                Some(serde_json::json!({ "root": root }))
+            }
+            Self::Memory(MemoryError::CommitInvalid { sha, detail }) => {
+                Some(serde_json::json!({ "sha": sha, "detail": detail }))
+            }
+            Self::Memory(MemoryError::SlotInvalid { slot, detail }) => {
+                Some(serde_json::json!({ "slot": slot, "detail": detail }))
             }
             _ => None,
         }
@@ -391,7 +449,11 @@ mod tests {
                 "E_POINTER_DANGLING",
             ),
             (
-                MemoryError::NapPending { slot: "0-1".into() }.into(),
+                MemoryError::NapPending {
+                    slot: "0-1".into(),
+                    request: serde_json::json!({ "slot": "0-1" }),
+                }
+                .into(),
                 "E_NAP_PENDING",
             ),
             (
@@ -404,6 +466,53 @@ mod tests {
             (
                 MemoryError::BudgetInvalid { detail: "d".into() }.into(),
                 "E_BUDGET_INVALID",
+            ),
+            // F6 additions: same convention, structured details, exact codes.
+            (
+                MemoryError::LogUnrecoverable { line: 3 }.into(),
+                "E_LOG_UNRECOVERABLE",
+            ),
+            (
+                MemoryError::NoteInvalid { detail: "d".into() }.into(),
+                "E_NOTE_INVALID",
+            ),
+            (
+                MemoryError::NotInitialized {
+                    root: ".janitor".into(),
+                }
+                .into(),
+                "E_NOT_INITIALIZED",
+            ),
+            (
+                MemoryError::AlreadyInitialized {
+                    root: ".janitor".into(),
+                }
+                .into(),
+                "E_ALREADY_INITIALIZED",
+            ),
+            (
+                MemoryError::PointerNotation { detail: "d".into() }.into(),
+                "E_POINTER_INVALID",
+            ),
+            (
+                MemoryError::CommitInvalid {
+                    sha: "abc".into(),
+                    detail: "d".into(),
+                }
+                .into(),
+                "E_COMMIT_INVALID",
+            ),
+            (
+                MemoryError::SlotInvalid {
+                    slot: "0-1".into(),
+                    detail: "d".into(),
+                }
+                .into(),
+                "E_SLOT_INVALID",
+            ),
+            (
+                MemoryError::TreeCorrupt { detail: "d".into() }.into(),
+                "E_TREE_CORRUPT",
             ),
             (
                 DslError::UnsupportedVersion {

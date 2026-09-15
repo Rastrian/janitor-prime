@@ -12,7 +12,7 @@ use janitor_prime::apply::{ApplyParams, DiffPayload};
 use janitor_prime::cli::{self, Command, VersionData};
 use janitor_prime::envelope::{EXIT_SUCCESS, EXIT_USAGE, Envelope};
 use janitor_prime::error::{JanitorError, VfsError};
-use janitor_prime::orchestrator::Session;
+use janitor_prime::orchestrator::{NoteParams, NoteTarget, Session};
 use janitor_prime::scan::ScanParams;
 
 fn main() -> ExitCode {
@@ -34,12 +34,17 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Scan(args)) => run_scan(args, cli.pretty),
         Some(Command::Apply(args)) => run_apply(args, cli.pretty),
+        Some(Command::Init(args)) => run_init(args, cli.pretty),
+        Some(Command::Wake(args)) => run_wake(args, cli.pretty),
+        Some(Command::Note(args)) => run_note(args, cli.pretty),
+        Some(Command::Nap(args)) => run_nap(args, cli.pretty),
         None => {
             let usage = Envelope::error(
                 "E_USAGE",
-                "no command given; `janitor scan --rule \"<rule>\" [PATH]` (docs/DSL.md) and \
-                 `janitor apply --diff <json|@file> | --diff-file <path|->` (docs/SCHEMA.md) are \
-                 the available commands",
+                "no command given; `janitor scan --rule \"<rule>\" [PATH]` (docs/DSL.md), \
+                 `janitor apply --diff <json|@file> | --diff-file <path|->` (docs/SCHEMA.md), \
+                 and the memory set `init | wake | note | nap` (docs/SCHEMA.md) are the \
+                 available commands",
                 None,
             );
             cli::emit(&usage, cli.pretty, EXIT_USAGE)
@@ -143,6 +148,72 @@ fn read_file_bytes(path: &str) -> Result<Vec<u8>, JanitorError> {
 fn emit_error(err: JanitorError, pretty: bool) -> ExitCode {
     let envelope: Envelope<serde_json::Value> = err.into();
     cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)
+}
+
+/// `janitor init [--force]` (F6.7): one session, one skeleton.
+fn run_init(args: cli::InitArgs, pretty: bool) -> ExitCode {
+    let session = Session::new();
+    match session.init(args.force) {
+        Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+        Err(err) => emit_error(err, pretty),
+    }
+}
+
+/// `janitor wake [--budget N]` (F6.7): the budgeted memory payload.
+fn run_wake(args: cli::WakeArgs, pretty: bool) -> ExitCode {
+    let session = Session::new();
+    match session.wake(args.budget) {
+        Ok(payload) => cli::emit(&Envelope::ok(payload), pretty, EXIT_SUCCESS),
+        Err(err) => emit_error(err, pretty),
+    }
+}
+
+/// `janitor note` (F6.7): resolve the anchor, append the fact. Anchor
+/// failures are the anti-hallucination gate — nothing is appended.
+fn run_note(args: cli::NoteArgs, pretty: bool) -> ExitCode {
+    let target = if let Some(notation) = args.ptr.as_deref() {
+        Some(NoteTarget::Ptr(notation.to_owned()))
+    } else {
+        args.commit
+            .as_deref()
+            .map(|sha| NoteTarget::Commit(sha.to_owned()))
+    };
+    let params = NoteParams {
+        target,
+        text: args.text,
+        lock: args.lock,
+    };
+    let session = Session::new();
+    match session.note(&params) {
+        Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+        Err(err) => emit_error(err, pretty),
+    }
+}
+
+/// `janitor nap` (F6.7): bare prints the next pending request; `--slot`
+/// plus `--text` stores the agent-written line.
+fn run_nap(args: cli::NapArgs, pretty: bool) -> ExitCode {
+    let session = Session::new();
+    match (&args.slot, &args.text) {
+        (None, None) => match session.nap_next() {
+            Ok(plan) => cli::emit(&Envelope::ok(plan), pretty, EXIT_SUCCESS),
+            Err(err) => emit_error(err, pretty),
+        },
+        (Some(slot), Some(text)) => match session.nap_settle(slot, text) {
+            Ok(outcome) => cli::emit(&Envelope::ok(outcome), pretty, EXIT_SUCCESS),
+            Err(err) => emit_error(err, pretty),
+        },
+        // clap's `requires` wiring makes this unreachable through the CLI;
+        // kept total for future callers.
+        (slot, text) => {
+            let usage = Envelope::error(
+                "E_USAGE",
+                "--slot and --text travel together or not at all",
+                Some(serde_json::json!({ "slot": slot, "text": text })),
+            );
+            cli::emit(&usage, pretty, EXIT_USAGE)
+        }
+    }
 }
 
 /// stderr-only diagnostics, env-gated via `RUST_LOG` (default: `warn`).
