@@ -199,7 +199,8 @@ vocabulary in v0.1. Resolution follows one behavior:
    silent zero-match. Restricting the run with `--lang rust` scopes both
    the scan and this accounting.
 3. The `--lang` flag accepts exactly the canonical names (`rust`, `python`,
-   `go`, `javascript`, `typescript`, `tsx`, `java`, `c`); a name whose
+   `go`, `javascript`, `typescript`, `tsx`, `java`, `c`, plus the
+   experimental tier's `ruby`, `ocaml`, `ocaml_interface` — F9c); a name whose
    grammar is not in the build fails with `E_PARSE_NO_GRAMMAR_FOR_LANG`.
    (`typescript` and `tsx` are two names for the two grammars one cargo
    feature registers — see [§13](#13-typescript--tsx-v02-f9b)).
@@ -549,6 +550,8 @@ comments between methods — real code, really unmatchable byte-strict.
 
 ---
 
+---
+
 ## 12. Go (v0.2, F9b) — kinds, trivia, and worked examples
 
 Go is fully supported and CI-tested alongside rust and python
@@ -725,3 +728,121 @@ KP-6-typescript curated snippet).
   `jsx_text`, `html_comment`) is addressable like any other kind;
   `{/* … */}` is a plain `comment` inside a `jsx_expression`, while a
   bare `<!-- … -->` is an `html_comment` between `jsx_text` siblings.
+
+---
+
+## 14. Ruby (v0.2 wave 2, F9c) — EXPERIMENTAL TIER
+
+Ruby compiles, registers and is e2e-tested, but is fenced OUT of
+`lang-all` until its trivia corpus is fully curated (ADR-0015 appended
+note): build with `--features lang-ruby` (or `lang-experimental` for the
+whole wave-2 tier). Everything in §1–§11 applies verbatim; this section
+gives the ruby-specific kind names, the measured trivia facts and one
+worked example.
+
+**Common ruby kinds** (tree-sitter-ruby 0.23.1): `program` (the root),
+`method` (a def, at every scope — ruby has no top-level functions;
+`def self.x` is `singleton_method`), `class`, `module`,
+`body_statement` (class/method/do-block bodies), `block_body` (brace
+bodies), `do_block` / `block` (the block expressions, children of their
+`call`), `call` (also what `attr_reader`/`attr_accessor` are — there is
+no dedicated attr kind), `identifier`, `argument_list`,
+`method_parameters`, `comment`, `string`, `integer`, `heredoc_body`.
+
+**Trivia** (§5): ruby's table is `comment` only. Measured (KP-6-ruby,
+`tests/kp6_ruby.rs`): byte-strict loses 28.6% of method-adjacency pairs
+on the bundled corpus. Two ruby-specific facts to author against:
+
+- **HEREDOC**: `<<~SQL … SQL` splits into `heredoc_beginning` (the
+  assignment's right side) and a named `heredoc_body` extra that parks
+  BETWEEN statements. It is not trivia (it carries the string's
+  content), so a `seq` spanning the heredoc-using statement and the next
+  statement matches in neither mode.
+- **Blocks**: `do..end` and `{ }` attach to their call as children — a
+  `seq` over statement siblings never sees them (fenced: the 0/0 KP-6
+  row). Scope into the call to match a block.
+
+### Example — find every attr chain directly above a method
+
+The one-pass "fields then constructor" review shape (attr macros are
+plain `call`s, siblings of `method`s inside `body_statement`):
+
+```scheme
+(under body_statement
+  (seq (kind call) (kind method)))
+```
+
+Measured on the KP-6-ruby curated snippet
+(`tests/fixtures/kp6_ruby/attr_def_chain.rb`): **strict 0, skip 1** —
+the comment between the attr chain and the def hides the pair from
+byte-strict. To capture the method's name, pivot the method and lead
+with the name: `(under method (seq (capture @fn identifier)
+method_parameters))` matches every parameterized def.
+
+### Ruby authoring notes
+
+- A bare `private` parses as an `identifier` statement — not a call,
+  not trivia — and breaks method adjacency in BOTH modes. Rules walking
+  visibility sections should expect it as a sibling.
+- Norm table (`lang/ruby.norm.toml`, EXPERIMENTAL header): FUNCTION =
+  `method` + `singleton_method`, IDENT = `identifier`, BLOCK =
+  `body_statement` + `block_body` (the suite kinds; `block`/`do_block`
+  are the block expressions themselves).
+
+## 15. OCaml (v0.2 wave 2, F9c) — EXPERIMENTAL TIER
+
+Same tier posture as ruby (fenced out of `lang-all`, built via
+`--features lang-ocaml` / `lang-experimental`). One crate, TWO
+languages: `.ml` routes to `ocaml`, `.mli` to `ocaml_interface` (the
+crate's third grammar carries no file types upstream — the documented
+mapping decision, docs/SCHEMA.md). A scan over a mixed tree reports
+both in `stats.langs`, and an `apply` touching a `.ml` and its `.mli`
+re-parses each under its own grammar.
+
+**Common ocaml kinds** (tree-sitter-ocaml 0.26.0): `compilation_unit`
+(the root, both grammars), `value_definition` (a top-level `let …`),
+`let_binding` (the name/parameters/body core inside it — the
+`value_binding` kind does not exist in this grammar), `let_expression`
+(a `let … in`), `structure` (module bodies), `signature` (sig bodies),
+`module_definition`/`module_binding`, `type_definition`,
+`value_specification` (a `val`, .mli only), `value_name` (ocaml's
+identifier — names are namespace-typed), `parameter`, `comment`.
+
+**Trivia** (§5): `["comment"]` for BOTH LangIds, measured
+(KP-6-ocaml, `tests/kp6_ocaml.rs`): byte-strict loses 20.0% of
+top-level binding pairs, 33.3% of val-specification pairs. The fact to
+author against:
+
+- **let..in chains are not sibling lists**: `let a = … in let b = … in
+  body` parses as right-nested `let_expression`s — each `in` wraps the
+  rest of the chain as its body. Successive let-bindings are
+  parent-and-child, never siblings, in either mode; only
+  `compilation_unit` and `structure` items are true siblings.
+
+### Example — find adjacent val specifications needing consolidation
+
+The interface-shape review rule (.mli): consecutive `val`s in one
+signature block:
+
+```scheme
+(under compilation_unit
+  (seq (kind value_specification) (kind value_specification)))
+```
+
+Measured on the KP-6-ocaml curated snippet
+(`tests/fixtures/kp6_ocaml/signature_items.mli`): **strict 0, skip 1**
+— the comment between the two specs hides the pair from byte-strict.
+The .ml equivalent over module bodies is
+`(under structure (seq (kind value_definition) (kind value_definition)))`.
+
+### OCaml authoring notes
+
+- To capture a definition's name: `(under let_binding (seq (capture @fn
+  value_name) parameter))` — the binding's children are the name, then
+  parameters, then the body.
+- `attribute` (`[@…]`) is a named extra that can float between items
+  but is content, not trivia — the ruby-heredoc precedent.
+- Norm tables (`lang/ocaml.norm.toml`, `lang/ocaml_interface.norm.toml`,
+  EXPERIMENTAL headers): FUNCTION = `value_definition` (.ml) /
+  `value_specification` (.mli), IDENT = `value_name`, BLOCK =
+  `signature` + `structure` (ocaml has no statement-suite kind).
