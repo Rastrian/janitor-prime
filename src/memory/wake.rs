@@ -320,6 +320,7 @@ fn merge_oldest(
     store: &TreeStore,
     tiles: &[Tile],
 ) -> Result<Option<(usize, Tile)>, JanitorError> {
+    let total = facts.len() as u64;
     for index in 0..tiles.len().saturating_sub(1) {
         if let (Tile::Block { slot: a, .. }, Tile::Block { slot: b, .. }) =
             (&tiles[index], &tiles[index + 1])
@@ -331,6 +332,16 @@ fn merge_oldest(
                 size: 2 * a.size,
                 lo: a.lo,
             };
+            // The bias rule is a layout contract, not a tiling-time detail:
+            // the parent must satisfy `size <= alpha * age` exactly as the
+            // initial tiling does (found by the KP-6 property test —
+            // n=17, budget=23 merged [0,8)+[8,16) into [0,16), age 1,
+            // 16 > alpha*1). A parent that would violate it is skipped;
+            // the over-budget path then drops from the oldest end instead.
+            let age = total - (parent.lo + parent.size);
+            if parent.size > PRESENT_BIAS_ALPHA * age {
+                continue;
+            }
             let text = read_or_gate(facts, store, &parent)?;
             return Ok(Some((index, Tile::Block { slot: parent, text })));
         }
