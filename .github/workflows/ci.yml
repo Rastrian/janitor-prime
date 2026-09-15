@@ -163,7 +163,9 @@ jobs:
       - name: cargo-zigbuild (preferred)
         id: zigbuild
         run: |
-          python3 -m pip install ziglang
+          python3 -m venv /tmp/zigvenv
+          /tmp/zigvenv/bin/python -m pip install ziglang
+          export PATH="/tmp/zigvenv/bin:$PATH"
           cargo install cargo-zigbuild --locked
           cargo zigbuild --release --target x86_64-unknown-linux-musl --features lang-all
       - name: musl-gcc fallback

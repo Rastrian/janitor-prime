@@ -109,7 +109,9 @@ jobs:
         # Same install path as ci.yml's musl-smoke job (A.5). zigbuild is
         # a cargo wrapper: output lands in target/<target>/release/ too.
         run: |
-          python3 -m pip install ziglang
+          python3 -m venv /tmp/zigvenv
+          /tmp/zigvenv/bin/python -m pip install ziglang
+          export PATH="/tmp/zigvenv/bin:$PATH"
           cargo install cargo-zigbuild --locked
           cargo zigbuild --release --target "$TARGET" --features lang-all
       - name: Build (native cargo)
