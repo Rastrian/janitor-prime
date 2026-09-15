@@ -104,6 +104,17 @@ pub fn c_language() -> Language {
     tree_sitter_c::LANGUAGE.into()
 }
 
+// --- experimental tier (F9c, ADR-0015 appended note): registered and
+// e2e-tested, but fenced out of lang-all until each trivia corpus is fully
+// curated. Same `LanguageFn` constructor shape as the stable set. ---
+
+/// The Ruby grammar (`lang-ruby`, experimental; pin-check 2026-09-15:
+/// =0.23.1 is ABI 14, verified against core 0.27's 13..=15 window).
+#[cfg(feature = "lang-ruby")]
+pub fn ruby_language() -> Language {
+    tree_sitter_ruby::LANGUAGE.into()
+}
+
 // --- parsing (A.3.3 contract) ------------------------------------------------
 
 /// Parse an overlay snapshot through the chunked-callback API (PLAN §3 F3.1,

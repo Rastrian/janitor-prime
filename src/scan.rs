@@ -1164,7 +1164,9 @@ mod tests {
         assert_eq!(report.stats.files, 0);
 
         params.max_file_size = DEFAULT_MAX_FILE_SIZE;
-        params.lang_filter = Some("ruby".into());
+        // A name no grammar will ever claim (ruby joined the registry at
+        // F9c, so it stopped being an honest "unknown" probe).
+        params.lang_filter = Some("kotlin".into());
         let err = session.scan(&params).expect_err("unknown --lang is typed");
         assert!(
             matches!(

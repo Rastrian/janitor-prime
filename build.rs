@@ -26,6 +26,11 @@ const GRAMMAR_FEATURES: &[(&str, &str)] = &[
     ("tsx", "CARGO_FEATURE_LANG_TYPESCRIPT"),
     ("java", "CARGO_FEATURE_LANG_JAVA"),
     ("c", "CARGO_FEATURE_LANG_C"),
+    // Experimental tier (F9c): surfaced by --version the same way, but NOT
+    // part of lang-all (ADR-0015 appended note) — the stable-set fence.
+    ("ruby", "CARGO_FEATURE_LANG_RUBY"),
+    ("ocaml", "CARGO_FEATURE_LANG_OCAML"),
+    ("ocaml_interface", "CARGO_FEATURE_LANG_OCAML"),
 ];
 
 fn cargo_error(message: &str) {

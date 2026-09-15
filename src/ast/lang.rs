@@ -194,6 +194,17 @@ impl LangRegistry {
             fixture: include_str!("lang/fixtures/c.c"),
             trivia: &["comment"],
         });
+        // Experimental tier (F9c): appended after the stable seven so
+        // registry order for any lang-all build is unchanged — the
+        // pin-check --version fence stays byte-stable.
+        #[cfg(feature = "lang-ruby")]
+        specs.push(LangSpec {
+            name: "ruby",
+            extensions: &["rb"],
+            language: ffi_shim::ruby_language(),
+            fixture: include_str!("lang/fixtures/ruby.rb"),
+            trivia: &["comment"],
+        });
         let kind_tables = specs.iter().map(|_| OnceLock::new()).collect();
         Self { specs, kind_tables }
     }
@@ -857,6 +868,94 @@ mod tests {
             .zip(resolved)
         {
             let name = a.kind_name(id_a, id).expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
+    /// F9c: the ruby registration, same ladder as rust/python — extension
+    /// routing (.rb, case-insensitive), named-kind resolution against the
+    /// real grammar (kind names verified against tree-sitter-ruby 0.23.1's
+    /// node-types.json), the typed `UnknownKind` for a kind ruby does not
+    /// know, and the E5 order-independent kind table. The experimental
+    /// tier's registration is exercised exactly like the stable set's —
+    /// the tier split (ADR-0015 note) is about CI fencing, not about a
+    /// second-class registry path.
+    #[test]
+    #[cfg(feature = "lang-ruby")]
+    fn ruby_registry_resolution_is_typed_routed_and_seeded() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id = a
+            .for_extension("rb")
+            .expect("lang-ruby builds register the ruby grammar");
+        assert_eq!(a.name(id), Some("ruby"));
+        assert_eq!(a.for_extension("RB"), Some(id));
+        assert_eq!(a.for_path(Path::new("/proj/app/models.rb")), Some(id),);
+
+        // Kind names verified against tree-sitter-ruby 0.23.1's
+        // node-types.json (149 named kinds) — the norm-table and KP-6
+        // anchors: methods, the bodies they live in, calls, heredoc.
+        for kind in [
+            "program",
+            "method",
+            "singleton_method",
+            "method_parameters",
+            "class",
+            "module",
+            "body_statement",
+            "block_body",
+            "do_block",
+            "identifier",
+            "call",
+            "argument_list",
+            "comment",
+            "heredoc_beginning",
+            "heredoc_body",
+        ] {
+            assert!(
+                a.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "ruby grammar must know {kind}"
+            );
+        }
+
+        let err = a
+            .resolve_kind(id, "function_definition")
+            .expect_err("a python kind name is unknown to the ruby grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "ruby", "kind": "function_definition" }))
+        );
+
+        // E5 fence: order-independent seeding, round-tripping ids, seeded
+        // from the bundled fixture (the corpus exercises modules, classes,
+        // attr macros, defs, blocks, conditionals and a heredoc).
+        let resolved: Vec<u16> = ["method", "identifier", "comment", "heredoc_body"]
+            .iter()
+            .map(|kind| a.resolve_kind(id, kind).expect("kinds ruby knows"))
+            .collect();
+        let table_a = a.kind_table(id).expect("table seeds at first use");
+        let id_b = b
+            .for_extension("rb")
+            .expect("lang-ruby builds register ruby");
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: ruby seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 100,
+            "the ruby grammar carries a real symbol table (149 named kinds)"
+        );
+        for (kind, kind_id) in ["method", "identifier", "comment", "heredoc_body"]
+            .iter()
+            .zip(resolved)
+        {
+            let name = a
+                .kind_name(id, kind_id)
+                .expect("seeded table knows the kind");
             assert_eq!(name.as_str(), *kind, "id→name must round-trip");
         }
     }
