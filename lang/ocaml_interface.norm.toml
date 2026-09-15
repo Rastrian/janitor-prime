@@ -1,0 +1,36 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-ocaml 0.26.0
+# `grammars/interface/src/node-types.json` (vendored in the grammar
+# crate), verified 2026-09-15. Every entry must resolve through
+# `LangRegistry::resolve_kind` (conformance-fenced in
+# src/ast/lang/norm.rs tests).
+#
+# STATUS: EXPERIMENTAL (F9c, ADR-0015 appended note) — same open
+# curation questions as lang/ocaml.norm.toml (let..in nesting;
+# attribute-as-named-extra), plus this grammar's own: whether the
+# FUNCTION vocabulary should eventually distinguish `val` specs from
+# definitions when a rule spans .ml and .mli files in one scan.
+#
+# Grammar notes: the interface grammar (routes .mli, LangId
+# `ocaml_interface` — the F9c two-LangId mapping) shares the
+# implementation grammar's kind vocabulary minus the statement forms:
+# there are no `value_definition`s in a signature. FUNCTION therefore
+# maps `value_specification` — `val f : t` IS the interface's function
+# surface, the honest translation of "def-shaped function" for
+# signatures. IDENT maps `value_name` (same namespace typing as the
+# implementation grammar). BLOCK maps the sequence containers:
+# `signature` (sig bodies) and `structure` (struct bodies, which
+# signatures may still mention via module types/functors).
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["value_specification"]
+IDENT = ["value_name"]
+LITERAL = ["boolean", "number", "quoted_string", "string", "unit"]
+BLOCK = ["signature", "structure"]

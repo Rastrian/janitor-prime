@@ -216,6 +216,10 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         // Experimental tier (F9c) — same mechanism, fenced out of lang-all.
         #[cfg(feature = "lang-ruby")]
         "ruby" => Some(include_str!("../../../lang/ruby.norm.toml")),
+        #[cfg(feature = "lang-ocaml")]
+        "ocaml" => Some(include_str!("../../../lang/ocaml.norm.toml")),
+        #[cfg(feature = "lang-ocaml")]
+        "ocaml_interface" => Some(include_str!("../../../lang/ocaml_interface.norm.toml")),
         _ => None,
     }
 }
