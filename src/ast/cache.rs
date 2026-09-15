@@ -26,12 +26,13 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 
 use crate::ast::errors::error_count;
 use crate::ast::ffi_shim::Tree;
+use crate::ast::fingerprint::FingerprintTable;
 use crate::vfs::{Generation, VfsPath};
 
 /// One parsed snapshot, version-pinned (Rule T2: bytes and tree die
@@ -51,6 +52,11 @@ pub struct ParseEntry {
     /// Content hash of `bytes` — the belt-and-suspenders leg of T4
     /// validation (computed once at construction).
     content_hash: u64,
+    /// Lazily-computed Merkle fingerprints (F8, §1.4.3 item 6): the pass
+    /// is O(n) and only `Unify` rules and `--duplicates` scans need it, so
+    /// it runs on first use and never for rule-only scans. Shared across
+    /// clones (one table per parse, however the entry travels).
+    fingerprints: Arc<OnceLock<Arc<FingerprintTable>>>,
 }
 
 impl ParseEntry {
@@ -64,7 +70,20 @@ impl ParseEntry {
             bytes,
             tree: Arc::new(tree),
             error_count,
+            fingerprints: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// The entry's Merkle fingerprint table, computed on first use against
+    /// `trivia` (the language's resolved comment-class kind ids — the same
+    /// table `Seq` adjacency skips, ADR-0010). Later calls — with any
+    /// arguments — return the first table: the fingerprint is a property
+    /// of the parse, and per-grammar trivia tables are constants, so in
+    /// practice every caller passes the same list.
+    pub fn fingerprints(&self, trivia: &[u16]) -> Arc<FingerprintTable> {
+        self.fingerprints
+            .get_or_init(|| Arc::new(FingerprintTable::build(&self.tree, &self.bytes, trivia)))
+            .clone()
     }
 
     /// Rule T4 validation: generation match, then Arc-pointer identity
