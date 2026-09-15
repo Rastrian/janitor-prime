@@ -1,9 +1,9 @@
 //! CLI surface (PLAN §1.6).
 //!
-//! `scan` (F4) and `apply` (F5) are the wired commands; the memory set
-//! (`init|wake|note|nap`) lands at F6. What is frozen from F0 is the
-//! *shape* of every exit: clap errors are intercepted and re-emitted as
-//! JSON envelopes so even usage mistakes stay machine-parseable on stdout
+//! `scan` (F4), `apply` (F5), and the memory set `init|wake|note|nap`
+//! (F6) are the wired commands. What is frozen from F0 is the *shape* of
+//! every exit: clap errors are intercepted and re-emitted as JSON
+//! envelopes so even usage mistakes stay machine-parseable on stdout
 //! (PLAN §1.6).
 
 use clap::Parser;
@@ -68,6 +68,73 @@ pub enum Command {
     /// stage → validate → flush out (see docs/SCHEMA.md for the payload
     /// and result shapes).
     Apply(ApplyArgs),
+    /// Create the local memory layer (`$PWD/.janitor/`: LOG.txt, TREE/,
+    /// STATE.json); refuses when it exists unless --force resets it.
+    Init(InitArgs),
+    /// Recall memory under a token budget: raw facts and summaries,
+    /// oldest-first, plus the standing global layer and state (F6).
+    Wake(WakeArgs),
+    /// Append one validated fact (one line, ≤ 280 bytes); --ptr anchors it
+    /// to a span taken from janitor's own reports, --commit to a commit.
+    Note(NoteArgs),
+    /// The compression protocol: no args prints the next pending request;
+    /// --slot + --text stores the agent-written summary line (F6).
+    Nap(NapArgs),
+}
+
+/// `janitor init` (PLAN §1.6, F6.7).
+#[derive(Debug, Parser)]
+pub struct InitArgs {
+    /// Reset an existing layer (destructive: the log and tree are deleted).
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `janitor wake` (PLAN §1.5.2, F6.7).
+#[derive(Debug, Parser)]
+pub struct WakeArgs {
+    /// Token budget for the memory payload (chars4 estimator; the default
+    /// mirrors OptMem's ~96 lines ≈ 8k tokens).
+    #[arg(long, default_value_t = crate::memory::wake::DEFAULT_BUDGET)]
+    pub budget: u64,
+}
+
+/// `janitor note` (PLAN §1.5.3, F6.7): exactly one anchor flavor — the
+/// compact pointer notation, a full stored-pointer JSON, a commit sha —
+/// or none (a free fact).
+#[derive(Debug, Parser)]
+#[command(
+    group(clap::ArgGroup::new("anchor").args(["ptr", "commit"]))
+)]
+pub struct NoteArgs {
+    /// Node anchor: `path:start-end:kind` (byte offsets from janitor
+    /// reports) or a stored pointer's JSON (re-anchorable).
+    #[arg(long, conflicts_with = "commit")]
+    pub ptr: Option<String>,
+
+    /// Commit anchor: a hex object name resolved via `git rev-parse`.
+    #[arg(long = "commit")]
+    pub commit: Option<String>,
+
+    /// Mark the fact architectural_lock: never compressed, never dropped.
+    #[arg(long)]
+    pub lock: bool,
+
+    /// The fact itself: one line, ≤ 280 bytes.
+    pub text: String,
+}
+
+/// `janitor nap` (PLAN §1.5.4, F6.7): `--slot` and `--text` travel
+/// together or not at all.
+#[derive(Debug, Parser)]
+pub struct NapArgs {
+    /// The slot to store (`<lo>-<hi>`, from a pending request).
+    #[arg(long, requires = "text")]
+    pub slot: Option<String>,
+
+    /// The one-line summary (≤ 256 bytes), written by the agent.
+    #[arg(long, requires = "slot")]
+    pub text: Option<String>,
 }
 
 /// `janitor apply` (PLAN §3 F5.6, docs/SCHEMA.md): exactly one payload
@@ -311,6 +378,123 @@ mod tests {
         // Both sources: usage error (conflicts_with).
         let err = Cli::try_parse_from(["janitor", "apply", "--diff", "{}", "--diff-file", "-"])
             .expect_err("one source only");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+    }
+
+    /// F6: the memory commands parse with their defaults and their
+    /// together-or-not-at-all flags (docs/SCHEMA.md carries the payloads).
+    #[test]
+    fn memory_subcommands_parse_with_defaults() {
+        // init
+        let cli = Cli::try_parse_from(["janitor", "init"]).expect("init");
+        let Some(Command::Init(args)) = cli.command else {
+            unreachable!("init subcommand");
+        };
+        assert!(!args.force);
+
+        // wake: default budget, override
+        let cli = Cli::try_parse_from(["janitor", "wake"]).expect("wake");
+        let Some(Command::Wake(args)) = cli.command else {
+            unreachable!("wake subcommand");
+        };
+        assert_eq!(args.budget, crate::memory::wake::DEFAULT_BUDGET);
+        let cli = Cli::try_parse_from(["janitor", "wake", "--budget", "128"]).expect("wake budget");
+        let Some(Command::Wake(args)) = cli.command else {
+            unreachable!("wake subcommand");
+        };
+        assert_eq!(args.budget, 128);
+
+        // note: free fact, anchored fact, locked fact
+        let cli =
+            Cli::try_parse_from(["janitor", "note", "the overlay invariants hold"]).expect("note");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert_eq!(args.text, "the overlay invariants hold");
+        assert!(args.ptr.is_none() && args.commit.is_none() && !args.lock);
+
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "note",
+            "--ptr",
+            "src/lib.rs:120-480:function_item",
+            "--lock",
+            "read_dir never consults the buffer",
+        ])
+        .expect("anchored note");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert_eq!(
+            args.ptr.as_deref(),
+            Some("src/lib.rs:120-480:function_item")
+        );
+        assert!(args.lock);
+
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "note",
+            "--commit",
+            "0123456789abcdef0123456789abcdef01234567",
+            "the refactor landed here",
+        ])
+        .expect("commit note");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert_eq!(
+            args.commit.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+
+        // --ptr and --commit conflict; a missing text is a usage error.
+        let err = Cli::try_parse_from([
+            "janitor",
+            "note",
+            "--ptr",
+            "a:0-4:identifier",
+            "--commit",
+            "0123456789abcdef0123456789abcdef01234567",
+            "t",
+        ])
+        .expect_err("one anchor flavor");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+        let err = Cli::try_parse_from(["janitor", "note"]).expect_err("text is required");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+
+        // nap: bare (next pending), and slot+text together
+        let cli = Cli::try_parse_from(["janitor", "nap"]).expect("nap");
+        let Some(Command::Nap(args)) = cli.command else {
+            unreachable!("nap subcommand");
+        };
+        assert!(args.slot.is_none() && args.text.is_none());
+
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "nap",
+            "--slot",
+            "0-2",
+            "--text",
+            "facts 0-1: the overlay invariants",
+        ])
+        .expect("nap settle");
+        let Some(Command::Nap(args)) = cli.command else {
+            unreachable!("nap subcommand");
+        };
+        assert_eq!(args.slot.as_deref(), Some("0-2"));
+        assert_eq!(
+            args.text.as_deref(),
+            Some("facts 0-1: the overlay invariants")
+        );
+
+        // Slot without text (and vice versa): usage error.
+        let err = Cli::try_parse_from(["janitor", "nap", "--slot", "0-2"]).expect_err("slot alone");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+        let err = Cli::try_parse_from(["janitor", "nap", "--text", "x"]).expect_err("text alone");
         let (_envelope, code) = clap_error_envelope(&err);
         assert_eq!(code, envelope::EXIT_USAGE);
     }

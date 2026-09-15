@@ -128,3 +128,190 @@ of the file's bytes, formatted `{:016x}`. It is an identity check, not a
 security property. Obtain the value from janitor's own output (any apply
 report's `sha_before`/`sha_after`) rather than recomputing it — the
 contract is within-tool-session consistency.
+
+## The memory layer (F6) — `init` / `wake` / `note` / `nap`
+
+Local memory is **always** `$PWD/.janitor/` (never `$HOME`); the global
+layer reads exactly two surfaces: the embedded `share/GLOBAL.md` defaults
+and their `$XDG_CONFIG_HOME/janitor/GLOBAL.md` override. Nothing ever
+leaves the machine, and nothing ever runs in the background (ADR-0013):
+the tool sequences, the agent writes every summary.
+
+### On-disk layout (created by `janitor init`)
+
+```
+.janitor/
+  LOG.txt          append-only JSONL facts; one per line; fsync on append
+  QUARANTINE.txt   torn-tail evidence (diagnostic, never machine-read)
+  TREE/2, TREE/4…  one fixed-width file per block size (summaries)
+  STATE.json       advisory last-run scan/apply status (atomic writes)
+```
+
+`LOG.txt` line *i* is fact *i* — **position is identity** (ids are line
+indexes; the next id is the line count). Line shape:
+
+```json
+{"v":1,"id":42,"ts":"2026-09-14T12:00:00Z","ptr":{…}|null,"text":"…","flags":[]}
+```
+
+- `text`: one line, ≤ 280 bytes (`E_NOTE_INVALID` otherwise);
+- `flags`: `["architectural_lock"]` marks a fact **exempt from
+  compression** — never inside a summary block, never dropped by budget
+  truncation, always surfaced raw at its position;
+- a torn *trailing* line (crash mid-append) is quarantined to
+  `QUARANTINE.txt` and LOG.txt is rewritten without it, with a warning in
+  the next `wake`/`note` payload; corruption before the trailing line is
+  the `E_LOG_UNRECOVERABLE` refusal (repair would renumber every later
+  fact).
+
+`TREE/<size>` holds exactly-256-byte records: the summary text NUL-padded.
+A level's file contains, in ascending slot order, one record per
+**compressible** slot (aligned power-of-two block, fully inside the fact
+range, lock-free); a slot's record index is its rank among the level's
+compressible slots — a pure function of LOG.txt, so the tree is a pure
+cache, rebuildable (and re-requestable via `nap`) from the log alone.
+The **dense prefix is the build frontier**: out-of-order submission is
+`E_SLOT_INVALID`; resubmitting a settled slot with identical text is an
+idempotent no-op (different text: `E_SLOT_INVALID`). A block of size ≥ 4
+summarizes its two half-size children; blocks are built bottom-up.
+
+### `janitor note` — pointers (ADR-0012)
+
+```
+janitor note [--ptr <notation|json> | --commit <sha>] [--lock] TEXT
+```
+
+The compact notation (byte offsets, split from the right so the path may
+contain `:`):
+
+```
+--ptr src/lib.rs:120-480:function_item
+```
+
+A notation pointer is **stamped** from the current tree: the span+kind
+must hit a real node exactly (spans come from janitor's own `scan` output
+or an earlier note report — never from memory), and the content hash is
+written from that node's bytes. A span that is not a node boundary is
+`E_POINTER_DANGLING`: a hallucinated span is refused, never repaired.
+
+A **stored pointer JSON** (echoed verbatim in every note report's `ptr`
+and in wake items) is the re-anchorable form:
+
+```
+--ptr '{"path":"src/lib.rs","span":[0,27],"kind_name":"function_item","content_sha":"2fc7ae9ebd3514a4"}'
+```
+
+Stored-pointer resolution is three-way: exact span+hash hit ⇒ stored
+unchanged; a same-kind node with the same `content_sha` within 4096 bytes
+of the old span ⇒ **re-anchored** (`"reanchored": true` with the byte
+`drift`, and the *stored* pointer carries the new coordinates so the next
+resolution is exact); neither ⇒ `E_POINTER_DANGLING`. `content_sha` is
+the same 16-hex SipHash convention as [`content_sha`](#content_sha).
+
+`--commit <sha>` (4–64 hex chars; resolved through `git rev-parse
+--verify <sha>^{commit}` as a subprocess) anchors the fact to a commit;
+the stored pointer carries the resolved full sha. An unresolvable sha is
+`E_COMMIT_INVALID`.
+
+Success:
+
+```json
+{ "schema": "janitor.v1", "ok": true, "data": {
+    "appended": true, "id": 3,
+    "text": "alpha re-anchored after the insert",
+    "ptr": { "path": "lib.rs", "span": [27, 54],
+             "kind_name": "function_item", "content_sha": "2fc7ae9ebd3514a4" },
+    "reanchored": true, "drift": 27,
+    "flags": [], "warnings": [] } }
+```
+
+### `janitor wake --budget N` — budgeted recall
+
+Default budget 8192 tokens; estimator `"chars4"`: each item's cost is
+`ceil(bytes/4)`, and the payload's `estimate` is the sum of served item
+costs. When every fact raw fits the budget, every fact is served raw and
+TREE is not consulted. Otherwise the id range is tiled oldest-first with
+aligned power-of-two blocks under **present-bias** (a block stays whole
+only if `size ≤ 8 × age`, where age is the count of newer facts — the
+newest facts are raw by construction); over budget, sibling blocks merge
+into parents and then whole tiles drop from the oldest end
+(`"truncated": true`); leftover budget splits the largest blocks.
+Locked facts are pinned raw always.
+
+Payload (flattened: the recall core plus the standing context):
+
+```json
+{ "schema": "janitor.v1", "ok": true, "data": {
+    "awake": true, "budget_tokens": 30, "estimator": "chars4",
+    "estimate": 18, "truncated": false,
+    "items": [
+      { "kind": "fact", "id": 0, "text": "…",
+        "ptr": { "sha": "…" }, "flags": [] },
+      { "kind": "summary", "slot": "0-2",
+        "covers": [0, 2], "text": "…" } ],
+    "warnings": [],
+    "global": { "source": "embedded", "text": "…", "estimate": 600 },
+    "state": { "updated": "…", "last_scan": { … }, "last_apply": { … } },
+    "hints": [ "…" ] } }
+```
+
+`global.estimate` is informational — the budget governs the memory
+payload, not the standing instructions. `state` is STATE.json's contents
+(or `null`): `{ "last_scan": {"ts","files","matches","skipped"},
+"last_apply": {"ts","files","edits","dry_run"} }`, written atomically by
+every successful `scan`/`apply` **only when `.janitor/` exists**.
+
+**Completeness gate:** when compression is needed and a block the layout
+needs has no stored summary, `wake` refuses with `E_NAP_PENDING` — never
+holes served silently. `details.slot` is the needed block;
+`details.request` is the protocol's next **actionable** step (see `nap`),
+which may be a descendant when the tree is not built that deep yet.
+
+### `janitor nap` — the synchronous compression protocol
+
+```
+janitor nap                                  # the next pending request
+janitor nap --slot "0-2" --text "<line>"     # store the agent's line
+```
+
+Bare `nap` returns levels-ascending, slots-ascending — the canonical
+build order (so every proposed block's children are already settled):
+
+```json
+{ "schema": "janitor.v1", "ok": true, "data": {
+    "pending": true, "slot": "0-2", "level": 2, "covers": [0, 2],
+    "source": { "kind": "facts", "facts": [ …two FactRecords… ] },
+    "instruction": "Write ONE summary line (max 256 bytes, single line) … \
+Submit: janitor nap --slot 0-2 --text \"<summary>\"" } }
+```
+
+Blocks with more than 16 facts carry `"kind": "children"` — the two child
+summaries — as source. Summary lines are ≤ 256 bytes, single line
+(`E_SLOT_INVALID` otherwise). Nothing pending:
+
+```json
+{ "schema": "janitor.v1", "ok": true, "data": {
+    "pending": false, "message": "Nothing left to compress." } }
+```
+
+The loop an agent runs: `wake` → on `E_NAP_PENDING`, act on
+`details.request` (or just follow bare `nap`) → `wake` again. Every
+settle is permanent, the tree is finite, the loop converges; no
+background routine exists, and no LLM lives in the binary.
+
+### Memory error codes
+
+| code | meaning |
+|---|---|
+| `E_NOT_INITIALIZED` | `.janitor/` missing — run `janitor init` |
+| `E_ALREADY_INITIALIZED` | `init` without `--force` over an existing layer |
+| `E_NOTE_INVALID` | note text discipline (empty / multi-line / > 280 bytes) |
+| `E_POINTER_INVALID` | pointer notation/JSON malformed, or target file unparseable |
+| `E_POINTER_DANGLING` | parsed pointer will not anchor (span gone/changed) |
+| `E_COMMIT_INVALID` | commit sha not hex, git missing, or unresolvable |
+| `E_SLOT_INVALID` | slot notation, ordering, idempotency, or summary text discipline |
+| `E_NAP_PENDING` | wake needs an unwritten summary; request in `details` |
+| `E_LOG_CORRUPT` | (taxonomy slot) torn-tail corruption events surface as `warnings`, not errors |
+| `E_LOG_UNRECOVERABLE` | corruption before the trailing line — refused, never renumbered |
+| `E_TREE_CORRUPT` | TREE record structurally invalid |
+| `E_BUDGET_INVALID` | `wake --budget 0` |
