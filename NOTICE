@@ -21,5 +21,6 @@ This product builds on the work of others. Credits and provenance
 - tree-sitter (Max Brunsfeld et al., MIT) and the bundled grammar crates —
   tree-sitter-rust, tree-sitter-python, tree-sitter-go,
   tree-sitter-javascript, tree-sitter-typescript, tree-sitter-java,
-  tree-sitter-c (MIT) — the parsing infrastructure. A machine-generated
-  THIRD_PARTY manifest (cargo-about) lands in CI at F7 (PLAN §3 F7.3).
+  tree-sitter-c (MIT) — the parsing infrastructure. The full
+  machine-generated dependency manifest is THIRD_PARTY.md (cargo-about
+  via about.toml/about.hbs; enforced by cargo-deny in CI — PLAN §3 F7.3).

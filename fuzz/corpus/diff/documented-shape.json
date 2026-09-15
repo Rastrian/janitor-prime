@@ -1,0 +1,10 @@
+{
+    "operations": [
+        { "path": "src/x.rs",
+          "expect_sha": "0123456789abcdef",
+          "edits": [
+              { "start_byte": 10, "old_end_byte": 24,
+                "new_text": "const", "old_text": "static mut count" }
+          ] }
+    ]
+}

@@ -1,0 +1,19 @@
+# cargo-about configuration (PLAN §3 F7.3 / R13: the THIRD_PARTY manifest).
+#
+# The manifest (THIRD_PARTY.md) is generated locally with
+#   cargo about --about-file about.toml --template about.hbs --all-features > THIRD_PARTY.md
+# and committed — a checked-in artifact beats a CI-only one for audits.
+# Regenerate and re-commit whenever Cargo.lock moves.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "Unlicense",
+]
+workarounds = ["ring", "webpki", "sodiumoxide"]
