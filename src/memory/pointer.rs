@@ -28,14 +28,13 @@
 //! e.g. `src/lib.rs:120-480:function_item`) or `--commit <sha>`;
 //! `docs/SCHEMA.md` freezes it.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::apply::diff::content_sha;
 use crate::ast::ffi_shim::Node;
 use crate::ast::lang::LangRegistry;
 use crate::ast::parse::parse_snapshot;
@@ -214,15 +213,6 @@ pub fn stamp_node_pointer(
         span,
     }
     .into())
-}
-
-/// Content hash of a node's bytes — identical convention to apply's
-/// `expect_sha`/`content_sha` (SipHash-1-3 over the slice, 16 lowercase
-/// hex): identity check, not a security property.
-pub fn content_sha(bytes: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 /// Resolve a `Node` pointer against the current tree of `path`'s bytes:
@@ -437,15 +427,22 @@ mod tests {
         assert_eq!(code(err), "E_COMMIT_INVALID");
     }
 
-    /// The content hash convention matches apply's (one crate-wide
-    /// convention, cross-checked against the reference implementation).
+    /// The content hash is apply's `content_sha` — ONE crate-wide
+    /// definition since B6 (this module imported its own verbatim twin
+    /// until `scan --duplicates` flagged it). The convention holds: 16
+    /// lowercase hex, deterministic, input-sensitive.
     #[test]
-    fn content_sha_matches_the_apply_convention() {
+    fn content_sha_is_the_one_crate_wide_convention() {
         assert_eq!(
             content_sha(b"fn a() {}"),
             crate::apply::diff::content_sha(b"fn a() {}")
         );
         assert_eq!(content_sha(b"").len(), 16);
+        assert!(
+            content_sha(b"")
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_ne!(content_sha(b"a"), content_sha(b"b"));
     }
 

@@ -80,7 +80,9 @@ fn read_seed_utf8(path: &std::path::Path) -> String {
 /// bare and hyphenated identifiers, comments, whitespace, a multibyte run,
 /// and characters the lexer must refuse — concatenated in arbitrary order
 /// and count. The regex-ish generator: every token the lexer knows, plus
-/// the ones it must reject.
+/// the ones it must reject. The v0.3 B1 pieces (string literals with and
+/// without terminators, the filter heads, class brackets) join both sides
+/// of that split.
 fn rule_text() -> impl Strategy<Value = String> {
     let pieces = vec![
         "(",
@@ -95,6 +97,14 @@ fn rule_text() -> impl Strategy<Value = String> {
         "any-of",
         "constraints",
         "unify",
+        "filters",
+        "text",
+        "glob",
+        "\"",
+        "\"panic\"",
+        "\"[a-z]*\"",
+        "[",
+        "]",
         "identifier",
         "block",
         "statement-block",
@@ -140,7 +150,10 @@ fn dsl_parser_no_panic_typed_errors_only() {
     // (a) Corpus replay: the KP-6 goldens, the full surface, and the
     // adversarial set (unbalanced parens, 500-deep nesting, `@` alone,
     // `#$%`, trailing tokens, operator-as-atom, empty, multibyte,
-    // 4 KiB identifier).
+    // 4 KiB identifier) — plus the v0.3 B1 filter surface (text/glob
+    // clauses and their strings/classes, alone and composed with
+    // constraints, and their near-misses: unterminated string, bare
+    // needle, empty block, unknown filter kind, unclosed class).
     for path in corpus!("dsl") {
         let label = path.display().to_string();
         assert_dsl_outcome(&read_seed_utf8(&path), &label)

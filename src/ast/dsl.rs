@@ -7,17 +7,19 @@
 //! [`DslError`] carrying the byte position, the expected-token set, and —
 //! whenever the input is close to something legal — a did-you-mean
 //! suggestion good enough to retry from (docs/DSL.md §7 is the contract).
-//! `(unify …)` parses but never executes: compile refuses it with the
-//! versioned `E_UNSUPPORTED_VERSION` (ADR-0016 (6)), never a silent
-//! no-match — the grammar accepts it, v0.1 rejects it.
+//! `(unify …)` parses and, since F8, executes as a post-match fingerprint
+//! filter (ADR-0016 (6) lifted); v0.3 B1 adds the `(text …)`/`(glob …)`
+//! leaf-text predicates the same way — parsed here, resolved at compile,
+//! applied post-match, never during the NFA run.
 //!
 //! The surface (complete, docs/DSL.md §2): `under` / `seq` / `capture` /
 //! `kind` / `any-of` / `_` / bare-identifier kind sugar, `;` line comments,
-//! `@sym` capture symbols, and `(constraints (unify @a @b)…)`.
+//! `@sym` capture symbols, `(constraints (unify @a @b)…)`, and — v0.3 B1 —
+//! `(filters (text @sym "…") (glob @sym "…")…)` leaf-text predicates.
 
 use smol_str::SmolStr;
 
-use crate::ast::pattern::{NodeType, Pattern, Rule, WILDCARD_KIND};
+use crate::ast::pattern::{FilterClause, NodeType, Pattern, Rule, WILDCARD_KIND};
 use crate::error::DslError;
 
 /// Operator names, as they may appear as list heads (reserved only there —
@@ -31,10 +33,13 @@ const OPERATORS: &[&str] = &[
     "any-of",
     "constraints",
     "unify",
+    "filters",
+    "text",
+    "glob",
 ];
 
 /// The lexer's whole vocabulary (the `expected` set of `E_DSL_LEX`).
-const LEX_TOKENS: &[&str] = &["(", ")", "@symbol", "identifier", "_"];
+const LEX_TOKENS: &[&str] = &["(", ")", "@symbol", "identifier", "_", "\"string\""];
 
 /// One lexed token with the byte offset it starts at (error positions are
 /// byte offsets into the rule text, docs/DSL.md §7).
@@ -49,11 +54,16 @@ enum Token {
     Wildcard,
     Ident(SmolStr),
     Symbol(SmolStr),
+    /// A double-quoted string literal (v0.3 B1): everything between two
+    /// `"`s — no escape sequences, so a needle cannot contain a quote.
+    String(SmolStr),
 }
 
 /// Lex the rule text. `;` runs a comment to end of line; identifiers are
 /// `[A-Za-z_][A-Za-z0-9_-]*` (grammar kinds may contain `-`, e.g.
-/// javascript's `statement-block`); symbols are `@` + `[A-Za-z0-9_-]+`.
+/// javascript's `statement-block`); symbols are `@` + `[A-Za-z0-9_-]+`;
+/// strings are `"…"` with no escapes (an unterminated one is a lex error at
+/// its opening quote).
 fn lex(src: &str) -> Result<Vec<Tok>, DslError> {
     let bytes = src.as_bytes();
     let mut toks = Vec::new();
@@ -66,6 +76,22 @@ fn lex(src: &str) -> Result<Vec<Tok>, DslError> {
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
+        } else if b == b'"' {
+            // `"` is ASCII, so it can never appear inside a multibyte
+            // sequence — the slice boundaries are character boundaries.
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += 1;
+            }
+            if end == bytes.len() {
+                return Err(lex_error(i));
+            }
+            toks.push(Tok {
+                token: Token::String(SmolStr::from(&src[start..end])),
+                pos: i as u32,
+            });
+            i = end + 1;
         } else if b == b'(' {
             toks.push(Tok {
                 token: Token::LParen,
@@ -137,6 +163,7 @@ pub fn parse_rule(src: &str) -> Result<Rule, DslError> {
         toks: lex(src)?,
         at: 0,
         constraints: Vec::new(),
+        filters: Vec::new(),
     };
     let root = parser.parse_atom()?;
     if let Some(trailing) = parser.toks.get(parser.at) {
@@ -152,6 +179,7 @@ pub fn parse_rule(src: &str) -> Result<Rule, DslError> {
     Ok(Rule {
         root,
         constraints: parser.constraints,
+        filters: parser.filters,
     })
 }
 
@@ -161,6 +189,9 @@ struct Parser {
     /// Every `(unify @a @b)` collected from any `(under …)` body — carried
     /// on the [`Rule`] for compile to reject (`E_UNSUPPORTED_VERSION`).
     constraints: Vec<(SmolStr, SmolStr)>,
+    /// Every `(text …)`/`(glob …)` clause collected from any `(filters …)`
+    /// block (v0.3 B1) — carried on the [`Rule`] for compile to resolve.
+    filters: Vec<FilterClause>,
 }
 
 impl Parser {
@@ -200,11 +231,13 @@ impl Parser {
                 self.bump();
                 Ok(Pattern::Kind(NodeType::new(name)))
             }
-            Some(Token::RParen) | Some(Token::Symbol(_)) | None => Err(DslError::Parse {
-                pos,
-                expected: vec!["identifier".to_owned(), "(".to_owned(), "_".to_owned()],
-                suggestion: None,
-            }),
+            Some(Token::RParen) | Some(Token::Symbol(_)) | Some(Token::String(_)) | None => {
+                Err(DslError::Parse {
+                    pos,
+                    expected: vec!["identifier".to_owned(), "(".to_owned(), "_".to_owned()],
+                    suggestion: None,
+                })
+            }
         }
     }
 
@@ -226,10 +259,17 @@ impl Parser {
             "capture" => self.parse_capture(),
             "kind" => self.parse_kind(),
             "any-of" => self.parse_any_of(),
-            "constraints" | "unify" => Err(DslError::Parse {
+            "constraints" | "unify" | "filters" => Err(DslError::Parse {
                 pos,
                 expected: OPERATORS.iter().map(|o| format!("({o}")).collect(),
                 suggestion: Some(format!("{name} is only legal inside an (under …) body")),
+            }),
+            "text" | "glob" => Err(DslError::Parse {
+                pos,
+                expected: OPERATORS.iter().map(|o| format!("({o}")).collect(),
+                suggestion: Some(format!(
+                    "{name} is only legal inside a (filters …) block of an (under …) form"
+                )),
             }),
             other => {
                 let suggestion =
@@ -267,23 +307,23 @@ impl Parser {
             }
         };
         let body = self.parse_atom()?;
-        let at_rparen = matches!(self.peek().0, Some(Token::RParen));
-        // `(constraints …)` is a paren form: the cursor sits on its `(`.
-        let at_constraints = {
-            let toks = &self.toks;
-            matches!(toks.get(self.at).map(|t| &t.token), Some(Token::LParen))
-                && matches!(
-                    toks.get(self.at + 1).map(|t| &t.token),
-                    Some(Token::Ident(n)) if n.as_str() == "constraints"
-                )
-        };
-        if at_constraints {
+        // The optional tails, in grammar order: `(constraints …)` then
+        // `(filters …)` — both paren forms, so the cursor sits on their `(`.
+        if self.at_form("constraints") {
             self.parse_constraints()?;
-        } else if !at_rparen {
+        }
+        if self.at_form("filters") {
+            self.parse_filters()?;
+        }
+        if !self.at_rparen() {
             let (_, pos) = self.peek();
             return Err(DslError::Parse {
                 pos,
-                expected: vec![")".to_owned(), "(constraints …)".to_owned()],
+                expected: vec![
+                    ")".to_owned(),
+                    "(constraints …)".to_owned(),
+                    "(filters …)".to_owned(),
+                ],
                 suggestion: Some(
                     "an (under …) body is exactly one atom — wrap multiple atoms in (seq …)"
                         .to_owned(),
@@ -372,7 +412,7 @@ impl Parser {
     }
 
     /// `(constraints (unify @a @b)…)` — parsed into `self.constraints`
-    /// (compile rejects their presence wholesale, ADR-0016 (6)).
+    /// (compile applies them as the post-match fingerprint filter, F8).
     fn parse_constraints(&mut self) -> Result<(), DslError> {
         self.bump(); // consume `(`
         self.bump(); // consume `constraints`
@@ -404,6 +444,79 @@ impl Parser {
         Ok(())
     }
 
+    /// `(filters (text @sym "…") | (glob @sym "…")…)` (v0.3 B1) — one or
+    /// more leaf-text predicates, parsed into `self.filters` in written
+    /// order (multiple clauses AND at eval; compile resolves the symbols
+    /// and validates glob patterns).
+    fn parse_filters(&mut self) -> Result<(), DslError> {
+        self.bump(); // consume `(`
+        self.bump(); // consume `filters`
+        let mut count = 0_usize;
+        while !self.at_rparen() && !self.at_end() {
+            let (token, pos) = self.peek();
+            if !matches!(token, Some(Token::LParen)) {
+                return Err(DslError::Parse {
+                    pos,
+                    expected: vec![
+                        "(text @sym \"…\")".to_owned(),
+                        "(glob @sym \"…\")".to_owned(),
+                        ")".to_owned(),
+                    ],
+                    suggestion: None,
+                });
+            }
+            self.bump();
+            let (token, pos) = self.peek();
+            let Some(Token::Ident(name)) = token else {
+                return Err(DslError::Parse {
+                    pos,
+                    expected: vec!["text".to_owned(), "glob".to_owned()],
+                    suggestion: None,
+                });
+            };
+            let name = name.clone();
+            if !matches!(name.as_str(), "text" | "glob") {
+                return Err(DslError::Parse {
+                    pos,
+                    expected: vec!["text".to_owned(), "glob".to_owned()],
+                    suggestion: Some(format!(
+                        "{name} is not a filter — the filters are (text @sym \"…\") \
+                         and (glob @sym \"…\")"
+                    )),
+                });
+            }
+            self.bump();
+            let sym = self.expect_symbol()?;
+            let literal = self.expect_string()?;
+            self.expect_rparen()?;
+            let clause = if name.as_str() == "text" {
+                FilterClause::Text {
+                    sym,
+                    needle: literal,
+                }
+            } else {
+                FilterClause::Glob {
+                    sym,
+                    pattern: literal,
+                }
+            };
+            self.filters.push(clause);
+            count += 1;
+        }
+        if count == 0 {
+            let (_, pos) = self.peek();
+            return Err(DslError::Parse {
+                pos,
+                expected: vec!["filter".to_owned()],
+                suggestion: Some(
+                    "a (filters …) needs at least one (text …) or (glob …)".to_owned(),
+                ),
+            });
+        }
+        self.expect_rparen()?;
+        Ok(())
+    }
+
     fn expect_symbol(&mut self) -> Result<SmolStr, DslError> {
         let (token, pos) = self.peek();
         match token {
@@ -418,6 +531,39 @@ impl Parser {
                 suggestion: None,
             }),
         }
+    }
+
+    /// A filter's string literal (v0.3 B1) — quotes required, so a bare
+    /// needle (the natural near-miss) names its fix.
+    fn expect_string(&mut self) -> Result<SmolStr, DslError> {
+        let (token, pos) = self.peek();
+        match token {
+            Some(Token::String(text)) => {
+                let text = text.clone();
+                self.bump();
+                Ok(text)
+            }
+            _ => Err(DslError::Parse {
+                pos,
+                expected: vec!["\"string\"".to_owned()],
+                suggestion: Some(
+                    "filter texts are double-quoted — e.g. (text @sym \"panic\")".to_owned(),
+                ),
+            }),
+        }
+    }
+
+    /// Whether the cursor sits on `(` followed by the operator `head` —
+    /// the shape of the optional `(constraints …)`/`(filters …)` tails of
+    /// an `(under …)` form.
+    fn at_form(&self, head: &str) -> bool {
+        matches!(
+            self.toks.get(self.at).map(|t| &t.token),
+            Some(Token::LParen)
+        ) && matches!(
+            self.toks.get(self.at + 1).map(|t| &t.token),
+            Some(Token::Ident(n)) if n.as_str() == head
+        )
     }
 
     fn expect_rparen(&mut self) -> Result<(), DslError> {
@@ -454,6 +600,7 @@ fn describe(token: &Token) -> &'static str {
         Token::Wildcard => "\"_\"",
         Token::Ident(_) => "identifier",
         Token::Symbol(_) => "@symbol",
+        Token::String(_) => "\"string\"",
     }
 }
 
@@ -650,6 +797,132 @@ mod tests {
         );
     }
 
+    /// v0.3 B1: `(filters …)` clauses parse onto the rule in written
+    /// order — the two filter kinds, several clauses (AND), a block on a
+    /// NESTED under, and the grammar-order composition with constraints.
+    /// Glob patterns are NOT validated here (that is compile's loud gate).
+    #[test]
+    fn filters_parse_onto_the_rule() {
+        let rule = parse_rule(
+            "(under _ (seq (capture @m macro_invocation)) (filters (text @m \"panic\")))",
+        )
+        .expect("the acceptance rule parses");
+        assert_eq!(
+            rule.filters,
+            vec![FilterClause::Text {
+                sym: SmolStr::from("m"),
+                needle: SmolStr::from("panic"),
+            }]
+        );
+
+        let rule = parse_rule(
+            "(under field_expression (seq _ (capture @name field_identifier)) \
+             (filters (glob @name \"un*\") (text @name \"unwrap\")))",
+        )
+        .expect("multiple clauses AND");
+        assert_eq!(
+            rule.filters,
+            vec![
+                FilterClause::Glob {
+                    sym: SmolStr::from("name"),
+                    pattern: SmolStr::from("un*"),
+                },
+                FilterClause::Text {
+                    sym: SmolStr::from("name"),
+                    needle: SmolStr::from("unwrap"),
+                },
+            ]
+        );
+
+        // A nested under may carry the block; constraints then filters, in
+        // grammar order. Strings may contain any byte but a quote —
+        // parens, semicolons, and @ are inert inside them.
+        let rule = parse_rule(
+            "(under block (seq (under function_item (capture @fn identifier) \
+             (constraints (unify @fn @fn)) (filters (glob @fn \"[a-z_]*\")))) \
+             (filters (text @fn \"; () @x\")))",
+        )
+        .expect("nested filters + constraints compose");
+        assert_eq!(
+            rule.constraints,
+            vec![(SmolStr::from("fn"), SmolStr::from("fn"))]
+        );
+        assert_eq!(rule.filters.len(), 2);
+        assert_eq!(
+            rule.filters[1],
+            FilterClause::Text {
+                sym: SmolStr::from("fn"),
+                needle: SmolStr::from("; () @x"),
+            }
+        );
+
+        // A malformed glob still PARSES — compile owns that refusal.
+        let rule = parse_rule("(under block _ (filters (glob @x \"[a\")))").unwrap();
+        assert_eq!(rule.filters.len(), 1);
+    }
+
+    /// v0.3 B1 error quality: every near-miss of the filter surface names
+    /// its fix — unterminated strings (lex, at the opening quote), a bare
+    /// needle, misplaced heads, and empty/short forms.
+    #[test]
+    fn filter_near_misses_are_typed_with_suggestions() {
+        // Unterminated string: E_DSL_LEX at the opening quote (byte 33).
+        let err = parse_rule("(under block _ (filters (text @m \"oops)))").unwrap_err();
+        assert!(
+            matches!(err, DslError::Lex { pos: 33, .. }),
+            "the opening quote at byte 33, got {err:?}"
+        );
+
+        // Bare needle (missing quotes).
+        let err = parse_rule("(under block _ (filters (text @m panic)))").unwrap_err();
+        assert!(
+            matches!(&err, DslError::Parse { suggestion: Some(s), .. } if s.contains("double-quoted")),
+            "got {err:?}"
+        );
+
+        // A filter head outside its block.
+        let err = parse_rule("(under block (text @m \"x\"))").unwrap_err();
+        assert!(
+            matches!(&err, DslError::Parse { suggestion: Some(s), .. } if s.contains("only legal inside a (filters …)")),
+            "got {err:?}"
+        );
+        let err = parse_rule("(text @m \"x\")").unwrap_err();
+        assert!(matches!(err, DslError::Parse { .. }), "got {err:?}");
+
+        // `filters` outside an under body.
+        let err = parse_rule("(filters (text @m \"x\"))").unwrap_err();
+        assert!(
+            matches!(&err, DslError::Parse { suggestion: Some(s), .. } if s.contains("only legal inside an (under …)")),
+            "got {err:?}"
+        );
+
+        // Empty block; unknown filter kind; missing symbol.
+        assert!(matches!(
+            parse_rule("(under block _ (filters))").unwrap_err(),
+            DslError::Parse { .. }
+        ));
+        let err = parse_rule("(under block _ (filters (matches @m \"x\")))").unwrap_err();
+        assert!(
+            matches!(&err, DslError::Parse { suggestion: Some(s), .. } if s.contains("not a filter")),
+            "got {err:?}"
+        );
+        assert!(matches!(
+            parse_rule("(under block _ (filters (text \"x\")))").unwrap_err(),
+            DslError::Parse { .. }
+        ));
+
+        // One body atom + a filters block is legal (the block is a tail,
+        // not a second atom); TWO atoms before it still get the
+        // wrap-in-seq suggestion.
+        assert!(parse_rule("(under block (kind a) (filters (text @x \"a\")))").is_ok());
+        let err =
+            parse_rule("(under block (kind a) (kind b) (filters (text @x \"a\")))").unwrap_err();
+        assert!(
+            matches!(&err, DslError::Parse { suggestion: Some(s), .. } if s.contains("wrap multiple atoms in (seq")),
+            "got {err:?}"
+        );
+    }
+
     /// Error quality is product surface: position, expected set, suggestion.
     #[test]
     fn typed_errors_carry_position_expected_and_suggestions() {
@@ -724,6 +997,9 @@ mod tests {
         assert_eq!(did_you_mean("Unde"), Some("under"));
         assert_eq!(did_you_mean("captrue"), Some("capture"));
         assert_eq!(did_you_mean("anyof"), Some("any-of"));
+        assert_eq!(did_you_mean("txt"), Some("text"));
+        assert_eq!(did_you_mean("fliters"), Some("filters"));
+        assert_eq!(did_you_mean("glb"), Some("glob"));
         assert_eq!(did_you_mean("zzzzzzz"), None);
     }
 }

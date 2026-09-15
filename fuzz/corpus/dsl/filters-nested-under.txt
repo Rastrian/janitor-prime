@@ -1,0 +1,1 @@
+(under block (seq (under function_item (capture @inner identifier) (filters (glob @inner "[a-z_]*")))))

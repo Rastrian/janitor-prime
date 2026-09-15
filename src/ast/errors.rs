@@ -102,7 +102,6 @@ pub fn node_count(root: Node<'_>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::lang::LangRegistry;
     use crate::ast::parse::{Splice, parse_snapshot, reparse_edited};
     use std::sync::Arc;
 
@@ -230,14 +229,10 @@ mod tests {
         ]
     }
 
+    /// The shared rust-registry helper (B6: one definition, in
+    /// `crate::ast::testing`).
     #[cfg(feature = "lang-rust")]
-    fn setup() -> (LangRegistry, crate::ast::lang::LangId) {
-        let registry = LangRegistry::new();
-        let id = registry
-            .for_extension("rs")
-            .expect("lang-rust is the default feature set");
-        (registry, id)
-    }
+    use crate::ast::testing::rust as setup;
 
     /// The KP-4 corpus against the production surface: every pristine file
     /// parses clean under the whole-file count; every mangle goes through

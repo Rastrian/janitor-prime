@@ -23,6 +23,10 @@
 //! - `nested/scoped`       — a d-deep wildcard-under chain over a
 //!   deep/wide tree: the `(node, entry)` scope cache keeps re-entered
 //!   scopes O(1) (the O(Σ scopes) bound).
+//! - `filter-text/scoped`  — v0.3 B1: match + the post-match leaf-text
+//!   filter over the `linearity` shape (n ∈ {256, 512, 1024, 2048}) —
+//!   the filter adds O(matches × clauses), never NFA work, so per-
+//!   element cost stays flat in n.
 //!
 //! **p50/p90:** run with `KP7_SUMMARY=1 cargo bench --bench
 //! matcher_linearity -- --quick` (or `cargo bench --bench
@@ -89,6 +93,7 @@ fn nested_rule(d: usize) -> String {
 struct Rig {
     program: std::sync::Arc<janitor_prime::ast::compile::Program>,
     tree: janitor_prime::ast::ffi_shim::Tree,
+    bytes: std::sync::Arc<[u8]>,
 }
 
 fn rig(rule: &str, n: usize, d: usize) -> Rig {
@@ -106,6 +111,7 @@ fn rig(rule: &str, n: usize, d: usize) -> Rig {
     Rig {
         program: std::sync::Arc::new(program),
         tree,
+        bytes,
     }
 }
 
@@ -118,6 +124,19 @@ impl Rig {
         matcher
             .matches(&SmolStr::from("bench.rs"), &mut out)
             .expect("match runs");
+        out.len()
+    }
+
+    /// Match plus the v0.3 B1 post-match text filter over the same run —
+    /// the family that pins "filters are O(matches × clauses) on top of
+    /// the linear match, never inside the NFA" (docs/DSL.md §3).
+    fn run_filtered(&self) -> usize {
+        let mut out = Vec::new();
+        let mut matcher = Matcher::new(&self.program, &self.tree, 0);
+        matcher
+            .matches(&SmolStr::from("bench.rs"), &mut out)
+            .expect("match runs");
+        janitor_prime::ast::eval::filter_text(&self.program, &self.tree, &self.bytes, &mut out);
         out.len()
     }
 }
@@ -244,6 +263,33 @@ fn bench_nested(c: &mut Criterion) {
     group.finish();
 }
 
+/// v0.3 B1: the leaf-text filter pass over the SAME wide-scope runs as
+/// `kp7/linearity` — every let captured, a text clause keeping only the
+/// innermost `final_a` bindings. The claim the family falsifies: the
+/// filter's cost is O(matches × clauses) *on top of* the linear match, so
+/// per-element throughput stays flat as n grows (the filter never touches
+/// the NFA, its DP, or the tree walk the matcher already paid for).
+fn bench_filter_text(c: &mut Criterion) {
+    let mut group = c.benchmark_group("b1/filter-text");
+    let rule = "(under block (seq (capture @l let_declaration)) \
+                (filters (text @l \"final_a\")))";
+    for n in [256_usize, 512, 1024, 2048] {
+        let rig = rig(rule, n, 1);
+        let unfiltered = rig.run();
+        let filtered = rig.run_filtered();
+        assert_eq!(filtered, n, "exactly one final_a per sibling statement");
+        assert!(
+            unfiltered > filtered,
+            "the clause must filter (kept {filtered} of {unfiltered})"
+        );
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("match+filter", n), &n, |b, _| {
+            b.iter(|| rig.run_filtered())
+        });
+    }
+    group.finish();
+}
+
 /// Manual p50/p90 summary (the numbers the PLAN row carries). Criterion
 /// owns the statistical reporting for the benches above; this loop prints
 /// straightforward full-match p50/p90 per family×size so the scaling is
@@ -305,6 +351,16 @@ fn summary() {
             Box::new(move || rig.run()),
         );
     }
+    let rule = "(under block (seq (capture @l let_declaration)) \
+                (filters (text @l \"final_a\")))";
+    for n in [256_usize, 512, 1024, 2048] {
+        let rig = rig(rule, n, 1);
+        summarize(
+            "filter-text/scoped",
+            format!("n{n}"),
+            Box::new(move || rig.run_filtered()),
+        );
+    }
 }
 
 fn kp7(c: &mut Criterion) {
@@ -315,6 +371,7 @@ fn kp7(c: &mut Criterion) {
     bench_alternation(c);
     bench_linearity(c);
     bench_nested(c);
+    bench_filter_text(c);
 }
 
 criterion_group!(benches, kp7);

@@ -37,6 +37,7 @@
 //! the semantic layer stays with the project's own language servers
 //! (ADR-0017 — janitor gates syntax only).
 
+pub mod b8;
 pub mod framing;
 
 use std::io::{BufRead, Write};
@@ -206,13 +207,36 @@ impl Server {
             "ping" => Some(rpc_result(id, json!({}))),
             "tools/list" if !self.initialized => Some(not_initialized(id)),
             "tools/call" if !self.initialized => Some(not_initialized(id)),
-            "tools/list" => Some(rpc_result(id, json!({ "tools": tool_specs() }))),
+            "tools/list" => {
+                let mut tools = tool_specs();
+                b8::attach_output_schemas(&mut tools);
+                Some(rpc_result(id, json!({ "tools": tools })))
+            }
             "tools/call" => Some(self.tools_call(params, id)),
+            "prompts/list" if !self.initialized => Some(not_initialized(id)),
+            "prompts/list" => Some(rpc_result(id, json!({ "prompts": b8::prompt_specs() }))),
+            "prompts/get" if !self.initialized => Some(not_initialized(id)),
+            "prompts/get" => Some(self.prompts_get(params, id)),
             _ => Some(rpc_error(
                 id,
                 METHOD_NOT_FOUND,
                 &format!("method not found: {method}"),
             )),
+        }
+    }
+
+    /// `prompts/get` (B8): render a named prompt with the client's args.
+    fn prompts_get(&mut self, params: Option<&Value>, id: Value) -> Value {
+        let name = params
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let empty = json!({});
+        let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
+        match b8::prompt_get(&name, args) {
+            Some(prompt) => rpc_result(id, prompt),
+            None => rpc_error(id, METHOD_NOT_FOUND, &format!("unknown prompt: {name}")),
         }
     }
 
@@ -234,7 +258,7 @@ impl Server {
             id,
             json!({
                 "protocolVersion": self.negotiated,
-                "capabilities": { "tools": { "listChanged": false } },
+                "capabilities": { "tools": { "listChanged": false }, "prompts": { "listChanged": false } },
                 "serverInfo": {
                     "name": "janitor",
                     "version": env!("CARGO_PKG_VERSION"),
