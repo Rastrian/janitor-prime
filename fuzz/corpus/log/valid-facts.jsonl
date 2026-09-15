@@ -1,0 +1,3 @@
+{"v":1,"id":0,"ts":"2026-09-14T00:00:00Z","text":"overlay read_dir never consults the buffer","flags":[]}
+{"v":1,"id":1,"ts":"2026-09-14T00:00:00Z","text":"flush is two-phase by design","flags":[]}
+{"v":1,"id":2,"ts":"2026-09-14T00:00:00Z","text":"position is identity","flags":[]}
