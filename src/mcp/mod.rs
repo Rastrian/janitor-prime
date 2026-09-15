@@ -358,6 +358,7 @@ impl Server {
                     include_virtual,
                     max_file_size,
                     min_size,
+                    retain_cache: false, // MCP is stateless: no warm cache to feed
                 };
                 match session.duplicates(&params) {
                     Ok(report) => ok_envelope(&report),
@@ -372,6 +373,7 @@ impl Server {
                     include_virtual,
                     strict_trivia,
                     max_file_size,
+                    retain_cache: false, // MCP is stateless: no warm cache to feed
                 };
                 match session.scan(&params) {
                     Ok(report) => ok_envelope(&report),

@@ -78,6 +78,23 @@ impl Session {
         }
     }
 
+    /// A session over a caller-provided overlay AND parse cache, memory at
+    /// an explicit root — the daemon's warm shape (F10a, ADR-0018): one
+    /// bounded cache shared by every request and the watcher, retained
+    /// across scans.
+    pub fn with_overlay_cache_root(
+        overlay: Arc<Overlay>,
+        cache: Arc<ParseCache>,
+        memory_root: PathBuf,
+    ) -> Self {
+        Self {
+            overlay,
+            cache,
+            langs: LangRegistry::new(),
+            mem: ContextManager::new(memory_root),
+        }
+    }
+
     /// The session's overlay (shared, `Arc`).
     pub fn overlay(&self) -> &Arc<Overlay> {
         &self.overlay

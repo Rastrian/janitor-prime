@@ -86,6 +86,40 @@ pub enum Command {
     /// tools for MCP clients (docs/MCP.md). Stdout carries MCP frames
     /// only; run it from the client's config, not a terminal.
     Mcp(McpArgs),
+    /// Run the warm-cache daemon (F10a, ADR-0018): watch the workspace and
+    /// serve scan/duplicates/ping/stats over a local Unix socket
+    /// (docs/SCHEMA.md § daemon for the protocol).
+    Daemon(DaemonArgs),
+}
+
+/// `janitor daemon` (F10a, ADR-0018): defaults mirror the ADR — 2 s poll,
+/// 512 MiB cache bound, 30 min idle death.
+#[derive(Debug, Parser)]
+pub struct DaemonArgs {
+    /// Workspace root the daemon serves and watches (default: the current
+    /// directory; pinned and canonicalized at start — every request path
+    /// must resolve inside it).
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+
+    /// Socket path (default: $JANITOR_SOCK or /tmp/janitor-$UID.sock;
+    /// permissions 0600).
+    #[arg(long)]
+    pub sock: Option<PathBuf>,
+
+    /// Watch poll interval in seconds (polling, not inotify — ADR-0018 D2).
+    #[arg(long, default_value_t = crate::daemon::DEFAULT_INTERVAL_SECS)]
+    pub interval: u64,
+
+    /// Parse-cache bound in MiB; least-recently-used entries are evicted
+    /// above it (ADR-0018 D4).
+    #[arg(long, default_value_t = crate::daemon::DEFAULT_MAX_CACHE_MB)]
+    pub max_cache_mb: u64,
+
+    /// Exit after this many seconds without connections, so stale daemons
+    /// die naturally (ADR-0018 D7).
+    #[arg(long, default_value_t = crate::daemon::DEFAULT_IDLE_SECS)]
+    pub idle_secs: u64,
 }
 
 /// `janitor init` (PLAN §1.6, F6.7).
@@ -219,6 +253,13 @@ pub struct ScanArgs {
     /// (comment- and formatting-invariant) for grouping (default 8).
     #[arg(long, conflicts_with = "rule", default_value_t = crate::scan::DEFAULT_MIN_DUPLICATE_SIZE)]
     pub min_size: u32,
+
+    /// Route through the warm-cache daemon when its socket answers `ping`
+    /// for this workspace; otherwise run in-process, silently (ADR-0018
+    /// D7). The CLI never spawns the daemon itself — start it explicitly
+    /// with `janitor daemon`.
+    #[arg(long)]
+    pub daemon: bool,
 }
 
 /// Map a clap error onto (envelope, exit code) without emitting it.
