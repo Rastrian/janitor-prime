@@ -194,6 +194,37 @@ impl LangRegistry {
             fixture: include_str!("lang/fixtures/c.c"),
             trivia: &["comment"],
         });
+        // Experimental tier (F9c): appended after the stable seven so
+        // registry order for any lang-all build is unchanged — the
+        // pin-check --version fence stays byte-stable.
+        #[cfg(feature = "lang-ruby")]
+        specs.push(LangSpec {
+            name: "ruby",
+            extensions: &["rb"],
+            language: ffi_shim::ruby_language(),
+            fixture: include_str!("lang/fixtures/ruby.rb"),
+            trivia: &["comment"],
+        });
+        // One crate, two LangIds (F9c mapping decision): .ml compiles as
+        // `ocaml`, .mli as `ocaml_interface`. The crate's third grammar
+        // (ocaml_type) carries no file types upstream, so it registers
+        // nothing — documented in docs/SCHEMA.md.
+        #[cfg(feature = "lang-ocaml")]
+        specs.push(LangSpec {
+            name: "ocaml",
+            extensions: &["ml"],
+            language: ffi_shim::ocaml_language(),
+            fixture: include_str!("lang/fixtures/ocaml.ml"),
+            trivia: &["comment"],
+        });
+        #[cfg(feature = "lang-ocaml")]
+        specs.push(LangSpec {
+            name: "ocaml_interface",
+            extensions: &["mli"],
+            language: ffi_shim::ocaml_interface_language(),
+            fixture: include_str!("lang/fixtures/ocaml_interface.mli"),
+            trivia: &["comment"],
+        });
         let kind_tables = specs.iter().map(|_| OnceLock::new()).collect();
         Self { specs, kind_tables }
     }
@@ -858,6 +889,203 @@ mod tests {
         {
             let name = a.kind_name(id_a, id).expect("seeded table knows the kind");
             assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
+    /// F9c: the ruby registration, same ladder as rust/python — extension
+    /// routing (.rb, case-insensitive), named-kind resolution against the
+    /// real grammar (kind names verified against tree-sitter-ruby 0.23.1's
+    /// node-types.json), the typed `UnknownKind` for a kind ruby does not
+    /// know, and the E5 order-independent kind table. The experimental
+    /// tier's registration is exercised exactly like the stable set's —
+    /// the tier split (ADR-0015 note) is about CI fencing, not about a
+    /// second-class registry path.
+    #[test]
+    #[cfg(feature = "lang-ruby")]
+    fn ruby_registry_resolution_is_typed_routed_and_seeded() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id = a
+            .for_extension("rb")
+            .expect("lang-ruby builds register the ruby grammar");
+        assert_eq!(a.name(id), Some("ruby"));
+        assert_eq!(a.for_extension("RB"), Some(id));
+        assert_eq!(a.for_path(Path::new("/proj/app/models.rb")), Some(id),);
+
+        // Kind names verified against tree-sitter-ruby 0.23.1's
+        // node-types.json (149 named kinds) — the norm-table and KP-6
+        // anchors: methods, the bodies they live in, calls, heredoc.
+        for kind in [
+            "program",
+            "method",
+            "singleton_method",
+            "method_parameters",
+            "class",
+            "module",
+            "body_statement",
+            "block_body",
+            "do_block",
+            "identifier",
+            "call",
+            "argument_list",
+            "comment",
+            "heredoc_beginning",
+            "heredoc_body",
+        ] {
+            assert!(
+                a.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "ruby grammar must know {kind}"
+            );
+        }
+
+        let err = a
+            .resolve_kind(id, "function_definition")
+            .expect_err("a python kind name is unknown to the ruby grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "ruby", "kind": "function_definition" }))
+        );
+
+        // E5 fence: order-independent seeding, round-tripping ids, seeded
+        // from the bundled fixture (the corpus exercises modules, classes,
+        // attr macros, defs, blocks, conditionals and a heredoc).
+        let resolved: Vec<u16> = ["method", "identifier", "comment", "heredoc_body"]
+            .iter()
+            .map(|kind| a.resolve_kind(id, kind).expect("kinds ruby knows"))
+            .collect();
+        let table_a = a.kind_table(id).expect("table seeds at first use");
+        let id_b = b
+            .for_extension("rb")
+            .expect("lang-ruby builds register ruby");
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: ruby seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 100,
+            "the ruby grammar carries a real symbol table (149 named kinds)"
+        );
+        for (kind, kind_id) in ["method", "identifier", "comment", "heredoc_body"]
+            .iter()
+            .zip(resolved)
+        {
+            let name = a
+                .kind_name(id, kind_id)
+                .expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
+    /// F9c: the ocaml registration — one crate, two LangIds (the mapping
+    /// decision: `.ml`→ocaml, `.mli`→ocaml_interface; the crate's third
+    /// grammar carries no file types upstream). Same ladder as rust/
+    /// python/ruby: extension routing, kind resolution against the real
+    /// grammars (kind names verified against tree-sitter-ocaml 0.26.0's
+    /// node-types.json — the brief's `value_binding` does not exist; the
+    /// statement is `value_definition` wrapping a `let_binding`), the
+    /// typed `UnknownKind`, and the E5 order-independent kind table for
+    /// BOTH LangIds — the interface grammar is exercised as a first-class
+    /// language, not an alias.
+    #[test]
+    #[cfg(feature = "lang-ocaml")]
+    fn ocaml_registry_resolution_is_typed_routed_and_seeded() {
+        let a = LangRegistry::new();
+        let ml = a
+            .for_extension("ml")
+            .expect("lang-ocaml builds register the ocaml grammar");
+        let mli = a
+            .for_extension("mli")
+            .expect("lang-ocaml builds register the ocaml_interface grammar");
+        assert_eq!(a.name(ml), Some("ocaml"));
+        assert_eq!(a.name(mli), Some("ocaml_interface"));
+        assert_ne!(ml, mli, "two LangIds, not one grammar wearing two hats");
+        assert_eq!(a.for_extension("ML"), Some(ml), "case-insensitive");
+        assert_eq!(a.for_path(Path::new("/proj/lib/store.ml")), Some(ml),);
+        assert_eq!(a.for_path(Path::new("/proj/lib/store.mli")), Some(mli),);
+
+        // Implementation-grammar kinds: the definition wrapper, the
+        // binding core, the let..in carrier, module bodies, names.
+        for kind in [
+            "compilation_unit",
+            "value_definition",
+            "let_binding",
+            "let_expression",
+            "structure",
+            "module_definition",
+            "module_binding",
+            "value_name",
+            "value_path",
+            "parameter",
+            "infix_expression",
+            "comment",
+            "string",
+            "number",
+        ] {
+            assert!(
+                a.resolve_kind(ml, kind).is_ok_and(|k| k != 0),
+                "ocaml grammar must know {kind}"
+            );
+        }
+        // Interface-grammar kinds: val specs and signatures, plus the
+        // shared statement vocabulary.
+        for kind in [
+            "compilation_unit",
+            "value_specification",
+            "signature",
+            "type_definition",
+            "type_binding",
+            "value_name",
+            "function_type",
+            "comment",
+        ] {
+            assert!(
+                a.resolve_kind(mli, kind).is_ok_and(|k| k != 0),
+                "ocaml_interface grammar must know {kind}"
+            );
+        }
+
+        let err = a
+            .resolve_kind(ml, "function_definition")
+            .expect_err("a python kind name is unknown to the ocaml grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "ocaml", "kind": "function_definition" }))
+        );
+
+        // E5 fence, both LangIds: real tables that round-trip, seeded from
+        // the bundled fixtures (module/type/val-heavy .ml and .mli bodies).
+        let b = LangRegistry::new();
+        for (id, anchors) in [
+            (ml, ["value_definition", "value_name", "comment"].as_slice()),
+            (
+                mli,
+                ["value_specification", "value_name", "comment"].as_slice(),
+            ),
+        ] {
+            let resolved: Vec<u16> = anchors
+                .iter()
+                .map(|kind| a.resolve_kind(id, kind).expect("kinds ocaml knows"))
+                .collect();
+            let table = a.kind_table(id).expect("table seeds at first use");
+            let table_b = b.kind_table(id).expect("table seeds at first use");
+            assert_eq!(table, table_b, "E5: seeding must not depend on usage order");
+            assert!(
+                !table.is_empty() && table.len() > 200,
+                "the ocaml grammars carry real symbol tables (276/275 named kinds)"
+            );
+            for (kind, kind_id) in anchors.iter().zip(resolved) {
+                let name = a
+                    .kind_name(id, kind_id)
+                    .expect("seeded table knows the kind");
+                assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+            }
         }
     }
 

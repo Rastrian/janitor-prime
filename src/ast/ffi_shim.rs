@@ -104,6 +104,34 @@ pub fn c_language() -> Language {
     tree_sitter_c::LANGUAGE.into()
 }
 
+// --- experimental tier (F9c, ADR-0015 appended note): registered and
+// e2e-tested, but fenced out of lang-all until each trivia corpus is fully
+// curated. Same `LanguageFn` constructor shape as the stable set. ---
+
+/// The Ruby grammar (`lang-ruby`, experimental; pin-check 2026-09-15:
+/// =0.23.1 is ABI 14, verified against core 0.27's 13..=15 window).
+#[cfg(feature = "lang-ruby")]
+pub fn ruby_language() -> Language {
+    tree_sitter_ruby::LANGUAGE.into()
+}
+
+/// The OCaml implementation grammar (`lang-ocaml`, experimental; routes
+/// `.ml`). tree-sitter-ocaml =0.26.0 bundles three grammars in one crate
+/// (ABI 15 each); the crate's own tree-sitter.json maps `ocaml`→ml and
+/// `ocaml_interface`→mli and gives `ocaml_type` no file types, so exactly
+/// two LangIds register — the mapping decision is recorded in
+/// docs/SCHEMA.md and PLAN F9c.
+#[cfg(feature = "lang-ocaml")]
+pub fn ocaml_language() -> Language {
+    tree_sitter_ocaml::LANGUAGE_OCAML.into()
+}
+
+/// The OCaml interface grammar (`lang-ocaml`, experimental; routes `.mli`).
+#[cfg(feature = "lang-ocaml")]
+pub fn ocaml_interface_language() -> Language {
+    tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into()
+}
+
 // --- parsing (A.3.3 contract) ------------------------------------------------
 
 /// Parse an overlay snapshot through the chunked-callback API (PLAN §3 F3.1,

@@ -1,0 +1,43 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-ocaml 0.26.0
+# `grammars/ocaml/src/node-types.json` (vendored in the grammar crate),
+# verified 2026-09-15. Every entry must resolve through
+# `LangRegistry::resolve_kind` (conformance-fenced in
+# src/ast/lang/norm.rs tests).
+#
+# STATUS: EXPERIMENTAL (F9c, ADR-0015 appended note) — the mapping is
+# measured and conformance-fenced, but two curation questions stay open:
+# (1) let..in chains nest right-associatively (let_expression bodies),
+# so FUNCTION adjacency exists only at compilation_unit/structure level;
+# (2) `attribute` is a named extra that can float between items like a
+# comment but is content-bearing (annotations) and is deliberately NOT
+# trivia — whether rules need an attribute-tolerant mode is the open
+# question promotion to the stable set must answer.
+#
+# Grammar notes: ocaml's structure differs most from the C-family —
+# the brief's `value_binding` does NOT exist in tree-sitter-ocaml 0.26.0.
+# FUNCTION maps `value_definition` (the statement-level wrapper every
+# sibling-adjacency rule sees); `let_binding` is the inner core carrying
+# the name (`value_name`), parameters and body — including the nested
+# let..in instances inside `let_expression`s. A top-level `let f x = e`
+# is compilation_unit > value_definition > let_binding. `fun`/`function`
+# are `function_expression`s (expressions, not FUNCTION — the
+# python-lambda precedent). IDENT maps `value_name` — ocaml has no
+# generic `identifier`; names are namespace-typed (value_name,
+# module_name, type_constructor, …) and value_name is the value
+# namespace's. BLOCK: ocaml has no statement-suite kind; module bodies
+# (`structure`) and signature bodies (`signature`) are the sequence
+# containers. `quoted_string` is the {id|…|id} alternate literal form.
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["value_definition"]
+IDENT = ["value_name"]
+LITERAL = ["boolean", "number", "quoted_string", "string", "unit"]
+BLOCK = ["signature", "structure"]

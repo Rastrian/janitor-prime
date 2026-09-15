@@ -480,3 +480,81 @@ reports groups with ≥ 2 members.
   rayon thread count (RAYON determinism fence covers this mode).
 - **Tuning**: `--min-size` raises the floor so import blocks and tiny
   repeated idioms drop out; raise it until the report is actionable.
+
+## Language support — ruby & ocaml (F9c, v0.2 wave 2, EXPERIMENTAL TIER)
+
+Ruby and ocaml are registered, e2e-tested and documented, but **experimental**
+(ADR-0015 appended note): they live in the `lang-experimental` feature, are
+NOT part of `lang-all` (the stable set stays the seven-grammar ABI fence
+pin-check asserts), and are CI-tested in one dedicated job instead of the
+gates matrix. Promotion = full trivia-corpus curation + moving the feature
+into `lang-all`. Nothing below changes any payload shape — these are the
+per-language facts a consumer needs.
+
+### Ruby (`.rb` → `ruby`, feature `lang-ruby`, tree-sitter-ruby =0.23.1, ABI 14)
+
+- **Kind names** are the grammar's own: `program` is the root; defs are
+  `method` at every scope (ruby has no top-level functions — a top-level
+  `def` is also a `method`; `def self.x` is `singleton_method`); bodies
+  are `body_statement` (class/method/do-block bodies) and `block_body`
+  (brace bodies); `attr_reader`/`attr_accessor` are plain `call`s;
+  `identifier` names, `comment` trivia. Norm table `lang/ruby.norm.toml`
+  (EXPERIMENTAL header): FUNCTION=`method|singleton_method`,
+  IDENT=`identifier`, BLOCK=`body_statement|block_body`.
+- **Trivia** (ADR-0010): `["comment"]`, measured in `tests/kp6_ruby.rs`
+  — byte-strict loses 28.6% of method-adjacency pairs on the bundled
+  corpus.
+- **HEREDOC caveat** (the F9c measurement): the grammar splits a heredoc
+  in two — `heredoc_beginning` (`<<~SQL`) is the assignment's right-hand
+  side, while the body text floats as a named `heredoc_body` *extra*
+  parking **between statements**. It is deliberately NOT trivia
+  (content-bearing; trivia-classing it would blind `--duplicates`
+  fingerprints to heredoc text), so a `seq` spanning a heredoc-using
+  statement and the next statement matches in **neither** trivia mode.
+  Whether the vocabulary grows a heredoc-tolerant adjacency is the open
+  curation question the EXPERIMENTAL marker tracks.
+- **Blocks are children, never siblings**: `do..end` attaches a
+  `do_block` child (wrapping `body_statement`) to its `call`; `{ }`
+  attaches a `block` child (wrapping `block_body`). Also measured: a
+  bare `private` parses as an `identifier` statement — not a call, not
+  trivia — and breaks method adjacency in both modes.
+- **Apply gate**: demonstrated end to end in `tests/ruby_e2e.rs` (atomic
+  rename, refused syntax-breaking diff with coordinates, re-anchor).
+
+### OCaml (`.ml` → `ocaml`, `.mli` → `ocaml_interface`; feature `lang-ocaml`, tree-sitter-ocaml =0.26.0, ABI 15 ×3)
+
+- **The ml/mli mapping decision**: the crate bundles THREE grammars
+  (`ocaml`, `ocaml_interface`, `ocaml_type`). Its own tree-sitter.json
+  maps `ocaml`→`ml`, `ocaml_interface`→`mli`, and gives `ocaml_type` NO
+  file types — so exactly **two LangIds** register: `ocaml` and
+  `ocaml_interface`. They report as separate languages in
+  `stats.langs` (one scan over a mixed tree shows both), each file
+  re-parses under its own grammar in `apply`, and each carries its own
+  norm table (`lang/ocaml.norm.toml`, `lang/ocaml_interface.norm.toml`,
+  both EXPERIMENTAL-headed). `ocaml_type` registers nothing.
+- **Kind names**: `compilation_unit` is the root (both grammars); a
+  top-level `let f x = e` is `value_definition > let_binding`
+  (`value_name`, `parameter`s, body) — the planned `value_binding` kind
+  does NOT exist in 0.26.0; module bodies are `structure`, sig bodies
+  `signature`; in `.mli`, `val f : t` is a `value_specification`. Norm
+  tables: FUNCTION=`value_definition` (.ml) / `value_specification`
+  (.mli), IDENT=`value_name` (ocaml has no generic `identifier` — names
+  are namespace-typed), BLOCK=`signature|structure`.
+- **let..in caveat** (the measured surprise): `let a = … in let b = … in
+  body` parses as right-nested `let_expression`s — each `in` wraps the
+  rest of the chain as its body, so successive let-bindings are
+  parent-and-child, never siblings, in either trivia mode. Only
+  file-level (`compilation_unit`) and module-body (`structure`) items
+  are true siblings. `attribute` (`[@…]`) is likewise a named extra
+  that can float between items but is content — not trivia.
+- **Trivia** (ADR-0010): `["comment"]` for both LangIds, measured in
+  `tests/kp6_ocaml.rs` — byte-strict loses 20.0% of top-level binding
+  pairs and 33.3% of val-specification pairs on the bundled corpus.
+- **Apply gate caveat** (measured in `tests/ocaml_e2e.rs`): the
+  whole-file re-parse gate is ERROR/MISSING-node based, and this
+  grammar's scanner recovers an **unclosed comment** silently
+  (`(* … ` to EOF parses with zero ERROR nodes) — that breakage class
+  is NOT caught for ocaml. Deleting mandatory tokens (`in`, `let`, `=`)
+  IS caught (MISSING nodes) and is what the e2e refusal demonstrates.
+  ADR-0010's equivalence semantics otherwise generalize unchanged;
+  this is the one per-language caveat the experimental tier records.

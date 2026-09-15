@@ -1,0 +1,37 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-ruby 0.23.1
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-15. Every entry must resolve through `LangRegistry::resolve_kind`
+# (conformance-fenced in src/ast/lang/norm.rs tests).
+#
+# STATUS: EXPERIMENTAL (F9c, ADR-0015 appended note) — the mapping is
+# measured and conformance-fenced, but heredoc adjacency needs curation:
+# `heredoc_body` is a named extra that parks BETWEEN statements while
+# carrying the string's content, so it is deliberately not trivia and a
+# `seq` spanning a heredoc-using statement breaks in both modes. Whether
+# the vocabulary grows a heredoc-tolerant adjacency is the open curation
+# question promotion to the stable set must answer.
+#
+# Grammar notes: ruby has no top-level functions — `method` is the unit
+# at every scope (a top-level `def` is also a `method`), and
+# `singleton_method` covers `def self.x`; FUNCTION carries both.
+# `attr_reader`/`attr_accessor` are plain `call`s (no dedicated kind).
+# BLOCK maps the *suite* kinds — `body_statement` wraps method/class/
+# do-block bodies, `block_body` wraps brace-block bodies — while `block`
+# and `do_block` are the block expressions themselves (children of their
+# call), not suites. `lambda`/`proc` calls are expressions, not FUNCTION
+# (the python-table precedent). Symbol literals carry two quote forms;
+# `string` covers interpolation (f-string-equivalent) shapes.
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["method", "singleton_method"]
+IDENT = ["identifier"]
+LITERAL = ["chained_string", "false", "float", "integer", "nil", "simple_symbol", "string", "true"]
+BLOCK = ["body_statement", "block_body"]

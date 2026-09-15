@@ -638,6 +638,53 @@ Enable + CI-test `lang-python` first (the real test of ADR-0002), then go/typesc
 
 **F9 outcome — wave 1 python (2026-09-15): done, python fully supported.** The architecture generalized with zero engine changes: the registry, kind resolution (§1.4.2 one-behavior rule), kind-table seeding (E5), trivia policy, scan/apply/note and the re-anchor gate were already language-parametric, so enablement was fixtures + tests + CI, not refactoring. Delivered on `f9a/python`: (1) python registry paths exercised (extension routing, typed `UnknownKind` with a rust kind name as the honest probe, E5 order-independent kind tables — first CI-visible run of the python fixture-seed leg); (2) **KP-6-python trivia corpus** (five curated python idioms + the bundled real-world-style corpus `tests/fixtures/python/`): ADR-0010's python entry **stands** — trivia table `["comment"]`, with measured grammar facts NEWLINE/INDENT/DEDENT are anonymous (never named siblings; indentation lives inside the grammar, adjacency ports unchanged) and `line_continuation` is expression-interior only (fenced in `tests/kp6_python.rs`); (3) **norm tables** `lang/{rust,python}.norm.toml` + the data-driven loader (`src/ast/lang/norm.rs`, strict TOML subset, one `include_str!` arm per language — the template go/ts copy) with KP-5-fed kind conformance fences; (4) **python e2e acceptance** (`tests/python_e2e.rs`, the v0.1 definition-of-done loop through the real binary): atomic six-edit three-file rename flushed clean under the python re-parse gate, a syntax-breaking diff refused with `E_PARSE_INVALID` + node coordinates and full rollback, and a pointer note re-anchored with exact drift; (5) CI gates gain `cargo test --features lang-python` on both toolchain legs (lang-all stays pin-check's ABI fence); (6) ADR-0016(3) determinism fence extended with a python leg (byte-identical RAYON 1/8, both trivia modes). Grammar-fact corrections over the plan's assumptions: none needed — `function_definition`/`module`/`block` are as §1.4.2 sketched; the one plan-understated subtlety (decorators *wrap* defs in `decorated_definition`) is recorded in `docs/DSL.md` §11 and the python norm-table header.
 
+**F9 outcome — wave 2 ruby+ocaml, EXPERIMENTAL TIER (F9c, 2026-09-15):
+shipped as `lang-experimental`, fenced out of `lang-all`.** The
+architecture kept generalizing with zero engine changes; what changed is
+the *tier policy* (ADR-0015 appended note): wave-2 grammars register
+through the identical ladder but join a new `lang-experimental`
+meta-feature, CI-tests in one dedicated job outside the gates matrix,
+and pin-check's seven-grammar `--version` assertion stays byte-stable —
+the stable set cannot shift because an experimental grammar landed.
+Delivered on `f9c/ruby-ocaml`, serially (ruby then ocaml): (1)
+**pin-check both PASS** — tree-sitter-ruby =0.23.1 is ABI 14,
+tree-sitter-ocaml =0.26.0 bundles three ABI-15 grammars, both inside
+core 0.27's 13..=15 window, runtime dep `tree-sitter-language` ^0.1
+only (no pin bumps needed); (2) **KP-6-ruby** (3 curated patterns +
+bundled corpus, `tests/kp6_ruby.rs`): trivia `["comment"]` confirmed —
+byte-strict loses 28.6% of method-adjacency pairs; **heredoc finding**:
+`heredoc_body` is a named *extra* parking between statements while
+carrying the string's content — deliberately NOT trivia (would blind
+Unify fingerprints), so seq-over-heredoc breaks in both modes, recorded
+as the tier's adjacency caveat; blocks are children of their call
+(never siblings); bare `private` parses as an `identifier` statement;
+(3) **KP-6-ocaml** (3 patterns, the third in both grammars,
+`tests/kp6_ocaml.rs`): trivia `["comment"]` for both LangIds — strict
+loses 20.0% of binding pairs / 33.3% of val-spec pairs; **the let..in
+surprise**: chains are right-nested `let_expression`s, bindings are
+parent-and-child never siblings; `attribute` is a content-bearing named
+extra (not trivia); **apply-gate caveat**: an unclosed comment recovers
+silently in this grammar (zero ERROR nodes) — the ERROR/MISSING-based
+gate does not catch that breakage class, ocaml-specific and documented;
+(4) **norm tables** `lang/{ruby,ocaml,ocaml_interface}.norm.toml`, all
+EXPERIMENTAL-headed with their open curation questions — ruby
+FUNCTION=`method|singleton_method` (no top-level functions exist),
+ocaml FUNCTION=`value_definition` (the planned `value_binding` kind
+does not exist in 0.26.0 — grammar wins over plan) with
+`value_specification` for `.mli`; (5) **the ml/mli mapping**: one
+crate, TWO LangIds (`ocaml`/`.mli`→`ocaml_interface`) because the
+crate's own tree-sitter.json gives `ocaml_type` no file types —
+one scan reports both languages, one atomic rename diff touches `.ml`
+and `.mli` with each file re-parsed under its own grammar
+(`tests/ocaml_e2e.rs`); ruby e2e (`tests/ruby_e2e.rs`) is the reduced
+template (nap leg already covered language-agnostically); (6) CI's
+sixth job `lang-experimental` build+tests the tier and pins its
+`--version` set. Deviations recorded in the PR: two shared-file
+one-token edits where tests used "ruby" as their unknown-language probe
+(now "kotlin"), and `norm.rs`'s embedded-table test made
+registry-driven to remove the per-language list both F9 lanes would
+textually collide on.
+
 ### F10 — Beyond *(unfunded, explicit non-goals until v0.1 proves out)*
 
 LSP server (tower-lsp + tokio enter here, revisiting ADR-0008; refactree's server shape — overlays via `DidOpen`/`DidChange`, last-good snapshot — is the template, A.4) · long-lived daemon / warm parse cache (ADR-0007 disk format) · watch mode · web viewer · gix-based Commit pointers (ADR-0013) · `forget` command · tree-sitter-query import as DSL sugar · refactree-style semantic anchoring (`@ref` hyperlink holes) as a future DSL atom.
@@ -678,6 +725,8 @@ Each ADR: Context · Decision · Alternatives rejected · Consequences. Statuses
 
 **ADR-0015 — Grammars: one cargo feature per language, `lang-rust` default, `lang-all` in CI only.** *Context:* grammars are C; each adds compile time and binary size; the grammar/core matrix is ABI-governed (verified: all our grammars ABI 14–15, core 0.27 accepts 13..=15, and grammar crates don't depend on core at runtime — A.3). *Decision:* features per language; default = rust; CI builds `lang-all` as a fence against future releases shifting the matrix; all tree-sitter API touchpoints isolated in `ffi_shim.rs` so a pin-swap is one file. *Consequences:* users build the languages they serve; the matrix risk is caught at CI time, not user time. *Note (eval-1 F7):* `tree-sitter-language` declares `links = "tree-sitter-language"` — a future semver-incompatible second version pulled into the graph (e.g. by a grammar fork or vendoring) is a **hard cargo error**, not a warning; future grammar additions must keep the `^0.1` line unified.
 
+**ADR-0015 appended note (F9c, 2026-09-15) — experimental tier split.** Multi-language wave 2 adds grammars faster than their trivia corpora can be curated honestly. Decision: a new `lang-experimental` meta-feature (currently `lang-ruby` + `lang-ocaml`) collects the wave-2 grammars; **`lang-all` stays the seven-grammar stable set** and remains the pin-check ABI fence and the `--version` assertion, so experimental additions cannot shift the stable contract. CI builds+tests the experimental tier in one dedicated job (not the gates matrix); registry/extension routing is identical to the stable set — the split fences CI scope and curation debt, not capability. Promotion out of the tier = move the feature into `lang-all` once the language's KP-6 trivia corpus is fully curated (ruby/ocaml ship three measured patterns each in F9c, lighter than python's five — full curation is the promotion condition).
+
 **ADR-0016 — Match-set semantics: local maxima per pivot, flagged overlap, canonical order, deterministic across thread counts.** *Context:* eval-1 F3 + eval-2 §5.5.1/§5.5.3/§5.5.4/§5.5.5/§5.5.6: the plan fixed the `MatchReport` shape and edit ordering but never the *match set* — nesting, overlap, dedup, output order, and determinism under rayon; for an LLM consumer an under-specified match set is indistinguishable from a bug. *Decision:* (1) matches are all **local maxima per pivot**; overlapping matches from different pivots are both reported, flagged `"overlap": true`; (2) canonical output order `(start_byte, end_byte, rule_id)` — collection is `par_iter().collect()` then this sort; (3) determinism is enforced by a CI test asserting **byte-identical JSON under `RAYON_NUM_THREADS=1` and `=8`**; (4) capture priority: when multiple accepting paths bind the same symbol, **earliest-position wins** (Pike-VM-style thread priority; eval-2 §5.5.1); (5) `--include-virtual` defaults to **OFF** — anti-phantom philosophy: `scan` reports disk reality, the flag opts into overlay visibility (§1.3's union applies only when set); (6) `Unify` is stubbed in v0.1: a `unify` rule fails rule-compile with versioned `E_UNSUPPORTED_VERSION`, never a silent no-match (see ADR-0005); (7) dashmap×rayon insertion rule: phase-split snapshot-then-parse per §1.1 — workers never hold shard guards across a `par_iter` join; cache inserts happen only at collection; (8) `.janitor/STATE.json` writes are atomic via tmp+rename (concurrent agent invocations cannot interleave). *Rejected:* per-pivot greedy first-match only (drops real overlaps agents need to see). *Consequences:* `docs/SCHEMA.md` documents the match set, overlap flag, canonical order, and capture priority from day one (R12).
 
 ---
@@ -700,6 +749,8 @@ Principle (eval-2 §4.1): every KP runs **before** the phase whose architecture 
 | KP-9 | LLM agents can author correct DSL rules from `docs/DSL.md` alone — the product's actual user, otherwise untested until after release (eval-2 §5.3.1) | At F4 entry: a real LLM authors N rules from the docs alone; measure syntax-error and retry rates (typed errors + suggestions are the product surface) | ~0.5 d | **open** — if authoring fails: iterate the surface syntax *before* evaluator semantics freeze (docs drafted at F4, item F4.11) | F4 entry |
 | KP-10 | Cold-parse `scan` latency on a real repo is acceptable (ADR-0007's accepted wart, asserted but never measured — eval-2 §5.3.2) | Scan a large real repo (e.g. tree-sitter itself or a rust-analyzer checkout), cold parse; measure wall time and RAM ceiling | ~0.5 d | **measured at F1**: acceptable — rust-analyzer (1,484 files / 16.7 MB) cold-parses in 2.21 s serial (672 files/s, one parser; rayon divides further), peak RSS 15.3 MiB (streaming discipline flat); daemon/warm cache stays at F10 (memo `docs/planning/spikes/KP-10.md`) | F1.7 |
 | KP-11 | The fusion (staged+validated edits + anchored memory) measurably beats git-worktree + ast-grep for agents (eval-3 C4) | Post-v0.1 dogfood (~1 wk): agent runs `wake → scan → apply → note` on a real repo vs git-worktree + ast-grep baseline; measure broken edits / context loss | ~1 wk | **open** — no measurable reduction ⇒ the project stops at v0.1 (funding gate) | post-v0.1 (funding gate) |
+| KP-6-rb (corollary, F9c 2026-09-15) | Same hypothesis, ruby — measured, not assumed (extras carry content there) | Same method, 3 ruby idioms + bundled corpus (`tests/kp6_ruby.rs`, experimental tier) | ~0.3 d | **confirmed for ruby** — ADR-0010 stands, trivia = `["comment"]`; byte-strict loses 28.6% of method-adjacency pairs, 100% of attr→def chains (curated); NEW: `heredoc_body` is a named extra parking BETWEEN statements carrying the string content — not trivia (Unify fingerprints would go blind), seq-over-heredoc breaks in both modes (curation debt); blocks are call children, never siblings; bare `private` is an `identifier` statement | F9 |
+| KP-6-ml (corollary, F9c 2026-09-15) | Same hypothesis, ocaml (.ml + .mli) — measured, not assumed (let..in has no sibling shape) | Same method, 3 ocaml idioms (third in both grammars) + bundled corpus (`tests/kp6_ocaml.rs`, experimental tier) | ~0.4 d | **confirmed for ocaml, both LangIds** — ADR-0010 stands, trivia = `["comment"]` ×2; byte-strict loses 20.0% of binding pairs, 33.3% of val-spec pairs; NEW: let..in chains are right-nested `let_expression`s (bindings parent-and-child, never siblings — adjacency exists only at compilation_unit/structure); `attribute` is a content-bearing named extra (not trivia); apply-gate caveat: unclosed comments recover silently (no ERROR nodes) — that breakage class is uncaught for ocaml | F9 |
 
 ---
 

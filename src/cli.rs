@@ -295,7 +295,12 @@ mod tests {
                     "typescript",
                     "tsx",
                     "java",
-                    "c"
+                    "c",
+                    // Experimental tier (F9c) — same --version surface,
+                    // fenced out of lang-all (ADR-0015 appended note).
+                    "ruby",
+                    "ocaml",
+                    "ocaml_interface"
                 ]
                 .contains(grammar),
                 "unknown grammar {grammar:?} embedded by build.rs"
