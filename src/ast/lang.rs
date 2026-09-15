@@ -27,6 +27,8 @@ use smol_str::SmolStr;
 use crate::ast::ffi_shim::{self, Language, Node, Parser};
 use crate::error::{DslError, ParseError};
 
+pub mod norm;
+
 /// Index into a [`LangRegistry`]; handed out only by the registry itself, so
 /// it is always in range for the registry that minted it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -267,6 +269,17 @@ impl LangRegistry {
     /// The kind's name in this language, seeding the table at first use.
     pub fn kind_name(&self, id: LangId, kind: u16) -> Option<&SmolStr> {
         self.kind_table(id)?.get(kind)
+    }
+
+    /// The language's normalized-vocabulary table (§1.4.2), embedded at
+    /// compile time from `lang/<name>.norm.toml` and parsed on demand.
+    /// `None` when the build's languages carry no table for `id` (the
+    /// file is the enablement); `Some(Err(_))` is a broken embedded
+    /// table, which the norm-module conformance tests surface before any
+    /// release.
+    pub fn norm_table(&self, id: LangId) -> Option<Result<norm::NormTable, norm::NormError>> {
+        let name = self.name(id)?;
+        norm::embedded_source(name).map(norm::NormTable::parse)
     }
 }
 
