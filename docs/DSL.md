@@ -200,10 +200,11 @@ vocabulary in v0.1. Resolution follows one behavior:
    the scan and this accounting.
 3. The `--lang` flag accepts exactly the canonical names (`rust`, `python`,
    `go`, `javascript`, `typescript`, `tsx`, `java`, `c`, plus the
-   experimental tier's `ruby`, `ocaml`, `ocaml_interface` — F9c); a name whose
-   grammar is not in the build fails with `E_PARSE_NO_GRAMMAR_FOR_LANG`.
-   (`typescript` and `tsx` are two names for the two grammars one cargo
-   feature registers — see [§13](#13-typescript--tsx-v02-f9b)).
+   experimental tier's `ruby`, `ocaml`, `ocaml_interface` — F9c — and
+   `elixir` — F9d); a name whose grammar is not in the build fails with
+   `E_PARSE_NO_GRAMMAR_FOR_LANG`. (`typescript` and `tsx` are two names
+   for the two grammars one cargo feature registers — see
+   [§13](#13-typescript--tsx-v02-f9b)).
 
 Kind matching in the hot loop is by integer kind id, but that is invisible
 to rule authors: you always write names, reports always carry both `kind`
@@ -237,6 +238,7 @@ real matches wherever comments are idiomatic). The filter applies in
 | ruby        | `comment` *(experimental, F9c)*   |
 | ocaml       | `comment` *(experimental, F9c)*   |
 | ocaml_interface | `comment` *(experimental, F9c)*|
+| elixir      | `comment` (experimental, F9d)     |
 
 Anonymous nodes (punctuation, operators) are never in the sibling list in
 either mode — both modes are defined over named children.
@@ -846,3 +848,84 @@ The .ml equivalent over module bodies is
   EXPERIMENTAL headers): FUNCTION = `value_definition` (.ml) /
   `value_specification` (.mli), IDENT = `value_name`, BLOCK =
   `signature` + `structure` (ocaml has no statement-suite kind).
+## 14. Elixir (F9d, v0.2 wave 3 — EXPERIMENTAL TIER)
+
+Elixir compiles, registers and is e2e-tested, but is fenced OUT of
+`lang-all` until its trivia corpus is fully curated (ADR-0015 appended
+note): build with `--features lang-elixir` (or `lang-experimental` for
+the tier). Everything in §1–§11 applies verbatim; this section gives
+the elixir-specific kind names, the measured trivia facts and one
+worked example.
+
+**Common elixir kinds** (tree-sitter-elixir 0.3.5, 45 named kinds):
+`source` (the root), `call` (a def/defp clause — **and** every
+invocation, and `defmodule` itself: the grammar has no dedicated def
+kind), `do_block` (a do…end body — also the statement suite: statements
+are its direct named children), `unary_operator` (module attributes —
+`@doc`, `@spec`, `@moduledoc` are `@` wrapping a `call`), `arguments`,
+`alias` (module names — `IO`, `Enum`, defmodule heads), `identifier`,
+`stab_clause` (case/fn clause heads: `arguments` + `body`),
+`anonymous_function` (`fn … end`), `binary_operator` (assignment `a = b`
+AND whole pipe chains), `block` (parenthesized `(a; b)`), `comment`,
+`string` (heredocs included), `atom`, `charlist`, `sigil`, `integer`,
+`float`, `nil`, `boolean`.
+
+**Trivia** (§5): elixir's table is `comment` only. Measured (KP-6-elixir,
+`tests/kp6_elixir.rs`): byte-strict loses 42.9% of def-clause adjacency
+pairs on the bundled corpus (4 vs 7). Two elixir-specific facts to
+author against:
+
+- **FUNCTION = `call` over-breadth**: def clauses and ordinary calls
+  are the same kind; "every def clause whose body contains a call to
+  IO.inspect" is not expressible by kinds alone (the DSL matches
+  structure, not text — and `IO.inspect(x)` is just a `call` with a
+  `dot` target). The shape rule below is as far as v0.2 goes; a
+  discriminator (call whose target is the `def`/`defp` keyword) is the
+  recorded post-v0.2 work.
+- **Suites are the do_block itself**: the module body is the
+  `defmodule` call's `do_block`, and statements are its direct
+  children (no `body_statement` wrapper like ruby's). Adjacency rules
+  scope to `do_block`; nested `under` descends into heads and bodies
+  from there.
+
+### Example — find every do-block def clause
+
+The e2e population rule: a `call` whose children are the def/defp
+keyword `identifier`, a head `call` nested in `arguments`, and a
+`do_block`:
+
+```scheme
+(under call
+  (seq (capture @def identifier)
+       (under arguments call)
+       do_block))
+```
+
+Measured on the bundled corpus (`tests/fixtures/elixir/`): **7
+matches** — three clauses in `catalog.ex`, two in `math.ex`, two in
+`report.ex`. `defmodule` heads take an `alias` in `arguments` (not a
+call), keyword-form clauses (`do:`) carry no `do_block`, and guarded
+heads (`when`) wrap the head in a `binary_operator` — all three stay
+out honestly. To walk attribute decoration instead, KP-6 pattern 2:
+`(under do_block (seq (kind unary_operator) (kind call)))` matches a
+`@spec` directly above its def (measured: strict 1, skip 1 —
+attributes are content, not trivia).
+
+### Elixir authoring notes
+
+- Successive clauses of the SAME function are ordinary sibling `call`s
+  — there is no same-name grouping in the grammar; a comment between
+  clause heads breaks byte-strict adjacency like any other comment.
+- Assignment is a `binary_operator` sibling, and a pipe chain
+  `x |> f() |> g()` collapses to ONE `binary_operator` — def bodies
+  surface no (call, call) adjacency in that shape (fenced in
+  `tests/kp6_elixir.rs`).
+- `alias` is NOT the norm table's IDENT (module namespace, the ocaml
+  namespace-typing precedent); `fn` bodies are `anonymous_function` +
+  `stab_clause`s and are NOT FUNCTION (the python `lambda` precedent).
+- Norm table (`lang/elixir.norm.toml`, EXPERIMENTAL header): FUNCTION =
+  `call` (the documented over-breadth decision), IDENT = `identifier`,
+  LITERAL includes `string` (heredocs) and excludes `sigil` (the
+  ruby-regexp precedent), BLOCK = `block` + `body` + `do_block` —
+  `do_block` maps BLOCK deliberately: it is both the expression and
+  the suite, unlike ruby's table where suites are separate kinds.

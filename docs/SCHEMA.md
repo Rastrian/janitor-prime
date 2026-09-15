@@ -438,6 +438,69 @@ with it. Payload shapes are unchanged; the ts-specific facts:
   typescript's named imports carry the symbol), a refused
   syntax-breaking diff with coordinates, and a re-anchored pointer
   note.
+## Language support — elixir (F9d, v0.2 wave 3, EXPERIMENTAL TIER)
+
+Elixir is registered, e2e-tested and documented, but **experimental**
+(ADR-0015 appended note): it lives in the `lang-experimental` feature,
+is NOT part of `lang-all` (the stable set stays the seven-grammar ABI
+fence pin-check asserts), and is CI-tested in one dedicated job instead
+of the gates matrix. Promotion = full trivia-corpus curation + moving
+the feature into `lang-all`. Nothing below changes any payload shape —
+these are the per-language facts a consumer needs.
+
+**File routing**: `.ex` and `.exs` → one `elixir` language (feature
+`lang-elixir`, tree-sitter-elixir =0.3.5 from the elixir-lang org,
+ABI 14). The two extensions are the same grammar — the distinction is
+script-vs-compile at the BEAM level, not a syntax split (unlike
+typescript/tsx, which needed two grammars, and ocaml's .ml/.mli
+interface split).
+
+- **The FUNCTION=call mapping decision** (the F9d measurement, cited
+  from the crate's `node-types.json`): this grammar has **no dedicated
+  def kind** — the brief's guessed `definition` does not exist. A named
+  function is `call target: (identifier)` where the target is the
+  `def`/`defp` keyword, the head `add(a, b)` is a nested `call` inside
+  `arguments`, and the body is a `do_block` child. **Both clause
+  shapes measure identically** — `def add(a, b), do: a + b` and
+  `def add(a, b, c) do … end` are sibling `call`s. Consequence, fenced
+  in the e2e acceptance's docs: FUNCTION=`call` also matches every
+  ordinary invocation and `defmodule` itself; a def discriminator is
+  post-v0.2 pattern work. The norm table `lang/elixir.norm.toml`
+  (EXPERIMENTAL header) records IDENT=`identifier` (`alias` is the
+  module namespace — the ocaml namespace-typing precedent),
+  LITERAL incl. `string` (heredocs ARE strings here; `sigil` excluded,
+  the ruby-regexp precedent), BLOCK=`block|body|do_block`.
+- **do_block structure**: elixir's `do_block` is BOTH the do…end
+  expression AND the statement suite — statements are its **direct**
+  named children (no wrapper; a deliberate divergence from ruby's
+  table, where `body_statement` wraps). The module suite is the
+  `defmodule` call's `do_block`; `case`/`cond`/`receive`/`try` are
+  also `call`+`do_block`, with `stab_clause` children (`arguments` +
+  `body`); `fn … end` is `anonymous_function` (an expression — the
+  python-lambda precedent keeps it out of FUNCTION). Module attributes
+  (`@doc`/`@spec`/`@moduledoc`/`@unit`) are `unary_operator` nodes
+  wrapping a `call`, named siblings of def clauses — content-bearing,
+  deliberately NOT trivia.
+- **Clause adjacency** (the F9d trivia study, measured in
+  `tests/kp6_elixir.rs`): trivia = `["comment"]` (the only
+  comment-class kind among the grammar's 45). Successive `def`
+  clauses of the SAME name are ordinary sibling calls — there is no
+  same-name special case in the grammar; a comment between clause
+  heads is what byte-strict loses (corpus-wide: strict loses 42.9% of
+  def-clause adjacency pairs, 4 vs 7). Two measured body facts the
+  corpus pins: assignment `a = b` parses as `binary_operator`, and a
+  pipe chain `x |> f() |> g()` collapses to ONE `binary_operator`
+  sibling — so def bodies surface no (call, call) adjacency in the
+  fixture shapes.
+- **Apply gate**: demonstrated end to end in `tests/elixir_e2e.rs` —
+  an atomic six-edit two-file rename (including the `@spec` mention
+  and both Phoenix-shaped controller call sites), a refused
+  syntax-breaking diff with coordinates (an unclosed `@doc` string:
+  elixir strings run across newlines, so the ERROR node swallows the
+  module tail — measured), and a re-anchored pointer note (anchored on
+  a name unique in its file, because the renamed funnel name has four
+  content-identical occurrences and the content-hash re-anchor is
+  first-nearest).
 ## `janitor scan --duplicates` (F8)
 
 Duplicate-detection mode (mutually exclusive with `--rule`). Groups every

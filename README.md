@@ -41,16 +41,18 @@ The `lang-typescript` feature registers two grammars — `.ts` routes to
 The other three grammars (js/java/c) compile and register; their enablement
 follows the same recipe.
 
-**Experimental tier (F9c, wave 2): ruby and ocaml** — registered,
-norm-tabled, trivia-measured and e2e-tested through the same ladder, but
-fenced OUT of `lang-all` and the main gates matrix (ADR-0015 appended
-note): build with `--features lang-experimental` (ruby `.rb`; ocaml
-`.ml` + `.mli` as two languages — `ocaml` and `ocaml_interface`). CI
-runs the whole tier in one dedicated job. Promotion to the stable set
-requires full trivia-corpus curation; the measured per-language caveats
-(ruby's `heredoc_body` parking between statements; ocaml's right-nested
-`let..in` chains) are documented in docs/DSL.md §12–§13 and
-docs/SCHEMA.md.
+**Experimental tier (F9c+F9d, waves 2–3): ruby, ocaml, and elixir** —
+registered, norm-tabled, trivia-measured and e2e-tested through the same
+ladder, but fenced OUT of `lang-all` and the main gates matrix
+(ADR-0015 appended note): build with `--features lang-experimental`
+(ruby `.rb`; ocaml `.ml` + `.mli` as two languages — `ocaml` and
+`ocaml_interface`; elixir `.ex` + `.exs` as one `elixir` language — the
+extension split is script-vs-compile at the BEAM level, not a syntax
+split). CI runs the whole tier in one dedicated job. Promotion to the
+stable set requires full trivia-corpus curation; the measured
+per-language caveats (ruby's `heredoc_body` parking between statements;
+ocaml's right-nested `let..in` chains; elixir's `call`-shaped def
+clauses) are documented in docs/DSL.md §12–§15 and docs/SCHEMA.md.
 
 Known limits (honest): the three remaining grammars (js/java/c) are
 compile-and-register only until their F9 wave; no LSP,
@@ -228,8 +230,9 @@ cargo test --all-features                    # full matrix
 
 Grammars are cargo features: `lang-rust` (default), `lang-python`,
 `lang-go`, `lang-javascript`, `lang-typescript`, `lang-java`, `lang-c`,
-`lang-all`, and the F9c experimental tier `lang-ruby` + `lang-ocaml`
-(via the `lang-experimental` meta-feature — not part of `lang-all`).
+`lang-all`, and the F9c+F9d experimental tier `lang-ruby` +
+`lang-ocaml` + `lang-elixir` (via the `lang-experimental` meta-feature —
+not part of `lang-all`).
 
 ## Roadmap
 
