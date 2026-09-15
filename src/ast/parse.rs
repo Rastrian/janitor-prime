@@ -119,6 +119,73 @@ pub fn reparse_edited(
     Ok((new_bytes, tree))
 }
 
+/// §1.2.1 steps 3–6 folded over a file's whole edit set (the F5 apply
+/// loop's core): apply every splice's `InputEdit` to the (exclusively
+/// owned) old tree **descending by offset** — the same ordering as the
+/// byte splice, so each edit's original coordinates still address the
+/// right tree positions when its turn comes (every already-applied edit
+/// lives entirely at higher offsets) — then re-parse **once** against the
+/// final new bytes. `splices` must be ascending, non-overlapping, and
+/// in-range (the apply path validates this before calling);
+/// `new_bytes` must be their splice of `old_bytes` (the caller computes it
+/// once via `apply::splice::splice_descending` and shares the `Arc`).
+///
+/// The exclusivity guard runs per edit (Rule T1): a second live handle
+/// fails the whole fold to the typed `ParseError::SharedTree` before any
+/// mutation — the bytes never moved and the caller discards the taken
+/// entry.
+pub fn reparse_edited_multi(
+    parser: &mut Parser,
+    old_bytes: &Arc<[u8]>,
+    old_tree: &mut Arc<Tree>,
+    splices: &[Splice],
+    new_bytes: &Arc<[u8]>,
+) -> Result<Tree, ParseError> {
+    for splice in splices.iter().rev() {
+        splice.validate_against(old_bytes.len())?;
+        let start_position = ffi_shim::point_at(old_bytes, splice.start_byte);
+        let edit = ffi_shim::InputEdit {
+            start_byte: splice.start_byte,
+            old_end_byte: splice.old_end_byte,
+            new_end_byte: splice.new_end_byte(),
+            start_position,
+            old_end_position: ffi_shim::point_at(old_bytes, splice.old_end_byte),
+            // The region between start and the new end is exactly the
+            // inserted bytes (the replacement's remainder lies beyond
+            // old_end, untouched by later-applied higher edits), so the
+            // new end's position is the start's position advanced across
+            // new_text.
+            new_end_position: point_after(start_position, &splice.new_text),
+        };
+        ffi_shim::edit_exclusive(old_tree, &edit)?;
+    }
+    ffi_shim::parse_snapshot_bytes(parser, new_bytes, Some(old_tree)).ok_or_else(|| {
+        ParseError::NoTree {
+            detail: format!(
+                "incremental multi-edit re-parse of {} new bytes",
+                new_bytes.len()
+            ),
+        }
+    })
+}
+
+/// The position of `start + inserted.len()` in the post-insertion frame:
+/// rows cross at each newline, and the column is raw bytes since the last
+/// one (columns are BYTES — KP-3, A.3.4). The descending-fold companion of
+/// `point_at` for an edit's new end.
+fn point_after(start: ffi_shim::Point, inserted: &[u8]) -> ffi_shim::Point {
+    match inserted.iter().rposition(|b| *b == b'\n') {
+        None => ffi_shim::Point {
+            row: start.row,
+            column: start.column + inserted.len(),
+        },
+        Some(last_nl) => ffi_shim::Point {
+            row: start.row + inserted.iter().filter(|b| **b == b'\n').count(),
+            column: inserted.len() - last_nl - 1,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +380,109 @@ mod tests {
             !tree.root_node().has_error(),
             "the rename keeps the file valid"
         );
+    }
+
+    /// The KP-1 correctness contract extended to the multi-edit fold: a
+    /// file's whole edit set — including length-shifting edits earlier in
+    /// the file than later ones, the exact shape that makes ordering matter
+    /// — must land on the same tree a full re-parse of the new bytes
+    /// builds. The splices here are deliberately given in ascending order
+    /// with offsets against the ORIGINAL bytes, as the apply payload
+    /// supplies them.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn multi_edit_reparse_lands_on_the_full_parse_tree() {
+        use crate::apply::splice::splice_descending;
+
+        let (_registry, _id, mut parser) = fixture();
+        let old: Arc<[u8]> = Arc::from(corpus());
+
+        let rename_at = find(&old, b"alpha");
+        let stmt_at = find(&old, b"    let base = x + 1;\n") + "    ".len();
+        let gamma_at = find(&old, b"gamma");
+        let times_at = gamma_at + find(&old[gamma_at..], b" * 3");
+
+        let splices: Vec<Splice> = vec![
+            // Grows by 4 bytes before the next edit's site.
+            Splice {
+                start_byte: rename_at,
+                old_end_byte: rename_at + "alpha".len(),
+                new_text: b"alpha_two".to_vec(),
+            },
+            // Pure insertion at an offset the first edit shifted past.
+            Splice {
+                start_byte: stmt_at,
+                old_end_byte: stmt_at,
+                new_text: b"let probe = 2;\n    ".to_vec(),
+            },
+            // A later rename keeps the offsets honest mid-file.
+            Splice {
+                start_byte: gamma_at,
+                old_end_byte: gamma_at + "gamma".len(),
+                new_text: b"delta".to_vec(),
+            },
+            // Pure deletion at the last edit's site.
+            Splice {
+                start_byte: times_at,
+                old_end_byte: times_at + " * 3".len(),
+                new_text: Vec::new(),
+            },
+        ];
+
+        let new_bytes = splice_descending(&old, &splices).expect("validated splices fold");
+        let mut old_tree = Arc::new(parse_snapshot(&mut parser, &old).expect("old parses"));
+        let tree = reparse_edited_multi(&mut parser, &old, &mut old_tree, &splices, &new_bytes)
+            .expect("the fold succeeds");
+
+        let full = parse_snapshot(&mut parser, &new_bytes).expect("full re-parse succeeds");
+        assert_eq!(
+            tree.root_node().to_sexp(),
+            full.root_node().to_sexp(),
+            "incremental reuse must be byte-identical to a fresh parse"
+        );
+        assert_eq!(tree.root_node().byte_range(), 0..new_bytes.len());
+        assert!(
+            !tree.root_node().has_error(),
+            "the edits keep the corpus valid rust"
+        );
+
+        // The fold refuses a shared tree per edit (the guard runs inside
+        // the loop), with nothing mutated on either handle.
+        let mut shared = Arc::new(parse_snapshot(&mut parser, &old).expect("old parses"));
+        let reader = Arc::clone(&shared);
+        let err = reparse_edited_multi(&mut parser, &old, &mut shared, &splices, &new_bytes)
+            .expect_err("a reader is holding a handle");
+        assert!(
+            matches!(err, ParseError::SharedTree { count: 2 }),
+            "got {err:?}"
+        );
+        assert_eq!(Arc::strong_count(&shared), 2, "no hidden ts_tree_copy");
+        assert_eq!(
+            shared.root_node().byte_range(),
+            reader.root_node().byte_range()
+        );
+    }
+
+    /// `point_after`: columns stay bytes, rows cross at newlines, and an
+    /// insertion ending on a newline parks the new end at column 0 of the
+    /// next row — the frame `point_at` would report on the spliced buffer.
+    #[test]
+    fn point_after_advances_rows_and_byte_columns() {
+        use crate::ast::ffi_shim::Point;
+
+        let start = Point { row: 3, column: 8 };
+        let same_line = point_after(start, b"renamed");
+        assert_eq!(same_line, Point { row: 3, column: 15 });
+
+        let crossed = point_after(start, b"one\ntwo\nthree");
+        // 11 bytes after the last newline ("three").
+        assert_eq!(crossed, Point { row: 5, column: 5 });
+
+        let trailing = point_after(start, b"tail\n");
+        assert_eq!(trailing, Point { row: 4, column: 0 });
+
+        let empty = point_after(start, b"");
+        assert_eq!(empty, start);
     }
 
     /// Range validation (§1.2.1 step 2's structural half): inverted or

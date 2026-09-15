@@ -14,6 +14,8 @@
 //!   match-set layer;
 //! - `scan` — the F4 vertical slice's orchestrator: walk, skip policy,
 //!   rayon match, canonical janitor.v1 report;
+//! - `apply` — the F5 transactional rewrite loop: diff payload in,
+//!   whole-diff all-or-nothing stage → validate → flush out;
 //! - `memory`, `orchestrator` — `memory` is a typed skeleton for F6;
 //!   `orchestrator` is the F4 `Session` composition root.
 //!
@@ -25,6 +27,7 @@
 //! requires by the `GlobalAlloc` contract).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod apply;
 pub mod ast;
 pub mod cli;
 pub mod envelope;

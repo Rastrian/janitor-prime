@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crate::apply::{self, ApplyParams, ApplyReport};
 use crate::ast::cache::ParseCache;
 use crate::ast::lang::LangRegistry;
 use crate::error::JanitorError;
@@ -57,6 +58,12 @@ impl Session {
     /// Run a structural scan (see [`scan`] for the pipeline).
     pub fn scan(&self, params: &ScanParams) -> Result<ScanReport, JanitorError> {
         scan::scan(&self.overlay, &self.cache, &self.langs, params)
+    }
+
+    /// Run a transactional apply (see [`apply`] for the two-phase,
+    /// whole-diff all-or-nothing design).
+    pub fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, JanitorError> {
+        apply::apply(&self.overlay, &self.cache, &self.langs, params)
     }
 }
 
