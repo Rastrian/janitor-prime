@@ -211,8 +211,7 @@ fn python_trivia_shapes_are_measured() {
     let registry = LangRegistry::new();
     let id = registry.for_extension("py").expect("python registered");
     let mut parser = registry.parser(id).expect("parser sets up");
-    let tree =
-        ffi_shim::parse_bytes(&mut parser, source.as_bytes(), None).expect("tree parses");
+    let tree = ffi_shim::parse_bytes(&mut parser, source.as_bytes(), None).expect("tree parses");
     assert!(!tree.root_node().has_error(), "probe source parses clean");
 
     fn named_kinds(node: Node<'_>) -> Vec<String> {
@@ -256,7 +255,11 @@ fn python_trivia_shapes_are_measured() {
             stack.push(child);
         }
     }
-    assert_eq!(continuation_parents.len(), 1, "exactly one line_continuation exists");
+    assert_eq!(
+        continuation_parents.len(),
+        1,
+        "exactly one line_continuation exists"
+    );
     assert_eq!(
         continuation_parents[0], "binary_operator",
         "line_continuation is interior to the expression, never a statement sibling"
