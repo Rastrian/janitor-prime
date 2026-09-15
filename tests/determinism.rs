@@ -76,6 +76,44 @@ fn scan_json_is_byte_identical_across_rayon_thread_counts() {
     assert_eq!(envelope["data"]["stats"]["files"], 24);
 }
 
+/// v0.3 B3: the same fence over `--duplicates --summary` — the summary's
+/// per-kind rows are a pure function of the canonically ordered groups,
+/// so the whole report (aggregate included) is byte-identical under
+/// `RAYON_NUM_THREADS=1` vs `=8`, through the real binary.
+#[test]
+fn duplicates_summary_json_is_byte_identical_across_rayon_thread_counts() {
+    let tmp = corpus();
+
+    let run = |threads: u32| -> String {
+        let bin = env!("CARGO_BIN_EXE_janitor");
+        let out = Command::new(bin)
+            .env("RAYON_NUM_THREADS", threads.to_string())
+            .args(["scan", "--duplicates", "--summary", "--min-members", "3"])
+            .arg(tmp.path())
+            .output()
+            .expect("binary runs");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "duplicates under {threads} threads"
+        );
+        let mut envelope: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|err| panic!("not JSON under {threads} threads ({err})"));
+        assert!(
+            envelope["data"]["summary"].is_object(),
+            "the summary block rides the envelope"
+        );
+        envelope["data"]["stats"]["wall_ms"].take();
+        serde_json::to_string(&envelope).expect("re-serialize")
+    };
+
+    assert_eq!(
+        run(1),
+        run(8),
+        "v0.3 B3: the summary is a function of the input, not the thread count"
+    );
+}
+
 /// F9a: the same fence over **python** — the second language must inherit
 /// ADR-0016 (3) byte-identical reports under `RAYON_NUM_THREADS=1` vs
 /// `=8`, over the bundled python fixture repo (comment-heavy, decorated

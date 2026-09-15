@@ -254,6 +254,17 @@ pub struct ScanArgs {
     #[arg(long, conflicts_with = "rule", default_value_t = crate::scan::DEFAULT_MIN_DUPLICATE_SIZE)]
     pub min_size: u32,
 
+    /// Duplicates mode: only groups with at least N members survive
+    /// (default 2 — a duplicate needs two; values below 2 behave as 2).
+    #[arg(long, conflicts_with = "rule")]
+    pub min_members: Option<u32>,
+
+    /// Duplicates mode: prepend the per-kind aggregate block — group and
+    /// member counts per (language, kind) plus totals, one envelope,
+    /// no jq.
+    #[arg(long, conflicts_with = "rule")]
+    pub summary: bool,
+
     /// Route through the warm-cache daemon when its socket answers `ping`
     /// for this workspace; otherwise run in-process, silently (ADR-0018
     /// D7). The CLI never spawns the daemon itself — start it explicitly
@@ -468,11 +479,33 @@ mod tests {
             unreachable!("scan subcommand");
         };
         assert_eq!(args.min_size, crate::scan::DEFAULT_MIN_DUPLICATE_SIZE);
+        // v0.3 B3: the new knobs default off/None (back-compat)…
+        assert!(!args.summary);
+        assert_eq!(args.min_members, None);
+
+        // …and parse under --duplicates.
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "scan",
+            "--duplicates",
+            "src",
+            "--summary",
+            "--min-members",
+            "3",
+        ])
+        .expect("duplicates with the v0.3 flags");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
+        assert!(args.summary);
+        assert_eq!(args.min_members, Some(3));
 
         for argv in [
             vec!["janitor", "scan", "--duplicates", "--rule", "_"],
             vec!["janitor", "scan", "--duplicates", "--strict-trivia"],
             vec!["janitor", "scan", "--rule", "_", "--min-size", "4"],
+            vec!["janitor", "scan", "--rule", "_", "--summary"],
+            vec!["janitor", "scan", "--rule", "_", "--min-members", "3"],
         ] {
             let err = Cli::try_parse_from(argv).expect_err("mode flags exclude each other");
             let (_envelope, code) = clap_error_envelope(&err);

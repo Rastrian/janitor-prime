@@ -10,7 +10,7 @@
 //! ```json
 //! {"schema":"janitor.v1","cmd":"ping"}
 //! {"schema":"janitor.v1","cmd":"scan","rule":"(kind function_item)","path":"src"}
-//! {"schema":"janitor.v1","cmd":"duplicates","path":"src","min_size":8}
+//! {"schema":"janitor.v1","cmd":"duplicates","path":"src","min_size":8,"min_members":3,"summary":true}
 //! {"schema":"janitor.v1","cmd":"stats"}
 //! {"schema":"janitor.v1","cmd":"shutdown"}
 //! ```
@@ -62,6 +62,14 @@ pub struct Request {
     /// `duplicates` mode: minimum participating-node size (default 8).
     #[serde(default)]
     pub min_size: Option<u32>,
+    /// `duplicates` mode: only groups with at least N members survive
+    /// (v0.3 B3; default 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_members: Option<u32>,
+    /// `duplicates` mode: prepend the per-kind aggregate block (v0.3 B3;
+    /// default off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<bool>,
 }
 
 impl Request {
@@ -110,6 +118,8 @@ impl Request {
             strict_trivia: false,
             max_file_size: None,
             min_size: None,
+            min_members: None,
+            summary: None,
         }
     }
 
@@ -269,6 +279,25 @@ mod tests {
             ..Request::bare("duplicates")
         };
         duplicates.validate().expect("duplicates with tunables");
+
+        // v0.3 B3: the duplicates knobs ride the wire (append-only,
+        // optional — old request shapes are unchanged).
+        let summarized = Request {
+            min_members: Some(3),
+            summary: Some(true),
+            ..Request::bare("duplicates")
+        };
+        summarized
+            .validate()
+            .expect("duplicates with the v0.3 knobs");
+        let line = summarized.to_line().expect("serializes");
+        let parsed: Request = serde_json::from_str(&line).expect("round-trips");
+        assert_eq!(parsed.min_members, Some(3));
+        assert_eq!(parsed.summary, Some(true));
+        assert!(
+            !line.contains("\"summary\":false"),
+            "default-off knobs are skipped, not zeroed: {line}"
+        );
 
         // Wrong schema.
         let mut bad = Request::ping();

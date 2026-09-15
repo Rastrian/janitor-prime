@@ -1,5 +1,19 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (v0.3 — product truth, roadmap #3)
+- **Duplicates summary + filters (B3):** `scan --duplicates` gains
+  `--summary` (prepend the per-kind aggregate — one row per
+  (language, root kind) with group/member counts, sorted, plus totals;
+  one envelope, no jq) and `--min-members N` (only groups with ≥ N
+  members survive; values below 2 behave as 2). Defaults unchanged:
+  without the flags there is no `summary` key and the member floor stays
+  at 2. Both knobs also ride the daemon's `duplicates` request
+  (append-only optional fields) and the MCP `janitor_scan` tool, so a
+  routed response honors them instead of silently dropping them.
+  Golden-pinned on a known trio/pair/solo corpus (10 groups / 25 members
+  default; 5 / 15 under `--min-members 3`), and the summary is fenced
+  byte-identical under RAYON 1 vs 8 through the real binary.
+
 ### Added (v0.3 — product truth, roadmap #2)
 - **Daemon provenance + cache telemetry (B4):** every scan/duplicates
   response the daemon serves carries `served_by: "daemon" | "process"`

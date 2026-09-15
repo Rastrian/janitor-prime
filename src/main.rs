@@ -90,6 +90,8 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 include_virtual: args.include_virtual,
                 max_file_size: args.max_file_size,
                 min_size: args.min_size,
+                min_members: args.min_members,
+                summary: args.summary,
                 retain_cache: false,
             };
             match session.duplicates(&params) {
@@ -226,6 +228,10 @@ fn daemon_route(args: &cli::ScanArgs, root: &std::path::Path) -> Option<serde_js
         let mut request =
             janitor_prime::daemon::protocol::Request::duplicates(Some(root.display().to_string()));
         request.min_size = Some(args.min_size);
+        // v0.3 B3: the socket carries the new duplicates knobs too — a
+        // routed response must honor them, never silently drop them.
+        request.min_members = args.min_members;
+        request.summary = args.summary.then_some(true);
         request
     } else {
         janitor_prime::daemon::protocol::Request::scan(

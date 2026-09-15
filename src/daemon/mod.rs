@@ -524,6 +524,8 @@ fn execute(shared: &Shared, request: &protocol::Request) -> Result<Envelope<Valu
                 include_virtual: request.include_virtual,
                 max_file_size: request.max_file_size.unwrap_or(DEFAULT_MAX_FILE_SIZE),
                 min_size: request.min_size.unwrap_or(DEFAULT_MIN_DUPLICATE_SIZE),
+                min_members: request.min_members,
+                summary: request.summary.unwrap_or(false),
                 retain_cache: true,
             };
             let before = shared.session.cache().stats();

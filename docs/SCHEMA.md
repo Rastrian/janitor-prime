@@ -524,13 +524,22 @@ interface split).
 Duplicate-detection mode (mutually exclusive with `--rule`). Groups every
 capturable subtree at or above `--min-size` participating nodes (default 8;
 comment- and formatting-invariant) by its 128-bit Merkle fingerprint, and
-reports groups with ≥ 2 members.
+reports groups with ≥ 2 members (raised by `--min-members N`, v0.3 B3 —
+values below 2 behave as 2).
 
 ```json
 {
   "schema": "janitor.v1", "ok": true,
   "data": {
     "kind": "duplicates",
+    "min_size": 8,
+    "summary": {
+      "kinds": [
+        { "lang": "rust", "kind": "block", "groups": 2, "members": 5 },
+        { "lang": "rust", "kind": "function_item", "groups": 2, "members": 5 }
+      ],
+      "groups": 10, "members": 25
+    },
     "groups": [
       {
         "id": 0,
@@ -546,8 +555,8 @@ reports groups with ≥ 2 members.
         ]
       }
     ],
-    "stats": { "files": 1, "bytes": 29000, "wall_ms": 3,
-               "files_matched": 1, "matches": 2, "langs": {"rust": 1} }
+    "stats": { "files": 6, "bytes": 174000, "nodes": 412, "groups": 10,
+               "members": 25, "langs": {"rust": 6}, "wall_ms": 3 }
   }
 }
 ```
@@ -561,6 +570,15 @@ reports groups with ≥ 2 members.
   rayon thread count (RAYON determinism fence covers this mode).
 - **Tuning**: `--min-size` raises the floor so import blocks and tiny
   repeated idioms drop out; raise it until the report is actionable.
+- **`--summary` (v0.3 B3)** prepends the aggregate block shown above
+  (omitted without the flag): one row per (language, root kind) with its
+  group and member counts, sorted by (lang, kind), plus the group/member
+  totals — the per-kind ranking that used to need jq, one envelope.
+  `--min-members N` keeps only groups with ≥ N members; both flags also
+  ride the daemon socket (`duplicates` request's `min_members`/`summary`)
+  and the MCP `janitor_scan` tool, so a routed response honors them.
+  Defaults are unchanged: without the flags the report carries no
+  `summary` key and the member floor stays at 2.
 
 ## Language support — ruby & ocaml (F9c, v0.2 wave 2, EXPERIMENTAL TIER)
 
