@@ -15,12 +15,15 @@ use std::path::PathBuf;
 
 /// Grammar name -> cargo env var set when its feature is enabled.
 /// Order is the canonical registry order surfaced by `--version`.
+/// tsx maps to the same env var as typescript: one cargo feature
+/// registers two grammars (the crate bundles both; F9b decision).
 const GRAMMAR_FEATURES: &[(&str, &str)] = &[
     ("rust", "CARGO_FEATURE_LANG_RUST"),
     ("python", "CARGO_FEATURE_LANG_PYTHON"),
     ("go", "CARGO_FEATURE_LANG_GO"),
     ("javascript", "CARGO_FEATURE_LANG_JAVASCRIPT"),
     ("typescript", "CARGO_FEATURE_LANG_TYPESCRIPT"),
+    ("tsx", "CARGO_FEATURE_LANG_TYPESCRIPT"),
     ("java", "CARGO_FEATURE_LANG_JAVA"),
     ("c", "CARGO_FEATURE_LANG_C"),
 ];

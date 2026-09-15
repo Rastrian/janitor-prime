@@ -206,6 +206,13 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         "python" => Some(include_str!("../../../lang/python.norm.toml")),
         #[cfg(feature = "lang-go")]
         "go" => Some(include_str!("../../../lang/go.norm.toml")),
+        // `typescript` and `tsx` share one table: the tsx kind space is
+        // the JSX-bearing superset of the same grammar family, and the
+        // conformance test below resolves every kind against EACH
+        // registry entry — so a kind that ever diverges between the two
+        // grammars fails the fence, not a scan.
+        #[cfg(feature = "lang-typescript")]
+        "typescript" | "tsx" => Some(include_str!("../../../lang/typescript.norm.toml")),
         _ => None,
     }
 }
@@ -230,7 +237,7 @@ mod tests {
     /// four classes.
     #[test]
     fn embedded_tables_parse_complete() {
-        for lang in ["rust", "python", "go"] {
+        for lang in ["rust", "python", "go", "typescript", "tsx"] {
             let Some(source) = embedded_source(lang) else {
                 continue;
             };
