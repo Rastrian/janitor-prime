@@ -104,13 +104,13 @@ sequenceDiagram
         J->>O: flush all (tmp+rename) — the diff is all-or-nothing
         J-->>A: per-file flushed + sha_before/sha_after
     else any file fails
-        J->>O: nothing was ever flushed; rollback staged state
-        J-->>A: E_STALE_VIEW / E_EDIT_MISMATCH / E_PARSE_INVALID + node coordinates
+        J->>O: nothing was ever flushed — rollback of all staged state
+        J-->>A: typed refusal (see below) + offending node coordinates
         Note over A: agent rebuilds the diff — disk untouched throughout
     end
 
     A->>J: janitor note --ptr lib.rs:27-89:function_item "alpha's anchor moved here"
-    J->>E: resolve against the current tree (exact / re-anchor / E_POINTER_DANGLING)
+    J->>E: resolve against the current tree (exact hit, re-anchor, or E_POINTER_DANGLING refusal)
     J->>M: append JSONL fact (position = identity)
     A->>J: janitor nap (loop) — the agent writes each summary, the tool sequences
     J-->>A: "Nothing left to compress." when settled
@@ -121,7 +121,7 @@ Module topology — dependencies are acyclic and enforced
 
 ```mermaid
 flowchart LR
-    A[Agent / LLM] -- "JSON envelope janitor.v1" --> CLI[src/cli + src/orchestrator]
+    A["Agent (LLM)"] -- "JSON envelope janitor.v1" --> CLI[src/cli + src/orchestrator]
 
     CLI --> VFS[src/vfs - ProjectFs trait]
     CLI --> AST[src/ast - DSL + evaluator]
@@ -147,9 +147,9 @@ stateDiagram-v2
     [*] --> Validating: apply --diff (payload + old_text/expect_sha checked)
     Validating --> Validating: every file: splice, guarded edit, whole-file re-parse gate
     Validating --> Flushed: all files error_count == 0
-    Validating --> RolledBack: first typed refusal (E_STALE_VIEW / E_PARSE_INVALID / ...)
+    Validating --> RolledBack: first typed refusal (E_STALE_VIEW, E_PARSE_INVALID, ...)
     Flushed --> [*]: ordered tmp+rename, per-file outcomes in the report
-    RolledBack --> [*]: disk byte-identical to before; coordinates returned for the retry
+    RolledBack --> [*]: disk byte-identical to before, coordinates returned for the retry
 ```
 
 ## Command reference
