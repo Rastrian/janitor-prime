@@ -1,0 +1,4 @@
+; find every fn
+(under function_item ; pivot
+ (seq (capture @fn identifier)
+      block))
