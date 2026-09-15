@@ -31,6 +31,7 @@
 //! `$XDG_CONFIG_HOME/janitor/GLOBAL.md` override, nothing else.
 
 pub mod log;
+pub mod nap;
 pub mod pointer;
 pub mod tree_store;
 
