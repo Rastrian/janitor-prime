@@ -118,6 +118,18 @@ pub enum ValidateError {
     },
 }
 
+/// The structured payload of the >280-byte note refusal (v0.3 B5): the
+/// evidence an agent needs to split the note on the first try.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoteSize {
+    /// The offending text's actual byte count.
+    pub bytes: usize,
+    /// The limit ([`crate::memory::log::MAX_NOTE_BYTES`], 280).
+    pub limit: usize,
+    /// The first ~60 chars of the note — a head preview for orienting.
+    pub preview: String,
+}
+
 /// Memory domain errors (PLAN §1.5, F6).
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -142,7 +154,15 @@ pub enum MemoryError {
     /// `note` text discipline: one line, ≤ 280 bytes (OptMem-derived line
     /// budget the wake math depends on, §1.5.3).
     #[error("note rejected: {detail}")]
-    NoteInvalid { detail: String },
+    NoteInvalid {
+        detail: String,
+        /// The >280-byte wall's structured evidence (v0.3 B5): actual
+        /// bytes, the limit, and a head preview of the offending text —
+        /// so an agent can split the note instead of compressing by trial
+        /// and error. `None` for the other note-discipline refusals
+        /// (empty / multi-line).
+        size: Option<NoteSize>,
+    },
     #[error("memory not initialized at {root}; run `janitor init` first")]
     NotInitialized { root: String },
     #[error("memory already initialized at {root}; pass --force to reset")]
@@ -365,8 +385,18 @@ impl JanitorError {
             Self::Memory(MemoryError::LogUnrecoverable { line }) => {
                 Some(serde_json::json!({ "line": line }))
             }
-            Self::Memory(MemoryError::NoteInvalid { detail })
-            | Self::Memory(MemoryError::PointerNotation { detail })
+            Self::Memory(MemoryError::NoteInvalid { detail, size }) => {
+                // v0.3 B5: the size refusal carries the structured split
+                // evidence (bytes/limit/preview) alongside the sentence.
+                let mut details = serde_json::json!({ "detail": detail });
+                if let Some(size) = size {
+                    details["bytes"] = size.bytes.into();
+                    details["limit"] = size.limit.into();
+                    details["preview"] = size.preview.clone().into();
+                }
+                Some(details)
+            }
+            Self::Memory(MemoryError::PointerNotation { detail })
             | Self::Memory(MemoryError::TreeCorrupt { detail }) => {
                 Some(serde_json::json!({ "detail": detail }))
             }
@@ -530,7 +560,11 @@ mod tests {
                 "E_LOG_UNRECOVERABLE",
             ),
             (
-                MemoryError::NoteInvalid { detail: "d".into() }.into(),
+                MemoryError::NoteInvalid {
+                    detail: "d".into(),
+                    size: None,
+                }
+                .into(),
                 "E_NOTE_INVALID",
             ),
             (
