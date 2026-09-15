@@ -899,3 +899,39 @@ Post-eval reconciliation of this plan against the three reviews in `docs/evals/`
 | eval-3 C6 | reframe DSL motivation | Accepted — E13 (§0 + §1.4.3): "explicit scope semantics with a proven linearity bound (KP-7)"; KP-7 stays the falsifiability fence |
 
 **Verdicts, one line each:** eval-1 — GO-with-conditions (9): all conditions dispositioned above (c8 superseded on verified facts). eval-2 — aprovado-com-reordenacao: all nine amendments adopted. eval-3 — HYBRID with C1–C6: confirms ADR-0002 with the trigger-based C2 disposition.
+
+## Appendix C — KP-11 dogfood result (2026-09-15)
+
+The post-v0.1 funding gate was executed hours after the release, against the real v0.1.0
+binary and a real Claude Code agent (GLM 5.3 1M backend), in a throwaway clone of this
+repository at `5126af5`. Protocol: session 1 works a real maintenance task through the
+loop only (direct file editing forbidden — every edit via `janitor apply`); session 2 is
+a FRESH agent with zero context, told only to `wake` and reconstruct.
+
+**Session 1 (rename `AGE_ALPHA` → `PRESENT_BIAS_ALPHA` + stale-allow investigation):**
+8 edits attempted, 0 corrupted, 0 refused at apply time (dry-run → sha-chained whole-diff
+flush, first pass). 4 tool refusals, all corrective and accepted by the agent:
+`E_POINTER_DANGLING` (pivot-rule span ≠ node span — agent corrected its pointer from the
+typed error), 2× `E_NOTE_INVALID` (>280-byte notes), 1× `E_USAGE` (a flag gap — see
+below). 4 notes written, 2 pointer-anchored with stamped content hashes. cargo
+build/test/clippy green at exit. Side discovery: `docs/DSL.md` §8 advertises
+`scan --pretty`, which the v0.1.0 binary rejected — a real doc/binary contract split.
+
+**Session 2 (fresh agent, wake-only handoff):** reconstructed the entire prior state
+from `wake` alone — task intent, completed work, and the pending wart — with zero
+questions asked. Independently verified both claims (grep + cargo), located the wart,
+read the git history to decide the doc was the original contract (F4.0 predates the
+CLI), reconciled the BINARY to the doc (`--pretty` as a clap global flag + regression
+test, delivered via `apply`), and appended a correction to session 1's miscounted test
+tally (216 → 206) — the append-only memory self-repairing, by an agent with no stake in
+the prior session's numbers.
+
+**Gate decision: PASSED — v0.2 development is funded.** Measured against eval-3 C4's
+criteria: zero broken edits (by construction, observed in practice), zero context loss
+across a cold handoff, and the loop surfaced a product defect the release engineering
+missed. Both sessions' commits were folded back as PR fix/kp11-dogfood (rename +
+`--pretty` global flag). Remaining honestly outside this run: the baseline arm
+(git-worktree + ast-grep) was not separately executed — the comparison is against the
+history of agent-on-own-repo accidents that motivated the project, not a controlled
+A/B; a rigorous baseline pass remains optional future work.
+

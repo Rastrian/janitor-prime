@@ -46,8 +46,10 @@ pub struct Cli {
     #[arg(long)]
     pub version: bool,
 
-    /// Pretty-print the JSON envelope (stdout stays JSON either way).
-    #[arg(long)]
+    /// Pretty-print the JSON envelope (stdout stays JSON either way); parses
+    /// before or after the subcommand (docs/DSL.md §8).
+    /// global=true: clap accepts the root flag after the subcommand too.
+    #[arg(long, global = true)]
     pub pretty: bool,
 
     /// The command to run (F4 wires `scan`; apply lands at F5, the memory
@@ -248,6 +250,16 @@ mod tests {
         let cli =
             Cli::try_parse_from(["janitor", "--pretty", "--version"]).expect("valid invocation");
         assert!(cli.version);
+        assert!(cli.pretty);
+    }
+
+    /// docs/DSL.md §8 advertises `scan … [--pretty]`: the root-level flag
+    /// must parse on either side of the subcommand (cargo's `--verbose`
+    /// convention) and still reach the root `Cli` it modifies.
+    #[test]
+    fn pretty_parses_after_the_subcommand() {
+        let cli = Cli::try_parse_from(["janitor", "scan", "--rule", "_", "--pretty"])
+            .expect("scan with a trailing --pretty (docs/DSL.md §8)");
         assert!(cli.pretty);
     }
 
