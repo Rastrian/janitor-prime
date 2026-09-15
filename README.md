@@ -234,6 +234,30 @@ Grammars are cargo features: `lang-rust` (default), `lang-python`,
 `lang-ocaml` + `lang-elixir` (via the `lang-experimental` meta-feature —
 not part of `lang-all`).
 
+## Layered validation: janitor + your language server
+
+Janitor validates **syntax**: every `apply` is re-parsed against the real grammar
+before anything touches the disk, and structural rules are checked against the
+actual tree. That is the layer tree-sitter can honestly own.
+
+The **semantic** layer — types, resolved imports, borrow checks, undefined symbols —
+is intentionally **not** built into janitor. Instead of a half-broken language server
+inside the runtime, janitor's guidance (surfaced in every `wake` payload) instructs
+the consuming agent to lean on the project's real language server:
+
+- rust → `rust-analyzer` · python → `pyright`/`pylance` · go → `gopls`
+- typescript → `tsserver`/`vtsls` · ruby → `ruby-lsp` · ocaml → `ocamllsp`
+- elixir → `elixir-ls` (NextLS also works)
+
+The recommended loop for an agent session: run the project's LSP alongside janitor,
+treat janitor's gate as the write-time syntax check and the LSP's diagnostics as the
+read-time semantic check, and cross-check non-obvious edits against both before the
+final flush. Two independent verifiers, zero duplicated infrastructure — the servers
+are maintained by their language communities, not by this repo.
+
+For repository-scale policies (naming, structure, "no `unwrap` outside tests"),
+`scan --rule` is the deterministic gate — LSP diagnostics complement, not replace, it.
+
 ## Roadmap
 
 - **v0.2** — `Unify` (cross-match unification / duplicate detection via

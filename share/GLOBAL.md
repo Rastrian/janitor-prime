@@ -41,3 +41,9 @@ prompts for you to verify with `scan`, not automated rules.
 - A failed apply changes nothing — the whole diff is all-or-nothing; retry the full diff.
 - Never edit on a stale view: if expect_sha does not match, re-run `scan` and rebuild.
 - Prefer one whole-diff over many small applies; batch related edits and flush once.
+- Janitor validates SYNTAX only (tree-sitter sees structure, not types or resolved
+  imports). For semantic truth — types, unresolved symbols, dead code — rely on the
+  project's language server (rust-analyzer, pyright, gopls, ruby-lsp, elixir-ls...).
+  When wake's environment notes say a language server is available, treat its
+  diagnostics as the semantic layer and cross-check non-obvious edits against it
+  before the final flush; when none is available, say so in your final report.

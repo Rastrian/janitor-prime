@@ -920,6 +920,10 @@ New risks (not the BRIEF's own list), folded with eval-2's §6 where our mitigat
 
 ---
 
+**ADR-0017 — Semantic validation is a GUIDELINE (configure an external LSP), never a runtime dependency.** *Context:* F10 considered an in-process LSP/watch; the discovery is that janitor's gate (tree-sitter re-parse) covers syntax, while the semantic layer (types, resolved imports) is already owned by mature per-language servers (rust-analyzer, pyright, gopls, ruby-lsp, elixir-ls) that this repo would otherwise half-replicate. *Decision:* janitor instructs consuming agents — via `wake`'s guidance surface and `share/GLOBAL.md` — to run the project's language server and treat its diagnostics as the semantic layer; janitor's own gate stays the write-time syntax check. Delivery is documentation + guidance only: no tokio, no JSON-RPC, no editor matrix in this runtime (ADR-0008 unchanged; the LSP/daemon/watch F10 items become their own future decision, decoupled from validation). *Rejected:* embedding or wrapping a language server (permanent maintenance of a second public contract, competing badly with community-maintained servers); ignoring semantics (agents would rely on implicit trust where a verifier is cheap). *Consequences:* zero runtime cost; guidance quality is the product surface (GLOBAL.md is versioned and reviewed); if a future user population demands bundled tooling, this ADR is revisited — not silently extended.
+
+---
+
 ## Appendix A — Verified research facts
 
 ### A.1 Crate versions (verified via crates.io API, 2026-09-13)

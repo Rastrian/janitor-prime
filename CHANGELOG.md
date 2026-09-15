@@ -25,6 +25,7 @@
 - **CI:** lang-python/go/typescript e2e legs; experimental-tier job;
   `alloc.rs` fingerprint fence.
 
+- **Guidance:** layered-validation instructions — agents are now directed (via `share/GLOBAL.md` + `wake` hints) to run the project's language server for semantic checks; janitor's gate stays write-time syntax only (ADR-0017).
 ### Fixed
 - `merge_oldest` re-checks the present-bias rule before creating a parent
   block (property test found `n=17, budget=23`: `[0,8)+[8,16)` → `[0,16)`
