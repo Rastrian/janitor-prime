@@ -1,10 +1,10 @@
 //! CLI surface (PLAN §1.6).
 //!
-//! F0 scope: `--version` is the only command, per the F0 execution brief —
-//! the command set (`init|wake|note|nap|scan|apply`) lands with its phases
-//! (F2+). What is frozen here is the *shape* of every exit: clap errors are
-//! intercepted and re-emitted as JSON envelopes so even usage mistakes stay
-//! machine-parseable on stdout (PLAN §1.6).
+//! `scan` (F4) and `apply` (F5) are the wired commands; the memory set
+//! (`init|wake|note|nap`) lands at F6. What is frozen from F0 is the
+//! *shape* of every exit: clap errors are intercepted and re-emitted as
+//! JSON envelopes so even usage mistakes stay machine-parseable on stdout
+//! (PLAN §1.6).
 
 use clap::Parser;
 use clap::error::ErrorKind;
@@ -64,6 +64,31 @@ pub enum Command {
     /// (see docs/DSL.md for the rule language and the report shape).
     #[command(verbatim_doc_comment)]
     Scan(ScanArgs),
+    /// Transactional rewrite: diff payload in, whole-diff all-or-nothing
+    /// stage → validate → flush out (see docs/SCHEMA.md for the payload
+    /// and result shapes).
+    Apply(ApplyArgs),
+}
+
+/// `janitor apply` (PLAN §3 F5.6, docs/SCHEMA.md): exactly one payload
+/// source — `--diff` (inline JSON, or `@file` to read it from a file) or
+/// `--diff-file` (a path, or `-` for stdin, the agent-friendly pipe).
+#[derive(Debug, Parser)]
+#[command(
+    group(clap::ArgGroup::new("payload_source").required(true).args(["diff", "diff_file"]))
+)]
+pub struct ApplyArgs {
+    /// The whole-diff JSON payload; prefix @ to read it from a file.
+    #[arg(long, conflicts_with = "diff_file")]
+    pub diff: Option<String>,
+
+    /// File holding the JSON payload ("-" reads stdin).
+    #[arg(long = "diff-file")]
+    pub diff_file: Option<String>,
+
+    /// Validate + gate + report, then roll back: nothing is flushed.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `janitor scan` (PLAN §3 F4.7, docs/DSL.md §8).
@@ -218,7 +243,9 @@ mod tests {
     fn scan_subcommand_parses_with_defaults() {
         let cli = Cli::try_parse_from(["janitor", "scan", "--rule", "(under block (seq _ _))"])
             .expect("scan with only --rule");
-        let Command::Scan(args) = cli.command.expect("scan subcommand");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
         assert_eq!(args.rule, "(under block (seq _ _))");
         assert_eq!(args.path, None);
         assert_eq!(args.lang, None);
@@ -240,7 +267,9 @@ mod tests {
             "1024",
         ])
         .expect("scan with every flag");
-        let Command::Scan(args) = cli.command.expect("scan subcommand");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
         assert_eq!(args.path.as_deref(), Some(std::path::Path::new("src")));
         assert_eq!(args.lang.as_deref(), Some("rust"));
         assert!(args.include_virtual && args.strict_trivia);
@@ -251,5 +280,38 @@ mod tests {
         let (envelope, code) = clap_error_envelope(&err);
         assert_eq!(code, envelope::EXIT_USAGE);
         assert!(!envelope.ok);
+    }
+
+    /// F5: `apply` parses its flags (docs/SCHEMA.md); exactly one payload
+    /// source is required and both at once is a usage error.
+    #[test]
+    fn apply_subcommand_parses_with_one_payload_source() {
+        let cli = Cli::try_parse_from(["janitor", "apply", "--diff", r#"{"operations":[]}"#])
+            .expect("inline payload");
+        let Some(Command::Apply(args)) = cli.command else {
+            unreachable!("apply subcommand");
+        };
+        assert_eq!(args.diff.as_deref(), Some(r#"{"operations":[]}"#));
+        assert_eq!(args.diff_file, None);
+        assert!(!args.dry_run);
+
+        let cli = Cli::try_parse_from(["janitor", "apply", "--diff-file", "-", "--dry-run"])
+            .expect("stdin payload with dry-run");
+        let Some(Command::Apply(args)) = cli.command else {
+            unreachable!("apply subcommand");
+        };
+        assert_eq!(args.diff_file.as_deref(), Some("-"));
+        assert!(args.dry_run);
+
+        // No source: usage error, exit 2 (the arg group is required).
+        let err = Cli::try_parse_from(["janitor", "apply"]).expect_err("a source is required");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
+
+        // Both sources: usage error (conflicts_with).
+        let err = Cli::try_parse_from(["janitor", "apply", "--diff", "{}", "--diff-file", "-"])
+            .expect_err("one source only");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
     }
 }
