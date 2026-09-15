@@ -620,3 +620,60 @@ fn bad_workspace_refuses_without_touching_stdout() {
         "stdout stays frame-pure: no session started"
     );
 }
+
+/// B8 (PLAN-v0.3 item 8): tools/list carries an `outputSchema` on every tool,
+/// `prompts/list` exposes the guided loops, and `prompts/get` renders one —
+/// the MCP surfaces that make janitor discoverable by clients that never read
+/// the docs.
+#[test]
+fn b8_output_schema_and_prompts_round_trip() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("lib.rs"), LIB).expect("fixture");
+    let mut session = Session::start(tmp.path());
+    session.handshake();
+    session.notify("notifications/initialized");
+
+    let tools_list = session.request("tools/list", json!({}));
+    let tools = tools_list["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .clone();
+    assert_eq!(tools.len(), 6, "the six janitor tools");
+    assert!(
+        tools.iter().all(|t| t.get("outputSchema").is_some()),
+        "every tool declares its outputSchema: {tools:?}"
+    );
+
+    let prompts_list = session.request("prompts/list", json!({}));
+    let prompts = prompts_list["result"]["prompts"]
+        .as_array()
+        .expect("prompts array");
+    let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(names.contains(&"janitor_refactor_audit"), "{names:?}");
+    assert!(names.contains(&"janitor_memory_recall"), "{names:?}");
+
+    let get = session.request(
+        "prompts/get",
+        json!({
+            "name": "janitor_memory_recall",
+            "arguments": { "budget": "2000" }
+        }),
+    );
+    let messages = get["result"]["messages"]
+        .as_array()
+        .expect("prompt messages");
+    assert!(
+        !messages.is_empty(),
+        "a prompt renders at least one message"
+    );
+    assert_eq!(messages[0]["role"], "user");
+
+    // Unknown prompt: a typed error, never a panic or a stdout leak.
+    let unknown = session.request("prompts/get", json!({ "name": "nope" }));
+    assert!(
+        unknown.get("error").is_some(),
+        "unknown prompt is a typed error"
+    );
+
+    session.finish();
+}
