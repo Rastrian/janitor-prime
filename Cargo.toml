@@ -1,6 +1,6 @@
 [package]
 name = "janitor-prime"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"            # tree-sitter 0.27.0 MSRV (crates.io rust_version, verified 2026-09-13); clap 4.6.6 (1.85) and edition 2024 (1.85) sit below the binding floor
 license = "MIT OR Apache-2.0"

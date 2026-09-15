@@ -1,3 +1,30 @@
+## [Unreleased] — v0.3.0 candidates
+
+### Added
+- **DSL text predicates (B1)**: `(text @cap "exact")` and `(glob @cap "p*")`
+  post-match filters — the audit questions (TODO hunting, panic! counting,
+  method-name globs) are now expressible in scan. Linear-time promise
+  untouched (filters run post-match, O(matches × filter)).
+- **wake environment notes (B2)**: `data.environment` reports PATH-probed
+  language servers and git status — the guidance GLOBAL.md promised now
+  exists in the payload.
+- **Daemon provenance + cache telemetry (B4)**: `served_by:
+  "daemon"|"process"` + `stats.cache {hits, misses}` — silent fallback is
+  observable, warm hits are provable.
+- **Duplicates summary/filters (B3)**: `--summary` per-kind aggregate +
+  `--min-members N` group floor (deterministic under RAYON 1/8).
+- **Note ergonomics (B5)**: typed refusal carries bytes/limit/preview;
+  `note --stdin`; the `--ptr` notation documented in-note.
+- **MCP prompts + outputSchema (B8)**: every tool declares its payload
+  shape; `prompts/list` + `prompts/get` ship two guided loops
+  (janitor_refactor_audit, janitor_memory_recall).
+
+### Changed
+- **Twins consolidated (B6)**: `content_sha` has one definition (apply/diff),
+  the scan.rs function twin merged into `crate::ast::testing` — found by
+  running `scan --duplicates` on the repo itself.
+- **Docs truth pass (B7)**: rustdoc 0 warnings; doc-lint gate in CI.
+
 ## [Unreleased] — v0.2.0 candidates
 
 ### Added (v0.3 — product truth, roadmap #6)
