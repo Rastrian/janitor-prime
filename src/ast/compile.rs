@@ -19,14 +19,19 @@
 //! scan layer's cue to skip that language's files and count them
 //! (`skipped_for_language`, never a silent no-match).
 //!
-//! `unify` never compiles: any `(constraints (unify …))` fails here with
-//! the versioned `E_UNSUPPORTED_VERSION` (ADR-0016 (6), F8/v0.2).
+//! `unify` compiles since F8 (ADR-0005/ADR-0016's v0.1 stub lifted): each
+//! `(unify @a @b)` constraint resolves to a `(symbol id, symbol id)` pair
+//! carried on the [`Program`] — both symbols must be captures of this rule
+//! (a constraint naming anything else is the typed `E_DSL_COMPILE`, never
+//! a silent always-false filter) — and the evaluator applies the pair as a
+//! post-match filter over capture fingerprints
+//! (`fingerprint::filter_unify`; ADR-0005: "Unify(s1, s2) is a post-match
+//! filter").
 
 use smol_str::SmolStr;
 
 use crate::ast::lang::{LangId, LangRegistry};
 use crate::ast::pattern::{Pattern, Rule, WILDCARD_KIND};
-use crate::envelope::SCHEMA;
 use crate::error::DslError;
 
 /// One compiled instruction. "Consuming" instructions eat exactly one child
@@ -102,6 +107,10 @@ pub struct Program {
     /// Comment-class kind ids removed from sibling lists under
     /// [`TriviaPolicy::Skip`] (empty under `Strict` — nothing to skip).
     pub trivia_skip: Vec<u16>,
+    /// `(symbol id, symbol id)` pairs from the rule's `(unify …)`
+    /// constraints — the post-match fingerprint filter (F8). Empty for
+    /// constraint-free rules, which skip the filter entirely.
+    pub unifies: Vec<(u32, u32)>,
     /// `(entry, exit)` per region — the main region and each `Under`
     /// sub-program — sorted by entry. The evaluator restricts a scope's
     /// DP and `Under` pre-pass to the entered region: without this, every
@@ -178,14 +187,6 @@ pub fn compile_rule(
     lang: LangId,
     trivia: TriviaPolicy,
 ) -> Result<Program, DslError> {
-    if !rule.constraints.is_empty() {
-        // ADR-0016 (6): versioned refusal, never a silent no-match.
-        return Err(DslError::UnsupportedVersion {
-            feature: "unify".to_owned(),
-            version: SCHEMA.to_owned(),
-        });
-    }
-
     // The top-level `(under K body)` is the ENTRY MODE, not an instruction:
     // its body is the main region; `Under` compiles to a consuming scope
     // entry only in element position.
@@ -246,13 +247,43 @@ pub fn compile_rule(
         }
     };
 
+    // Unify constraints resolve LAST — a capture inside a nested `Under`
+    // body interns its symbol only when that sub-program compiles, so the
+    // symbol table is complete only here. Every constraint symbol must be
+    // a capture of this rule; a name that never captures is a rule bug and
+    // fails loud (a filter that could never pass would be a silent no-op).
+    let mut unifies = Vec::with_capacity(rule.constraints.len());
+    for (a, b) in &rule.constraints {
+        let (a, b) = (
+            constraint_id(a, &emitter.symbols)?,
+            constraint_id(b, &emitter.symbols)?,
+        );
+        unifies.push((a, b));
+    }
+
     Ok(Program {
         instrs: emitter.instrs,
         entry,
         symbols: emitter.symbols,
         trivia_skip,
+        unifies,
         regions: emitter.regions,
     })
+}
+
+/// Resolve one constraint symbol to its interned capture id — the loud
+/// gate: `unify` may only relate symbols the rule actually captures.
+fn constraint_id(sym: &SmolStr, symbols: &[SmolStr]) -> Result<u32, DslError> {
+    symbols
+        .iter()
+        .position(|s| s == sym)
+        .map(|id| id as u32)
+        .ok_or_else(|| DslError::Compile {
+            message: format!(
+                "unify symbol @{sym} is not captured by the rule — constraints may only \
+                 relate capture symbols"
+            ),
+        })
 }
 
 /// The emitter appends to one flat vector; `Under` bodies are *scheduled*
@@ -353,10 +384,15 @@ impl Emitter {
                 let at = self.emit(Instr::Under(kind, 0, 0)); // patched after the body compiles
                 self.pending.push((at, kind, (**body).clone()));
             }
-            Pattern::Unify(_, _) => {
-                return Err(DslError::UnsupportedVersion {
-                    feature: "unify".to_owned(),
-                    version: SCHEMA.to_owned(),
+            Pattern::Unify(a, b) => {
+                // Unreachable from DSL text (the parser only admits `unify`
+                // inside `(constraints …)`); programmatic constructors get
+                // the same loud treatment rather than a silent drop.
+                return Err(DslError::Compile {
+                    message: format!(
+                        "unify appears only inside (constraints …) — \
+                         `(unify @{a} @{b})` is not a pattern element"
+                    ),
                 });
             }
         }
@@ -598,21 +634,43 @@ mod tests {
         assert!(compile_rule(&rule, &registry, lang, TriviaPolicy::Skip).is_ok());
     }
 
-    /// `unify` is refused with the versioned error — from constraints and
-    /// from a bare pattern-level unify alike (ADR-0016 (6)).
+    /// F8: `unify` compiles. The constraint pair resolves to capture symbol
+    /// ids (order as written); a symbol the rule does not capture is the
+    /// loud `E_DSL_COMPILE` — a never-passing filter would be a silent
+    /// no-op (the v0.1 refusal lifted, ADR-0016 (6)).
     #[test]
     #[cfg(feature = "lang-rust")]
-    fn unify_never_compiles() {
+    fn unify_compiles_to_symbol_id_pairs_and_rejects_uncaptured_symbols() {
         let (registry, lang) = rust();
         let rule = parse_rule(
             "(under function_item (seq (capture @fn identifier) block) \
              (constraints (unify @fn @fn)))",
         )
         .unwrap();
-        let err = compile_rule(&rule, &registry, lang, TriviaPolicy::Skip).unwrap_err();
+        let program = compile_rule(&rule, &registry, lang, TriviaPolicy::Skip).unwrap();
+        assert_eq!(program.symbols, vec![SmolStr::from("fn")]);
+        assert_eq!(program.unifies, vec![(0, 0)], "symbol ids, as written");
+
+        // A capture only reachable through a nested Under body still
+        // resolves — constraint resolution waits for the full symbol table.
+        let nested = parse_rule(
+            "(under block (seq (under function_item (capture @inner identifier))) \
+             (constraints (unify @inner @inner)))",
+        )
+        .unwrap();
+        let program = compile_rule(&nested, &registry, lang, TriviaPolicy::Skip).unwrap();
+        assert_eq!(program.unifies.len(), 1);
+
+        let err = compile_rule(
+            &parse_rule("(under block _ (constraints (unify @ghost @ghost)))").unwrap(),
+            &registry,
+            lang,
+            TriviaPolicy::Skip,
+        )
+        .unwrap_err();
         assert!(
-            matches!(err, DslError::UnsupportedVersion { .. }),
-            "got {err:?}"
+            matches!(err, DslError::Compile { ref message } if message.contains("@ghost")),
+            "the uncaptured symbol is named: {err:?}"
         );
 
         let bare = Rule {
@@ -621,7 +679,7 @@ mod tests {
         };
         assert!(matches!(
             compile_rule(&bare, &registry, lang, TriviaPolicy::Skip).unwrap_err(),
-            DslError::UnsupportedVersion { .. }
+            DslError::Compile { .. }
         ));
     }
 }

@@ -445,6 +445,52 @@ impl FingerprintTable {
     }
 }
 
+// --- the Unify post-match filter (ADR-0005, ADR-0010; F8) ---------------------
+
+/// Apply the compiled rule's `(unify @a @b)` constraints as a post-match
+/// filter (ADR-0005: "Unify(s1, s2) is a post-match filter" — matching is
+/// untouched; the match SET is filtered). A match survives iff **every**
+/// constraint relates two captures that are both present in that match and
+/// fingerprint-equal under the parse's table; a missing capture (an untaken
+/// alternation branch) filters the match like any other inequality. Rules
+/// without constraints return untouched — the common path costs one
+/// `is_empty` check.
+pub fn filter_unify(
+    program: &crate::ast::compile::Program,
+    table: &FingerprintTable,
+    reports: &mut Vec<crate::ast::eval::MatchReport>,
+) {
+    if program.unifies.is_empty() {
+        return;
+    }
+    reports.retain(|report| {
+        program.unifies.iter().all(|&(a, b)| {
+            match (
+                capture_fp(program, table, report, a),
+                capture_fp(program, table, report, b),
+            ) {
+                (Some(fa), Some(fb)) => fa == fb,
+                _ => false, // capture absent on this path: filtered
+            }
+        })
+    });
+}
+
+/// One capture's fingerprint: symbol id → capture (by name) → the node at
+/// the capture's `(start, end, kind_id)`. `None` when the symbol is unbound
+/// on this path or the coordinates name no node (a degenerate capture the
+/// filter treats as absent).
+fn capture_fp(
+    program: &crate::ast::compile::Program,
+    table: &FingerprintTable,
+    report: &crate::ast::eval::MatchReport,
+    symbol: u32,
+) -> Option<Fp> {
+    let name = program.symbols.get(symbol as usize)?;
+    let cap = report.captures.iter().find(|c| c.symbol == *name)?;
+    table.fp_of(cap.start_byte as u32, cap.end_byte as u32, cap.kind_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,5 +763,75 @@ mod tests {
             "the table is computed once and shared"
         );
         assert!(!first.digests().is_empty());
+    }
+
+    /// The Unify post-match filter over a real match run: identical
+    /// adjacent statements survive, differing ones are filtered, and a
+    /// comment between the pair does not break the equivalence (the
+    /// captures' own subtrees are trivia-free either way).
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn unify_filters_matches_by_capture_fingerprints() {
+        use crate::ast::compile::{TriviaPolicy, compile_rule};
+        use crate::ast::dsl::parse_rule;
+        use crate::ast::eval::Matcher;
+
+        let run = |src: &str| -> usize {
+            let registry = LangRegistry::new();
+            let lang = registry
+                .for_extension("rs")
+                .expect("lang-rust is the default feature set");
+            let rule = parse_rule(
+                "(under block (seq (capture @x let_declaration) \
+                  (capture @y let_declaration)) (constraints (unify @x @y)))",
+            )
+            .expect("unify rule parses");
+            let program =
+                compile_rule(&rule, &registry, lang, TriviaPolicy::Skip).expect("compiles");
+            assert_eq!(program.unifies.len(), 1);
+            let mut parser = registry.parser(lang).expect("parser");
+            let bytes: Arc<[u8]> = Arc::from(src.as_bytes());
+            let tree = parse_snapshot(&mut parser, &bytes).expect("parses");
+            let mut reports = Vec::new();
+            Matcher::new(&program, &tree, 0)
+                .matches(&smol_str::SmolStr::from("t.rs"), &mut reports)
+                .expect("match runs");
+            let table = entryless_table(&tree, &bytes, &registry, lang);
+            filter_unify(&program, &table, &mut reports);
+            reports.len()
+        };
+
+        let identical = "fn f() -> u32 {\n    let a = 1;\n    let a = 1;\n    a\n}\n";
+        assert_eq!(
+            run(identical),
+            1,
+            "identical adjacent lets: the pair survives"
+        );
+        let commented =
+            "fn f() -> u32 {\n    let a = 1;\n    // between\n    let a = 1;\n    a\n}\n";
+        assert_eq!(
+            run(commented),
+            1,
+            "a comment between the lets does not break Unify (skip policy)"
+        );
+        let differing = "fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a\n}\n";
+        assert_eq!(
+            run(differing),
+            0,
+            "differing adjacent lets: the pair is filtered (renamed local ⇒ new fingerprint)"
+        );
+    }
+
+    /// A table for an already-parsed tree (the matcher-level tests don't go
+    /// through ParseEntry).
+    #[cfg(feature = "lang-rust")]
+    fn entryless_table(
+        tree: &crate::ast::ffi_shim::Tree,
+        bytes: &Arc<[u8]>,
+        registry: &LangRegistry,
+        lang: crate::ast::lang::LangId,
+    ) -> FingerprintTable {
+        let trivia = trivia_kind_ids(registry, lang);
+        FingerprintTable::build(tree, bytes, &trivia)
     }
 }

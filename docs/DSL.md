@@ -110,10 +110,44 @@ consume different numbers of children (e.g. `(any-of identifier (seq
 identifier ","))`); the match set rule in [§6](#6-match-set-semantics)
 picks the longest. At least two alternatives are required.
 
-### `(constraints (unify @a @b) …)` — **rejected in v0.1**
+### `(constraints (unify @a @b) …)` — isomorphism between captures *(F8)*
 
-Parses, then always fails rule-compile with `E_UNSUPPORTED_VERSION`:
-isomorphism constraints land in v0.2 (F8). Never a silent no-match.
+A **post-match filter** (ADR-0005): the rule matches exactly as written
+first; then every constraint is checked over the match's captures, and a
+match survives only if **every** `(unify @a @b)` relates two captures that
+are both present in that match and structurally equivalent.
+
+Equivalence is janitor's Merkle fingerprint (ADR-0010, the E2 rule): the
+named-node skeleton **plus semantically-significant anonymous tokens**
+(operators, separators, punctuation, keywords), with **leaf token texts**
+hashed, and **only comment/whitespace-class trivia excluded**. So two
+captures unify when they are the same code up to comments and formatting:
+
+* `let a = v + 1;` ≡ `let a = v+1;` ≡ `let a = v + 1; // note` — equal
+* `x + y` ≢ `x - y` — the operator is an anonymous token, and it is hashed
+* `[a, b]` ≢ `[a; b]` — the separator is an anonymous token, and it is hashed
+* `let a = v;` ≢ `let b = v;` — leaf text is hashed, so renamed locals differ
+
+Constraints may only relate **capture symbols of this rule**; a symbol that
+is not captured is `E_DSL_COMPILE` (a filter that could never pass would be
+a silent no-op — refused loudly). A capture absent on a particular match
+(an untaken alternation branch) filters that match, like any inequality.
+
+```scheme
+;; consecutive statements that say exactly the same thing
+(under block
+  (seq (capture @first let_declaration) (capture @second let_declaration))
+  (constraints (unify @first @second)))
+
+;; both arms of an if/else that are the same code (a real refactor smell)
+(under if_expression
+  (seq _ (capture @then block) else_clause (capture @els block))
+  (constraints (unify @then @els)))
+```
+
+The fingerprint pass is O(n) per file and runs only for rules that carry
+constraints; `--strict-trivia` does **not** change equivalence (the
+fingerprint's trivia exclusion is the equivalence definition itself).
 
 ### Nesting: `(under …)` as a `seq` element
 
@@ -282,8 +316,10 @@ common ones: `source_file`, `function_item`, `identifier`, `block`,
 
 ### `E_UNSUPPORTED_VERSION` — parsed, reserved for a later schema
 
-`details` carries `{feature: "unify", version: "janitor.v1"}`. Cause: any
-`(constraints (unify @a @b) …)`. Remove the constraints block in v0.1.
+`details` carries `{feature, version}`. No current DSL feature raises it
+(`unify` executed from F8 onward); the code is the contract for future
+reserved surface — a rule using a not-yet-available feature fails loudly
+with it, never a silent no-match.
 
 ### Errors you can hit at scan time (not rule-authoring bugs)
 
@@ -411,7 +447,8 @@ Two more shapes worth internalizing:
 3. Adjacency is comment-tolerant by default; add `--strict-trivia` only if
    you mean byte-strict.
 4. Capture symbols start with `@`, are used at most once each.
-5. No `unify` in v0.1 — it fails with `E_UNSUPPORTED_VERSION`.
+5. `unify` relates capture symbols only ([§3](#constraints-unify-ab--isomorphism-between-captures-f8));
+   equivalence ignores comments and formatting, nothing else.
 6. Read the report's `skipped`/`skipped_for_language` before concluding a
    rule matches nothing — exclusions are always listed.
 

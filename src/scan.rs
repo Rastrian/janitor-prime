@@ -310,6 +310,18 @@ pub fn scan(
             Err(err) => return Err(err.into()),
         }
     }
+    // Resolved trivia ids per compiled language — the fingerprint tables'
+    // only language-dependent input (F8; resolved once, shared read-only
+    // by every worker).
+    let trivia_by_lang: BTreeMap<LangId, Vec<u16>> = programs
+        .keys()
+        .map(|&lang| {
+            (
+                lang,
+                crate::ast::fingerprint::trivia_kind_ids(registry, lang),
+            )
+        })
+        .collect();
     candidates.retain(|c| programs.contains_key(&c.lang));
 
     // The parallel phase: one work item per candidate, parser per worker
@@ -381,6 +393,19 @@ pub fn scan(
                 let mut reports = Vec::new();
                 let display = SmolStr::from(candidate.display.as_str());
                 Matcher::new(program, &entry.tree, 0).matches(&display, &mut reports)?;
+                // F8: unify constraints are a post-match filter over
+                // capture fingerprints — applied to the match set before
+                // ADR-0016's overlap flags (they describe what is
+                // reported). Constraint-free rules (the common case) skip
+                // the whole pass, ParseEntry's lazy field included.
+                if !program.unifies.is_empty() {
+                    let trivia = trivia_by_lang
+                        .get(&candidate.lang)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    let table = entry.fingerprints(trivia);
+                    crate::ast::fingerprint::filter_unify(program, &table, &mut reports);
+                }
                 matchset::flag_overlaps(&mut reports);
 
                 // Collection is the only cache-touching moment; streaming
@@ -713,5 +738,54 @@ mod tests {
         let report = session.scan(&params).expect("scan runs");
         assert_eq!(report.matches.len(), 5);
         assert!(session.cache().is_empty(), "streaming: nothing retained");
+    }
+
+    /// F8: `unify` end to end through the session API — the same rule with
+    /// and without the constraint differs exactly by the fingerprint
+    /// filter: the identical pair survives, the differing pair (which the
+    /// constraint-free rule reports) is filtered. A comment between the
+    /// members does not break unification.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn unify_constraints_filter_the_scan_end_to_end() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("twin.rs"),
+            "fn twin() -> u32 {\n    let a = 1;\n    // between the twins\n    let a = 1;\n    a\n}\n",
+        )
+        .expect("write twin file");
+        std::fs::write(
+            tmp.path().join("mixed.rs"),
+            "fn mixed() -> u32 {\n    let a = 1;\n    let b = 2;\n    a\n}\n",
+        )
+        .expect("write mixed file");
+
+        let pair = "(under block (seq (capture @x let_declaration) (capture @y let_declaration))";
+        let with_unify = format!("{pair} (constraints (unify @x @y)))");
+        let session = Session::new();
+
+        let plain = session
+            .scan(&ScanParams::new(format!("{pair})"), tmp.path()))
+            .expect("constraint-free scan runs");
+        assert_eq!(
+            plain.matches.len(),
+            2,
+            "both files' adjacent pairs match without the constraint"
+        );
+
+        let unified = session
+            .scan(&ScanParams::new(&with_unify, tmp.path()))
+            .expect("unify scan runs");
+        assert_eq!(
+            unified.matches.len(),
+            1,
+            "only the fingerprint-equal pair survives"
+        );
+        assert_eq!(unified.matches[0].path, "twin.rs");
+        assert_eq!(unified.matches[0].captures.len(), 2);
+        assert!(
+            session.cache().is_empty(),
+            "the fingerprint table dies with the entry (streaming, ADR-0007)"
+        );
     }
 }
