@@ -1,5 +1,34 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (v0.3 — product truth, roadmap #6)
+- **DSL leaf-text predicates, `(text …)`/`(glob …)` (B1):** the rule
+  grammar grows a `(filters …)` block on `(under …)` forms (after
+  `(constraints …)`, nested unders included; clauses AND): `(text @sym
+  "…")` requires the capture's leaf text to equal the string byte-exact,
+  `(glob @sym "…")` matches it against `*`/`?`/`[…]` classes over bytes
+  (dependency-free ~100-line matcher in `src/ast/glob.rs`; no regex
+  crate, no new deps). "Leaf text" is the capture's leftmost **named
+  leaf** — the node itself for leaf captures and comments, the name
+  token for name-carrying subtrees (`macro_invocation` → `panic`).
+  Filters are strictly post-match over the bound captures: a failing
+  clause kills that match only, the NFA/DP run is untouched, and the
+  pass is `O(matches × clauses)` (each tested capture pays one
+  `O(depth × log fanout)` walk — the new `b1/filter-text` bench family
+  pins match+filter scaling linear; the first, scanning implementation
+  was caught being quadratic by exactly that leg and replaced with a
+  binary-search descent). Uncaptured filter symbols and unclosed glob
+  classes are the loud `E_DSL_COMPILE`; near-misses (bare needle,
+  unterminated string, misplaced heads) carry did-you-mean suggestions.
+  Grammar, semantics, the three worked idioms (panic-counting, TODO
+  hunting under `--strict-trivia`, glob on method names), and the
+  linearity restatement are documented in docs/DSL.md §2/§3/§7/§9; the
+  new parser paths join the no-panic fuzz target (12 corpus seeds +
+  generator pieces). The panic-counting acceptance rule is golden-pinned
+  (`tests/fixtures/macro_text_filter*`: exactly the `panic!` sites), and
+  the whole pre-existing golden corpus + KP-6 fixtures are unchanged —
+  pre-v0.3 rules are byte-identical. No `E_UNSUPPORTED_VERSION` gate:
+  this ships in v0.3.
+
 ### Added (v0.3 — product truth, roadmap #3)
 - **Duplicates summary + filters (B3):** `scan --duplicates` gains
   `--summary` (prepend the per-kind aggregate — one row per

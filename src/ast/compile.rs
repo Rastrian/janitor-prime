@@ -30,8 +30,9 @@
 
 use smol_str::SmolStr;
 
+use crate::ast::glob::Glob;
 use crate::ast::lang::{LangId, LangRegistry};
-use crate::ast::pattern::{Pattern, Rule, WILDCARD_KIND};
+use crate::ast::pattern::{FilterClause, Pattern, Rule, WILDCARD_KIND};
 use crate::error::DslError;
 
 /// One compiled instruction. "Consuming" instructions eat exactly one child
@@ -95,6 +96,17 @@ pub enum TriviaPolicy {
     Strict,
 }
 
+/// One compiled leaf-text filter (v0.3 B1): the interned capture symbol and
+/// its predicate. Applied by [`crate::ast::eval::filter_text`] as a
+/// post-match filter over the match's captures — never during the NFA run.
+#[derive(Clone, Debug)]
+pub enum TextFilter {
+    /// The capture's leaf text equals the needle, byte-exact.
+    Text { sym: u32, needle: SmolStr },
+    /// The capture's leaf text matches the compiled glob.
+    Glob { sym: u32, glob: Glob },
+}
+
 /// A rule compiled for one target language and one trivia policy. Plain
 /// data (`Send + Sync` by construction) — shared across rayon workers.
 #[derive(Clone, Debug)]
@@ -111,6 +123,10 @@ pub struct Program {
     /// constraints — the post-match fingerprint filter (F8). Empty for
     /// constraint-free rules, which skip the filter entirely.
     pub unifies: Vec<(u32, u32)>,
+    /// The rule's `(text …)`/`(glob …)` clauses, symbols resolved to ids
+    /// and globs validated (v0.3 B1) — the post-match leaf-text filter.
+    /// Empty for filter-free rules, which skip the pass entirely.
+    pub filters: Vec<TextFilter>,
     /// `(entry, exit)` per region — the main region and each `Under`
     /// sub-program — sorted by entry. The evaluator restricts a scope's
     /// DP and `Under` pre-pass to the entered region: without this, every
@@ -252,13 +268,31 @@ pub fn compile_rule(
     // symbol table is complete only here. Every constraint symbol must be
     // a capture of this rule; a name that never captures is a rule bug and
     // fails loud (a filter that could never pass would be a silent no-op).
+    // The v0.3 B1 text/glob filters resolve over the same complete table,
+    // with the same loud gate; glob patterns validate here too.
     let mut unifies = Vec::with_capacity(rule.constraints.len());
     for (a, b) in &rule.constraints {
         let (a, b) = (
-            constraint_id(a, &emitter.symbols)?,
-            constraint_id(b, &emitter.symbols)?,
+            predicate_symbol_id(a, &emitter.symbols, "unify")?,
+            predicate_symbol_id(b, &emitter.symbols, "unify")?,
         );
         unifies.push((a, b));
+    }
+    let mut filters = Vec::with_capacity(rule.filters.len());
+    for clause in &rule.filters {
+        let filter = match clause {
+            FilterClause::Text { sym, needle } => TextFilter::Text {
+                sym: predicate_symbol_id(sym, &emitter.symbols, "text")?,
+                needle: needle.clone(),
+            },
+            FilterClause::Glob { sym, pattern } => TextFilter::Glob {
+                sym: predicate_symbol_id(sym, &emitter.symbols, "glob")?,
+                glob: Glob::new(pattern).map_err(|err| DslError::Compile {
+                    message: format!("glob pattern {pattern:?} is malformed: {err}"),
+                })?,
+            },
+        };
+        filters.push(filter);
     }
 
     Ok(Program {
@@ -267,21 +301,24 @@ pub fn compile_rule(
         symbols: emitter.symbols,
         trivia_skip,
         unifies,
+        filters,
         regions: emitter.regions,
     })
 }
 
-/// Resolve one constraint symbol to its interned capture id — the loud
-/// gate: `unify` may only relate symbols the rule actually captures.
-fn constraint_id(sym: &SmolStr, symbols: &[SmolStr]) -> Result<u32, DslError> {
+/// Resolve one predicate symbol (a `unify` constraint or a text/glob
+/// filter) to its interned capture id — the loud gate: predicates may only
+/// name symbols the rule actually captures (a filter that could never
+/// reference a capture would be a silent no-op).
+fn predicate_symbol_id(sym: &SmolStr, symbols: &[SmolStr], op: &str) -> Result<u32, DslError> {
     symbols
         .iter()
         .position(|s| s == sym)
         .map(|id| id as u32)
         .ok_or_else(|| DslError::Compile {
             message: format!(
-                "unify symbol @{sym} is not captured by the rule — constraints may only \
-                 relate capture symbols"
+                "{op} symbol @{sym} is not captured by the rule — constraints and \
+                 filters may only reference capture symbols"
             ),
         })
 }
@@ -676,10 +713,73 @@ mod tests {
         let bare = Rule {
             root: Pattern::Unify(SmolStr::from("a"), SmolStr::from("b")),
             constraints: Vec::new(),
+            filters: Vec::new(),
         };
         assert!(matches!(
             compile_rule(&bare, &registry, lang, TriviaPolicy::Skip).unwrap_err(),
             DslError::Compile { .. }
         ));
+    }
+
+    /// v0.3 B1: text/glob filters compile to symbol-id-keyed predicates
+    /// over the complete capture table (nested-under captures included);
+    /// an uncaptured symbol or a malformed glob is the loud
+    /// `E_DSL_COMPILE` — never a silent always-false filter.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn text_filters_resolve_symbols_and_validate_globs() {
+        let (registry, lang) = rust();
+        let rule = parse_rule(
+            "(under _ (seq (capture @m macro_invocation)) \
+             (filters (text @m \"panic\") (glob @m \"[a-z]*\")))",
+        )
+        .unwrap();
+        let program = compile_rule(&rule, &registry, lang, TriviaPolicy::Skip).unwrap();
+        assert_eq!(program.symbols, vec![SmolStr::from("m")]);
+        assert!(matches!(
+            &program.filters[0],
+            TextFilter::Text { sym: 0, needle } if needle == "panic"
+        ));
+        assert!(matches!(
+            &program.filters[1],
+            TextFilter::Glob { sym: 0, .. }
+        ));
+
+        // A capture only reachable through a nested Under body still
+        // resolves — the symbol table is complete when filters resolve.
+        let nested = parse_rule(
+            "(under block (seq (under function_item (capture @inner identifier))) \
+             (filters (text @inner \"main\")))",
+        )
+        .unwrap();
+        let program = compile_rule(&nested, &registry, lang, TriviaPolicy::Skip).unwrap();
+        assert_eq!(program.filters.len(), 1);
+
+        // Uncaptured symbol: named in the message.
+        let err = compile_rule(
+            &parse_rule("(under block _ (filters (text @ghost \"x\")))").unwrap(),
+            &registry,
+            lang,
+            TriviaPolicy::Skip,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DslError::Compile { ref message } if message.contains("@ghost")),
+            "the uncaptured symbol is named: {err:?}"
+        );
+
+        // Malformed glob: refused, with the pattern in the message (the
+        // symbol gate passes — @x is captured — so this is the glob leg).
+        let err = compile_rule(
+            &parse_rule("(under block (capture @x _) (filters (glob @x \"[a\")))").unwrap(),
+            &registry,
+            lang,
+            TriviaPolicy::Skip,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DslError::Compile { ref message } if message.contains("[a")),
+            "the malformed pattern is named: {err:?}"
+        );
     }
 }

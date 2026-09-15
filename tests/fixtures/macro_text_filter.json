@@ -1,0 +1,8 @@
+{
+  "rule": "(under _ (seq (capture @m macro_invocation)) (filters (text @m \"panic\")))",
+  "file": "macro_text_filter.rs",
+  "lang": "rust",
+  "trivia": "skip",
+  "texts": ["panic!(\"nothing to audit\")", "panic!()"],
+  "captures": ["panic!(\"nothing to audit\")", "panic!()"]
+}

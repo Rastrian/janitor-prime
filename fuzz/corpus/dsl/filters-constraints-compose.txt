@@ -1,0 +1,1 @@
+(under function_item (seq (capture @fn identifier) (capture @b block)) (constraints (unify @fn @fn)) (filters (text @fn "main") (glob @b "{*")))

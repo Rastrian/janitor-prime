@@ -76,6 +76,48 @@ fn scan_json_is_byte_identical_across_rayon_thread_counts() {
     assert_eq!(envelope["data"]["stats"]["files"], 24);
 }
 
+/// v0.3 B1: the same fence over a FILTERED rule — the leaf-text pass runs
+/// per file inside the workers before canonical assembly, so a filtered
+/// report is as thread-count-independent as an unfiltered one. The class
+/// glob keeps the `a` and `b` bindings (48 of the 72 lets), the same
+/// filter corpus-wide.
+#[test]
+fn filtered_scan_json_is_byte_identical_across_rayon_thread_counts() {
+    let tmp = corpus();
+    let run = |threads: u32| -> String {
+        let bin = env!("CARGO_BIN_EXE_janitor");
+        let out = Command::new(bin)
+            .env("RAYON_NUM_THREADS", threads.to_string())
+            .args([
+                "scan",
+                "--rule",
+                "(under block (seq (capture @l let_declaration)) \
+                 (filters (glob @l \"[ab]\")))",
+            ])
+            .arg(tmp.path())
+            .output()
+            .expect("binary runs");
+        assert_eq!(out.status.code(), Some(0), "scan under {threads} threads");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let one = run(1);
+    let eight = run(8);
+    let strip_wall = |raw: &str| -> String {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(raw).unwrap_or_else(|err| panic!("not JSON: {err}"));
+        envelope["data"]["stats"]["wall_ms"].take();
+        serde_json::to_string(&envelope).expect("re-serialize")
+    };
+    assert_eq!(
+        strip_wall(&one),
+        strip_wall(&eight),
+        "the filtered report is a function of the input, not the thread count"
+    );
+    let envelope: serde_json::Value = serde_json::from_str(&one).expect("re-parse");
+    assert_eq!(envelope["data"]["stats"]["matches"], 48, "the a and b lets");
+}
+
 /// v0.3 B3: the same fence over `--duplicates --summary` — the summary's
 /// per-kind rows are a pure function of the canonically ordered groups,
 /// so the whole report (aggregate included) is byte-identical under

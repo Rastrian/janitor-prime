@@ -64,12 +64,28 @@ pub enum Pattern {
     AnyOf(Vec<Pattern>),
 }
 
-/// A complete rule: one root pattern plus its unify constraints, as
-/// written inside the top-level `(under …)`.
+/// A complete rule: one root pattern plus its unify constraints and
+/// leaf-text filters, as written inside the top-level `(under …)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub root: Pattern,
     pub constraints: Vec<(SmolStr, SmolStr)>,
+    /// Every `(text …)`/`(glob …)` clause from any `(filters …)` block
+    /// (v0.3 B1) — post-match predicates over the rule's captures.
+    pub filters: Vec<FilterClause>,
+}
+
+/// One leaf-text filter clause as written (v0.3 B1): the capture symbol it
+/// predicates and the literal. Symbols resolve to capture ids at compile
+/// time (a symbol the rule does not capture is `E_DSL_COMPILE` — a filter
+/// that could never reference a capture would be a silent no-op); glob
+/// patterns validate there too ([`crate::ast::glob`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FilterClause {
+    /// The capture's leaf text equals the needle, byte-exact.
+    Text { sym: SmolStr, needle: SmolStr },
+    /// The capture's leaf text matches the glob pattern.
+    Glob { sym: SmolStr, pattern: SmolStr },
 }
 
 impl Pattern {

@@ -354,6 +354,13 @@ pub fn scan(
                     let table = entry.fingerprints(trivia);
                     crate::ast::fingerprint::filter_unify(program, &table, &mut reports);
                 }
+                // v0.3 B1: text/glob clauses are the same kind of
+                // post-match pass, over capture LEAF TEXT (source bytes +
+                // a bounded root-to-leaf walk — never the NFA run). Filter-
+                // free rules skip it entirely.
+                if !program.filters.is_empty() {
+                    crate::ast::eval::filter_text(program, &entry.tree, &bytes, &mut reports);
+                }
                 matchset::flag_overlaps(&mut reports);
 
                 // Collection is the only cache-touching moment; streaming
@@ -1382,6 +1389,51 @@ mod tests {
             session.cache().is_empty(),
             "the fingerprint table dies with the entry (streaming, ADR-0007)"
         );
+    }
+
+    /// v0.3 B1 end to end: the panic-counting acceptance rule — a
+    /// macro_invocation capture plus `(text @m "panic")` — counts exactly
+    /// the panic! sites (the golden fixture corpus pins the full shape in
+    /// tests/fixtures/macro_text_filter*; this is the session-API leg).
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn text_filters_count_exactly_the_panic_sites() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = concat!(
+            "fn guarded(x: bool) {\n",
+            "    if x {\n",
+            "        panic!(\"boom\");\n",
+            "    } else {\n",
+            "        panic!();\n",
+            "    }\n",
+            "    let msg = format!(\"{}\", x);\n",
+            "    assert!(x);\n",
+            "}\n",
+        );
+        std::fs::write(tmp.path().join("macros.rs"), src).expect("write macros");
+
+        let session = Session::new();
+        let rule = "(under _ (seq (capture @m macro_invocation)) (filters (text @m \"panic\")))";
+        let report = session
+            .scan(&ScanParams::new(rule, tmp.path()))
+            .expect("filtered scan runs");
+        assert_eq!(report.stats.matches, 2, "exactly the panic! sites");
+        let boom = src.find("panic!(\"boom\")").unwrap_or(0);
+        let bare = src.find("panic!()").unwrap_or(0);
+        assert_eq!(
+            report
+                .matches
+                .iter()
+                .map(|m| (m.start_byte, m.end_byte))
+                .collect::<Vec<_>>(),
+            vec![
+                (boom, boom + "panic!(\"boom\")".len()),
+                (bare, bare + "panic!()".len()),
+            ],
+            "byte-exact spans, canonical order"
+        );
+        // The rule echo carries the filter verbatim.
+        assert!(report.rule.contains("(text @m \"panic\")"));
     }
 
     /// F8 smoke: `scan --duplicates` groups the copied function across

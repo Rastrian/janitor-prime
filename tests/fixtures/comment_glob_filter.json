@@ -1,0 +1,14 @@
+{
+  "rule": "(under _ (seq (capture @c line_comment)) (filters (glob @c \"*TODO*\")))",
+  "file": "comment_glob_filter.rs",
+  "lang": "rust",
+  "trivia": "strict",
+  "texts": [
+    "// TODO: wire the wake budget note into the session start recipe",
+    "// TODO(cool-down): settle the nap slot policy"
+  ],
+  "captures": [
+    "// TODO: wire the wake budget note into the session start recipe",
+    "// TODO(cool-down): settle the nap slot policy"
+  ]
+}

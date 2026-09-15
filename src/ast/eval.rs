@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use smol_str::SmolStr;
 
-use crate::ast::compile::{Entry, Instr, Program};
+use crate::ast::compile::{Entry, Instr, Program, TextFilter};
 use crate::ast::ffi_shim::{Node, Point, Tree, TreeCursor};
 use crate::ast::matchset;
 use crate::ast::walk::CursorPool;
@@ -592,6 +592,101 @@ pub fn match_tree(
     Ok(out)
 }
 
+/// The v0.3 B1 post-match leaf-text filters: every clause must hold on the
+/// match's captures (AND), and a failing clause kills **that match only** —
+/// the NFA run, its DP, and the capture binding are untouched (the
+/// linear-time promise never includes the filter pass; it is
+/// `O(matches × clauses)` with a bounded root-to-leaf walk per tested
+/// capture, so it composes with the matcher's `O(tree)` the way unify's
+/// fingerprint pass does).
+///
+/// A clause's **leaf text** is the source bytes of the capture's leftmost
+/// **named leaf**: descend through named children only, and the first node
+/// with none carries the text. That is the node itself for leaf captures
+/// (an `identifier`, a `field_identifier` — and a comment, whose text
+/// token is anonymous in some grammars, so the comment node IS the leaf),
+/// and the name token for name-carrying subtrees (`macro_invocation` →
+/// `panic`, `call_expression` → the callee's first token). A symbol
+/// unbound on a particular match (an untaken alternation branch) filters
+/// that match, like any failing predicate — same rule as `unify`.
+pub fn filter_text(program: &Program, tree: &Tree, bytes: &[u8], reports: &mut Vec<MatchReport>) {
+    if program.filters.is_empty() {
+        return;
+    }
+    reports.retain(|report| {
+        program.filters.iter().all(|filter| {
+            let Some(name) = program.symbols.get(filter_sym(filter) as usize) else {
+                return false;
+            };
+            let Some(cap) = report.captures.iter().find(|c| c.symbol == *name) else {
+                return false; // symbol unbound on this path: filtered
+            };
+            let text = leftmost_leaf_text(tree, bytes, cap.start_byte, cap.end_byte);
+            match filter {
+                TextFilter::Text { needle, .. } => text == needle.as_bytes(),
+                TextFilter::Glob { glob, .. } => glob.is_match(text),
+            }
+        })
+    });
+}
+
+/// The interned symbol id a compiled filter predicates.
+fn filter_sym(filter: &TextFilter) -> u32 {
+    match filter {
+        TextFilter::Text { sym, .. } | TextFilter::Glob { sym, .. } => *sym,
+    }
+}
+
+/// The leftmost named leaf inside `[start, end)`: descend from the root
+/// through NAMED children (captures bind named children, and named nodes
+/// nest under named nodes), at each level entering the first one whose
+/// span intersects the capture, until a node with no named children — then
+/// its source bytes. Named children are ordered and non-overlapping, so
+/// the first intersector is the child containing `start` (found by binary
+/// search, never a scan) or the first child starting at/after it; the walk
+/// is `O(depth × log fanout)` per tested capture and allocates nothing —
+/// the shape the `b1/filter-text` bench family pins against regressing
+/// into a fanout scan (which would make the filter pass quadratic in wide
+/// scopes).
+fn leftmost_leaf_text<'a>(tree: &'a Tree, bytes: &'a [u8], start: usize, end: usize) -> &'a [u8] {
+    let mut node = tree.root_node();
+    loop {
+        if node.named_child_count() == 0 {
+            return &bytes[node.start_byte()..node.end_byte()];
+        }
+        // Lower bound over the ordered, disjoint child spans: the first
+        // child whose start is >= `start`. The intersector is that child
+        // (if it starts inside the capture) or its predecessor (the only
+        // child that can contain `start`).
+        let count = node.named_child_count() as u32;
+        let mut lo = 0_u32;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if node
+                .named_child(mid)
+                .is_some_and(|c| c.start_byte() < start)
+            {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let next = node
+            .named_child(lo)
+            .filter(|c| c.start_byte() < end)
+            .or_else(|| {
+                lo.checked_sub(1)
+                    .and_then(|prev| node.named_child(prev))
+                    .filter(|c| c.end_byte() > start)
+            });
+        let Some(child) = next else {
+            return &bytes[..0]; // unreachable for capture-born spans
+        };
+        node = child;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,6 +847,128 @@ mod tests {
         let src = "fn f() -> u32 {\n    let a = 1;\n    let b = 2;\n    a\n}\n";
         let rule = "(under _ (seq (kind let_declaration) (kind let_declaration)))";
         assert_eq!(find(rule, src, TriviaPolicy::Skip).len(), 1);
+    }
+
+    /// v0.3 B1: `filter_text` predicates a capture's LEAF TEXT — the node
+    /// itself for leaf captures, the leftmost leaf (the name token) for
+    /// subtree captures. A failing clause kills that match only; an unbound
+    /// symbol filters the match; text and glob clauses AND.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn text_filters_predicate_leaf_text() {
+        let src = concat!(
+            "fn demo() {\n",
+            "    panic!(\"boom\");\n",
+            "    panic!();\n",
+            "    format!(\"{}\", 1);\n",
+            "    assert!(true);\n",
+            "    let x = vec![1];\n",
+            "    x\n",
+            "}\n",
+        );
+        let registry = LangRegistry::new();
+        let lang = registry.for_extension("rs").unwrap();
+        let mut parser = registry.parser(lang).unwrap();
+        let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(src.as_bytes());
+        let tree = parse_snapshot(&mut parser, &bytes).unwrap();
+
+        let run = |rule: &str| -> Vec<String> {
+            let parsed = parse_rule(rule).unwrap();
+            let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Skip).unwrap();
+            let mut reports =
+                match_tree(&program, &tree, 0, &SmolStr::from("t.rs")).expect("match runs");
+            filter_text(&program, &tree, &bytes, &mut reports);
+            reports
+                .iter()
+                .map(|r| src[r.start_byte..r.end_byte].to_string())
+                .collect()
+        };
+
+        // The acceptance shape: subtree captures predicate their NAME
+        // token — `(text @m "panic")` keeps the panic! sites and only
+        // those (format!/assert!/vec! drop out; the bare `panic!()` still
+        // counts, its macro name is the same leaf).
+        let kept =
+            run("(under _ (seq (capture @m macro_invocation)) (filters (text @m \"panic\")))");
+        assert_eq!(
+            kept,
+            vec!["panic!(\"boom\")".to_owned(), "panic!()".to_owned()],
+            "exactly the panic! sites, name-token predicated"
+        );
+
+        // A glob over the same capture predicates the same leaf text —
+        // here: the name with a byte-class member.
+        let globbed =
+            run("(under _ (seq (capture @m macro_invocation)) (filters (glob @m \"p[a-z]nic\")))");
+        assert_eq!(
+            globbed,
+            vec!["panic!(\"boom\")".to_owned(), "panic!()".to_owned()],
+            "the glob predicates the leaf text, not the covered span"
+        );
+
+        // Leaf captures compare the node itself — method names.
+        let src2 = "fn z() -> u32 { let v = z(1); v.unwrap() + v.clone() }\n";
+        let bytes2: std::sync::Arc<[u8]> = std::sync::Arc::from(src2.as_bytes());
+        let tree2 = parse_snapshot(&mut parser, &bytes2).unwrap();
+        let parsed = parse_rule(
+            "(under field_expression (seq _ (capture @m field_identifier)) \
+             (filters (text @m \"unwrap\")))",
+        )
+        .unwrap();
+        let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Skip).unwrap();
+        let mut reports = match_tree(&program, &tree2, 0, &SmolStr::from("t.rs")).unwrap();
+        filter_text(&program, &tree2, &bytes2, &mut reports);
+        assert_eq!(reports.len(), 1, "clone drops out, unwrap stays");
+
+        // A comment's leaf text is the WHOLE comment: its text token is
+        // anonymous in the rust grammar, so the comment node is the
+        // leftmost named leaf itself (strict trivia — comments are skip-
+        // mode trivia and never siblings otherwise).
+        let src3 = "// TODO: strict mode sees comments\nfn z2() -> u32 { 1 }\n";
+        let bytes3: std::sync::Arc<[u8]> = std::sync::Arc::from(src3.as_bytes());
+        let tree3 = parse_snapshot(&mut parser, &bytes3).unwrap();
+        let parsed =
+            parse_rule("(under _ (seq (capture @c line_comment)) (filters (glob @c \"*TODO*\")))")
+                .unwrap();
+        let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Strict).unwrap();
+        let mut reports = match_tree(&program, &tree3, 0, &SmolStr::from("t.rs")).unwrap();
+        filter_text(&program, &tree3, &bytes3, &mut reports);
+        assert_eq!(reports.len(), 1, "the TODO comment survives the glob");
+        let parsed =
+            parse_rule("(under _ (seq (capture @c line_comment)) (filters (glob @c \"*FIXME*\")))")
+                .unwrap();
+        let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Strict).unwrap();
+        let mut reports = match_tree(&program, &tree3, 0, &SmolStr::from("t.rs")).unwrap();
+        filter_text(&program, &tree3, &bytes3, &mut reports);
+        assert!(reports.is_empty(), "no FIXME, no match");
+
+        // Multiple clauses AND: text "unwrap" AND glob "un*" both hold.
+        let parsed = parse_rule(
+            "(under field_expression (seq _ (capture @m field_identifier)) \
+             (filters (text @m \"unwrap\") (glob @m \"un*\")))",
+        )
+        .unwrap();
+        let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Skip).unwrap();
+        let mut reports = match_tree(&program, &tree2, 0, &SmolStr::from("t.rs")).unwrap();
+        filter_text(&program, &tree2, &bytes2, &mut reports);
+        assert_eq!(reports.len(), 1);
+
+        // An unbound symbol (untaken any-of branch) filters the match —
+        // the same rule as unify.
+        let parsed = parse_rule(
+            "(under field_expression (seq (any-of _ (capture @m field_identifier))) \
+             (filters (text @m \"unwrap\")))",
+        )
+        .unwrap();
+        let program = compile_rule(&parsed, &registry, lang, TriviaPolicy::Skip).unwrap();
+        let mut reports = match_tree(&program, &tree2, 0, &SmolStr::from("t.rs")).unwrap();
+        filter_text(&program, &tree2, &bytes2, &mut reports);
+        assert!(
+            reports
+                .iter()
+                .all(|r| r.captures.iter().any(|c| c.symbol.as_str() == "m")),
+            "only matches that actually bound @m survive"
+        );
     }
 
     /// Pathological nesting refuses with the typed engine error instead of

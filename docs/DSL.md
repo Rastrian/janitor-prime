@@ -13,8 +13,12 @@ with a fixing recipe.
   (javascript, java, c) may be enabled at build time; kind-name behavior
   for them follows [§4](#4-kinds-per-language) and their trivia tables are
   seeded but not yet conformance-tested (future F9 waves).
-* A rule describes **structure** — node kinds and their adjacency — never
-  text. There is no regex, no string matching, no field names in v0.1.
+* A rule's **match** describes structure — node kinds and their adjacency —
+  never text: no regex, no string matching inside the matcher, no field
+  names. v0.3 (B1) adds leaf-text **predicates** — `(text …)` and
+  `(glob …)` — but strictly as *post-match filters over captures*
+  ([§3](#3-operators)): the matcher, its NFA and its linear-time promise
+  are untouched by them.
 
 ---
 
@@ -34,7 +38,7 @@ cost is linear in tree size (no catastrophic backtracking, by construction).
 ## 2. Grammar
 
 ```
-rule        := "(" "under" pivot body constraints? ")"
+rule        := "(" "under" pivot body constraints? filters? ")"
              | seq_form
              | atom
 seq_form    := "(" "seq" atom+ ")"
@@ -47,20 +51,26 @@ atom        := "(" "kind" IDENTIFIER ")"
 pivot       := IDENTIFIER | "_"
 body        := atom
 constraints := "(" "constraints" "(" "unify" SYMBOL SYMBOL ")"* ")"
+filters     := "(" "filters" filter+ ")"          ; v0.3 (B1)
+filter      := "(" "text" SYMBOL STRING ")"
+             | "(" "glob" SYMBOL STRING ")"
 
 SYMBOL      := "@" [A-Za-z0-9_-]+        ; e.g. @fn, @lhs
 IDENTIFIER  := [A-Za-z_][A-Za-z0-9_-]*   ; a *named* node kind of some grammar
+STRING      := '"' [^"]* '"'             ; v0.3: no escape sequences
 comment     := ";" ... end of line
 ```
 
 Lexical rules:
 
 * Whitespace separates tokens; `;` starts a comment to end of line.
-* `(`, `)`, `_`, `@sym`, identifiers are the only token classes. There are
-  no strings, numbers, or operators.
+* `(`, `)`, `_`, `@sym`, identifiers, and — since v0.3 — `"strings"` are
+  the token classes. Strings are legal **only** as filter literals
+  ([§3](#filters-text-sym--glob-sym--leaf-text-predicates-v03-b1)); there
+  are no numbers or operators, and no escape sequences anywhere.
 * The reserved words `under`, `seq`, `capture`, `kind`, `any-of`,
-  `constraints`, `unify` are reserved **only as list heads**. A bare
-  identifier atom is always a kind name.
+  `constraints`, `unify`, `filters`, `text`, `glob` are reserved **only
+  as list heads**. A bare identifier atom is always a kind name.
 
 ## 3. Operators
 
@@ -149,6 +159,67 @@ a silent no-op — refused loudly). A capture absent on a particular match
 The fingerprint pass is O(n) per file and runs only for rules that carry
 constraints; `--strict-trivia` does **not** change equivalence (the
 fingerprint's trivia exclusion is the equivalence definition itself).
+
+### `(filters (text @sym "…") / (glob @sym "…") …)` — leaf-text predicates *(v0.3, B1)*
+
+The structural matcher asks *shape* questions; the two leaf-text
+predicates ask the **text** questions every audit eventually needs —
+which `macro_invocation`s are `panic!`, which comments carry `TODO`,
+which method names are `unwrap` — without giving the matcher a string
+engine. A `(filters …)` block hangs off an `(under …)` form exactly like
+`(constraints …)` does (constraints first, then filters; the block is
+legal on nested `under`s too, and all clauses of a rule AND together):
+
+```scheme
+;; count exactly the panic! sites
+(under _ (seq (capture @m macro_invocation))
+  (filters (text @m "panic")))
+
+;; every TODO comment (strict trivia — comments are skip-mode trivia and
+;; never appear in a sibling list otherwise, §5)
+(under _ (seq (capture @c line_comment))
+  (filters (glob @c "*TODO*")))
+
+;; method names starting with un — unwrap, unwrap_or, …
+(under field_expression (seq _ (capture @m field_identifier))
+  (filters (glob @m "un*")))
+```
+
+Semantics:
+
+* A clause predicates its capture's **leaf text**: the source bytes of
+  the capture's leftmost **named leaf** — descend through named children
+  only, and the first node with none carries the text. That is the node
+  itself for leaf captures (`identifier`, `field_identifier`, and
+  comments — a rust `line_comment`'s text token is anonymous, so the
+  comment node *is* the named leaf), and the **name token** for
+  name-carrying subtrees (`macro_invocation` → `panic`,
+  `call_expression` → the callee's first token).
+* `(text @sym "…")`: the leaf text equals the string **byte-exactly**
+  (case included). `(glob @sym "…")`: the leaf text matches the glob —
+  `*` (any run of bytes, empty included), `?` (exactly **one byte**),
+  `[…]` single-byte classes with members, inclusive ranges (`a-z`),
+  optional leading `!` negation, `]` as the first member and `-` at
+  either end as literals; a descending "range" (`[z-a]`) is three
+  literal members. No escape character (`\` is an ordinary byte), and
+  `?`/classes are byte-wise — a multi-byte character needs one `?` per
+  byte. A class that never closes (`[a`) is `E_DSL_COMPILE`, never a
+  silent always-false filter.
+* Filters are evaluated **after** a match binds its captures; a failing
+  clause kills **that match only** — no NFA backtracking, no re-matching,
+  no crash (a filter can never change what the matcher visited). A
+  symbol unbound on a particular match (an untaken alternation branch)
+  filters that match, exactly like an absent capture under `unify`.
+* Clause symbols must be captures of this rule (`E_DSL_COMPILE`
+  otherwise — a filter that could never reference a capture would be a
+  silent no-op).
+* **The linearity story, restated:** the matcher's cost is unchanged
+  (`O(scopes × children × states)`, §1). The filter pass is
+  `O(matches × clauses)` on top — each tested capture pays one bounded
+  `O(depth × log fanout)` walk to its leftmost named leaf — so the whole
+  rule stays linear in tree size with a constant per-match factor. The
+  `b1/filter-text` bench family pins this (match+filter scales with n,
+  not n²); filter-free rules skip the pass entirely.
 
 ### Nesting: `(under …)` as a `seq` element
 
@@ -278,8 +349,8 @@ offending character.
 
 ```json
 {"schema":"janitor.v1","ok":false,"error":{"code":"E_DSL_LEX",
- "message":"lex error at byte 21: expected one of [\"(\", \")\", \"@symbol\", \"identifier\", \"_\"]",
- "details":{"position":21,"expected":["(",")","@symbol","identifier","_"]}}}
+ "message":"lex error at byte 21: expected one of [\"(\", \")\", \"@symbol\", \"identifier\", \"_\", \"\\\"string\\\"\"]",
+ "details":{"position":21,"expected":["(",")","@symbol","identifier","_","\"string\""]}}}
 ```
 
 Cause: `(under block (seq a #))` — `#` is not a token.
@@ -306,6 +377,9 @@ Recurring causes and fixes:
 | `(seq)` / `(any-of a)`             | `E_DSL_PARSE` too few elements   | a `seq` needs ≥1 and an `any-of` ≥2 atoms |
 | unclosed `(`                       | `E_DSL_PARSE` at end of input    | balance the parentheses                |
 | `unify` outside `constraints`      | `E_DSL_PARSE`                    | unify only appears inside `(constraints …)` |
+| `(text @m panic)` (bare needle)    | `E_DSL_PARSE` + quote suggestion | `(text @m "panic")`                    |
+| unterminated `"…`                  | `E_DSL_LEX` at the opening quote | close the string (no escapes — a needle cannot contain `"`) |
+| `(text …)`/`(glob …)` outside `(filters …)` | `E_DSL_PARSE`          | filters hang off `(under …)` as a `(filters …)` block |
 
 ### `E_DSL_UNKNOWN_KIND` — the kind is unknown to every enabled grammar
 
@@ -323,7 +397,9 @@ common ones: `source_file`, `function_item`, `identifier`, `block`,
 
 `details: {message}`. Causes: the same capture symbol used twice
 (`(seq (capture @x a) (capture @x b))` → rename one); an `any-of` or
-`seq` that compiled to zero width.
+`seq` that compiled to zero width; a `unify`/`text`/`glob` clause naming
+a symbol the rule does not capture; a glob pattern whose `[` never
+closes (`(glob @m "[a")` → close the class).
 
 ### `E_UNSUPPORTED_VERSION` — parsed, reserved for a later schema
 
@@ -458,6 +534,27 @@ Two more shapes worth internalizing:
          (seq _ (kind block) (kind else_clause)))))
 ```
 
+**The three leaf-text idioms (v0.3 B1)** — the audit questions structural
+matching alone could not ask (each is a regression fixture under
+`tests/fixtures/`, with the measured counts pinned):
+
+```scheme
+;; panic! sites among ALL macro invocations (skip mode, 2 matches on a
+;; 4-macro fixture — format!/assert! drop out):
+(under _ (seq (capture @m macro_invocation))
+  (filters (text @m "panic")))
+
+;; TODO hunting (STRICT trivia required — §5; 2 of 4 comments on the
+;; fixture, case-exact):
+(under _ (seq (capture @c line_comment))
+  (filters (glob @c "*TODO*")))
+
+;; glob on method names — every un*-method on a receiver (skip mode, 2 of
+;; 5 field accesses: unwrap and unwrap_or stay, lock/clone drop):
+(under field_expression (seq _ (capture @m field_identifier))
+  (filters (glob @m "un*")))
+```
+
 ## 10. Authoring checklist
 
 1. One `(under …)` at the top unless you truly mean every-scope matching.
@@ -468,7 +565,10 @@ Two more shapes worth internalizing:
 4. Capture symbols start with `@`, are used at most once each.
 5. `unify` relates capture symbols only ([§3](#constraints-unify-ab--isomorphism-between-captures-f8));
    equivalence ignores comments and formatting, nothing else.
-6. Read the report's `skipped`/`skipped_for_language` before concluding a
+6. `text`/`glob` filter clauses predicate a capture's **leaf text**, quote
+   their literals, and AND together ([§3](#filters-text-sym--glob-sym--leaf-text-predicates-v03-b1));
+   capturing a comment requires `--strict-trivia`.
+7. Read the report's `skipped`/`skipped_for_language` before concluding a
    rule matches nothing — exclusions are always listed.
 
 ---

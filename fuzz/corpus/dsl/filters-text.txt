@@ -1,0 +1,1 @@
+(under _ (seq (capture @m macro_invocation)) (filters (text @m "panic")))

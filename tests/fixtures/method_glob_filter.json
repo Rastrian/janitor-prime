@@ -1,0 +1,8 @@
+{
+  "rule": "(under field_expression (seq _ (capture @m field_identifier)) (filters (glob @m \"un*\")))",
+  "file": "method_glob_filter.rs",
+  "lang": "rust",
+  "trivia": "skip",
+  "texts": ["o.lock().unwrap_or", "o.lock().unwrap"],
+  "captures": ["unwrap_or", "unwrap"]
+}
