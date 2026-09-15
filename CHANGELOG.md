@@ -16,6 +16,16 @@ Numbers below come from the phase records in
 `docs/planning/PLAN.md` (§3 outcome notes, §5 kill-point table, Appendix
 A.5), the kill-point memos in `docs/planning/spikes/`, and the git history.
 
+## [Unreleased]
+- **Fixed (F8 regression):** `FingerprintTable::build` left its walk and
+  result arrays unreserved, so every build re-paid its capacity doublings —
+  allocation events grew with tree size (123 on a ~10.7k-node corpus, 144 on
+  ~53.6k) and the KP-8 alloc fence failed at 213 > 128 (the test also
+  measured its own corpus regeneration inside the window). Every array is
+  now reserved up front from the root's O(1) `descendant_count`: 12 one-time
+  events per build, any tree size. The fence re-asserts the structural form
+  — the same constant budget on two corpus sizes (~10.7k and ~32k nodes).
+
 ## [0.1.0] - 2026-09-15
 
 First functional cut: the agent loop — discover → stage → validate → flush →
