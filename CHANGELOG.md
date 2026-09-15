@@ -216,7 +216,8 @@ Measured before the engine was built; each result fixed a design decision.
   property is the product's contract, so it is tested rather than claimed.
 - Supply chain: cargo-deny (license allow-list MIT / Apache-2.0 / BSD /
   ISC / Unicode-3.0 / Zlib, plus an advisories gate) and cargo-audit in CI;
-  a `THIRD_PARTY` manifest for the bundled grammar crates.
+  a machine-generated `THIRD_PARTY.md` manifest of the full dependency
+  graph (145 crates, cargo-about via `about.toml`/`about.hbs`).
 - Release workflow (tag-triggered): builds
   `x86_64-unknown-linux-musl` (cargo-zigbuild),
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`,
@@ -228,11 +229,11 @@ Measured before the engine was built; each result fixed a design decision.
   anchor → note re-anchors → budgeted wake → the nap loop settles → final
   wake fits), asserting every payload's schema and key fields.
 - Release gates: fmt, clippy `-D warnings` (default and `--all-features`),
-  tests in both feature configs, `build --no-default-features`. Full-suite
-  count measured on the release branch at the F6 boundary (F7's own fuzz
-  targets and the acceptance test are additive): **194 tests passing under
-  default features, 201 under `--all-features`, 0 failed** (plus two
-  `#[ignore]`d spike-measurement tests).
+  tests in both feature configs, `build --no-default-features`, the
+  counting-allocator fence, and the acceptance test green locally and in
+  CI. Full-suite count on the release branch (F7 included): **199 tests
+  passing under default features, 206 under `--all-features`, 0 failed**
+  (plus two `#[ignore]`d spike-measurement tests).
 
 ### Known limitations
 
