@@ -332,6 +332,8 @@ impl Server {
         let strict_trivia = opt_bool(args, "strict_trivia")?.unwrap_or(false);
         let max_file_size = opt_u64(args, "max_file_size")?.unwrap_or(DEFAULT_MAX_FILE_SIZE);
         let min_size = opt_u32(args, "min_size")?.unwrap_or(DEFAULT_MIN_DUPLICATE_SIZE);
+        let min_members = opt_u32(args, "min_members")?;
+        let summary = opt_bool(args, "summary")?.unwrap_or(false);
         let root = match opt_str(args, "path")? {
             Some(spelled) => match self.resolve_inside(spelled) {
                 Ok(root) => root,
@@ -358,6 +360,8 @@ impl Server {
                     include_virtual,
                     max_file_size,
                     min_size,
+                    min_members,
+                    summary,
                     retain_cache: false, // MCP is stateless: no warm cache to feed
                 };
                 match session.duplicates(&params) {
@@ -725,6 +729,16 @@ fn tool_specs() -> Vec<Value> {
                         "type": "integer",
                         "description": "Duplicates mode: minimum subtree size in \
         participating nodes (default 8)."
+                    },
+                    "min_members": {
+                        "type": "integer",
+                        "description": "Duplicates mode: only groups with at least N \
+        members survive (default 2)."
+                    },
+                    "summary": {
+                        "type": "boolean",
+                        "description": "Duplicates mode: prepend the per-kind aggregate \
+        block — group/member counts per (language, kind) plus totals (default false)."
                     }
                 }
             },

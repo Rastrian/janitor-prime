@@ -1,5 +1,46 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (v0.3 — product truth, roadmap #3)
+- **Duplicates summary + filters (B3):** `scan --duplicates` gains
+  `--summary` (prepend the per-kind aggregate — one row per
+  (language, root kind) with group/member counts, sorted, plus totals;
+  one envelope, no jq) and `--min-members N` (only groups with ≥ N
+  members survive; values below 2 behave as 2). Defaults unchanged:
+  without the flags there is no `summary` key and the member floor stays
+  at 2. Both knobs also ride the daemon's `duplicates` request
+  (append-only optional fields) and the MCP `janitor_scan` tool, so a
+  routed response honors them instead of silently dropping them.
+  Golden-pinned on a known trio/pair/solo corpus (10 groups / 25 members
+  default; 5 / 15 under `--min-members 3`), and the summary is fenced
+  byte-identical under RAYON 1 vs 8 through the real binary.
+
+### Added (v0.3 — product truth, roadmap #2)
+- **Daemon provenance + cache telemetry (B4):** every scan/duplicates
+  response the daemon serves carries `served_by: "daemon" | "process"`
+  (routed vs the CLI's in-process fallback) and `stats.cache =
+  {hits, misses}` — that one request's warm-cache hit/miss delta, or
+  `{0, 0}` on the fallback. The silent-fallback honesty hole is closed:
+  a `--daemon` scan after the daemon died now visibly says
+  `"process"`. The `stats` op already carried the cumulative
+  `cache.{entries, hits, misses, evictions, bytes, bound_bytes}`
+  counters; the e2e fence now pins nonzero `cache.hits` after a routed
+  scan and zero added misses on the warm re-scan
+  (`tests/daemon_e2e.rs::scan_daemon_responses_say_who_served_them`).
+
+### Added (v0.3 — product truth, roadmap #1)
+- **`wake` environment notes (B2):** every wake payload now carries
+  `data.environment` — `{janitor, servers: [{name, available}…],
+  git: {available, dirty}}`. The servers are pure PATH lookups (no
+  process spawn) over the eight known language-server binaries
+  (rust-analyzer, pyright, basedpyright, gopls, ruby-lsp, elixir-ls,
+  ocamllsp, typescript-language-server); git presence is the same lookup
+  and `dirty` is one `git status --porcelain` run (staged, unstaged, or
+  untracked; false when git is missing or the directory is not a
+  repository). This is the field GLOBAL.md's semantic-layer guidance
+  always referenced — the promise is now true, and GLOBAL.md/SCHEMA.md
+  describe the actual shape. ADR-0017 unchanged: guidance with evidence,
+  never a runtime.
+
 ### Added (F10a)
 - **Warm-cache daemon + watch mode** (ADR-0018,
   `docs/planning/ADR-0018-daemon.md`): `janitor daemon [--workspace

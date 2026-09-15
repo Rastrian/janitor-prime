@@ -90,10 +90,20 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 include_virtual: args.include_virtual,
                 max_file_size: args.max_file_size,
                 min_size: args.min_size,
+                min_members: args.min_members,
+                summary: args.summary,
                 retain_cache: false,
             };
             match session.duplicates(&params) {
-                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Ok(mut report) => {
+                    if args.daemon {
+                        // v0.3 B4: the fallback is honest — the report says
+                        // who served it and that nothing was warm.
+                        report.served_by = Some("process");
+                        report.stats.cache = Some(janitor_prime::scan::CacheTelemetry::default());
+                    }
+                    cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS)
+                }
                 Err(err) => emit_error(err, pretty),
             }
         }
@@ -108,7 +118,13 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 retain_cache: false,
             };
             match session.scan(&params) {
-                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Ok(mut report) => {
+                    if args.daemon {
+                        report.served_by = Some("process");
+                        report.stats.cache = Some(janitor_prime::scan::CacheTelemetry::default());
+                    }
+                    cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS)
+                }
                 Err(err) => {
                     let envelope: Envelope<serde_json::Value> = err.into();
                     cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)
@@ -212,6 +228,10 @@ fn daemon_route(args: &cli::ScanArgs, root: &std::path::Path) -> Option<serde_js
         let mut request =
             janitor_prime::daemon::protocol::Request::duplicates(Some(root.display().to_string()));
         request.min_size = Some(args.min_size);
+        // v0.3 B3: the socket carries the new duplicates knobs too — a
+        // routed response must honor them, never silently drop them.
+        request.min_members = args.min_members;
+        request.summary = args.summary.then_some(true);
         request
     } else {
         janitor_prime::daemon::protocol::Request::scan(
@@ -304,7 +324,27 @@ fn run_wake(args: cli::WakeArgs, pretty: bool) -> ExitCode {
 
 /// `janitor note` (F6.7): resolve the anchor, append the fact. Anchor
 /// failures are the anti-hallucination gate — nothing is appended.
+/// v0.3 B5: `--stdin` takes the text from the pipe instead of the
+/// argument (quoting sanity for evidence-carrying notes); the validation
+/// is identical either way.
 fn run_note(args: cli::NoteArgs, pretty: bool) -> ExitCode {
+    let text = if args.stdin {
+        match read_note_stdin() {
+            Ok(text) => text,
+            Err(err) => return emit_error(err, pretty),
+        }
+    } else if let Some(text) = args.text {
+        text
+    } else {
+        // Unreachable past clap's note_source group; kept total for
+        // future callers.
+        let usage = Envelope::error(
+            "E_USAGE",
+            "note needs its text: pass it as the argument or pipe it with --stdin",
+            None,
+        );
+        return cli::emit(&usage, pretty, EXIT_USAGE);
+    };
     let target = if let Some(notation) = args.ptr.as_deref() {
         Some(NoteTarget::Ptr(notation.to_owned()))
     } else {
@@ -314,7 +354,7 @@ fn run_note(args: cli::NoteArgs, pretty: bool) -> ExitCode {
     };
     let params = NoteParams {
         target,
-        text: args.text,
+        text,
         lock: args.lock,
     };
     let session = Session::new();
@@ -322,6 +362,31 @@ fn run_note(args: cli::NoteArgs, pretty: bool) -> ExitCode {
         Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
         Err(err) => emit_error(err, pretty),
     }
+}
+
+/// Read a `note --stdin` fact: stdin to EOF, then strip ONE trailing
+/// newline (a piped line carries it; a `\r\n` pair loses both). Interior
+/// newlines stay — the single-line discipline is the same typed
+/// validation, never a silent truncation. Non-UTF-8 is the typed
+/// `E_VFS_INVALID_UTF8`, same as apply's stdin payload.
+fn read_note_stdin() -> Result<String, JanitorError> {
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut buf)
+        .map_err(|err| VfsError::Io {
+            path: "<stdin>".to_owned(),
+            message: err.to_string(),
+        })?;
+    let mut text = String::from_utf8(buf).map_err(|_| VfsError::InvalidUtf8 {
+        path: "<stdin>".to_owned(),
+    })?;
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    Ok(text)
 }
 
 /// `janitor nap` (F6.7): bare prints the next pending request; `--slot`

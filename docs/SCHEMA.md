@@ -252,7 +252,13 @@ Payload (flattened: the recall core plus the standing context):
     "warnings": [],
     "global": { "source": "embedded", "text": "…", "estimate": 600 },
     "state": { "updated": "…", "last_scan": { … }, "last_apply": { … } },
-    "hints": [ "…" ] } }
+    "hints": [ "…" ],
+    "environment": {
+      "janitor": "0.3.0",
+      "servers": [
+        { "name": "rust-analyzer", "available": true },
+        { "name": "pyright", "available": false } ],
+      "git": { "available": true, "dirty": false } } } }
 ```
 
 `global.estimate` is informational — the budget governs the memory
@@ -260,6 +266,18 @@ payload, not the standing instructions. `state` is STATE.json's contents
 (or `null`): `{ "last_scan": {"ts","files","matches","skipped"},
 "last_apply": {"ts","files","edits","dry_run"} }`, written atomically by
 every successful `scan`/`apply` **only when `.janitor/` exists**.
+
+`environment` (v0.3) is the guidance surface ADR-0017 promised, as
+evidence rather than a promise: `servers` carries one `{name, available}`
+row per probed language server (`rust-analyzer`, `pyright`,
+`basedpyright`, `gopls`, `ruby-lsp`, `elixir-ls`, `ocamllsp`,
+`typescript-language-server` — a pure PATH lookup, no process spawn);
+`git.available` is git on the PATH and `git.dirty` is whether one
+`git status --porcelain` run over the repo listed anything (staged,
+unstaged, or untracked; false when git is missing or the directory is
+not a repository); `janitor` is the answering binary's version. Janitor
+never starts or embeds a server — the block says what the PATH offers so
+the semantic-layer advice in GLOBAL.md can key on it.
 
 **Completeness gate:** when compression is needed and a block the layout
 needs has no stored summary, `wake` refuses with `E_NAP_PENDING` — never
@@ -506,13 +524,22 @@ interface split).
 Duplicate-detection mode (mutually exclusive with `--rule`). Groups every
 capturable subtree at or above `--min-size` participating nodes (default 8;
 comment- and formatting-invariant) by its 128-bit Merkle fingerprint, and
-reports groups with ≥ 2 members.
+reports groups with ≥ 2 members (raised by `--min-members N`, v0.3 B3 —
+values below 2 behave as 2).
 
 ```json
 {
   "schema": "janitor.v1", "ok": true,
   "data": {
     "kind": "duplicates",
+    "min_size": 8,
+    "summary": {
+      "kinds": [
+        { "lang": "rust", "kind": "block", "groups": 2, "members": 5 },
+        { "lang": "rust", "kind": "function_item", "groups": 2, "members": 5 }
+      ],
+      "groups": 10, "members": 25
+    },
     "groups": [
       {
         "id": 0,
@@ -528,8 +555,8 @@ reports groups with ≥ 2 members.
         ]
       }
     ],
-    "stats": { "files": 1, "bytes": 29000, "wall_ms": 3,
-               "files_matched": 1, "matches": 2, "langs": {"rust": 1} }
+    "stats": { "files": 6, "bytes": 174000, "nodes": 412, "groups": 10,
+               "members": 25, "langs": {"rust": 6}, "wall_ms": 3 }
   }
 }
 ```
@@ -543,6 +570,15 @@ reports groups with ≥ 2 members.
   rayon thread count (RAYON determinism fence covers this mode).
 - **Tuning**: `--min-size` raises the floor so import blocks and tiny
   repeated idioms drop out; raise it until the report is actionable.
+- **`--summary` (v0.3 B3)** prepends the aggregate block shown above
+  (omitted without the flag): one row per (language, root kind) with its
+  group and member counts, sorted by (lang, kind), plus the group/member
+  totals — the per-kind ranking that used to need jq, one envelope.
+  `--min-members N` keeps only groups with ≥ N members; both flags also
+  ride the daemon socket (`duplicates` request's `min_members`/`summary`)
+  and the MCP `janitor_scan` tool, so a routed response honors them.
+  Defaults are unchanged: without the flags the report carries no
+  `summary` key and the member floor stays at 2.
 
 ## Language support — ruby & ocaml (F9c, v0.2 wave 2, EXPERIMENTAL TIER)
 
@@ -651,7 +687,9 @@ janitor daemon [--workspace DIR] [--sock PATH] [--interval SECS]
 - The CLI never spawns the daemon in v0.2. `janitor scan --daemon`
   (opt-in) routes through the socket iff it answers `ping` AND its
   workspace covers the scan root; anything else falls back to the
-  in-process path silently (a stderr note, never a stdout side effect).
+  in-process path (a stderr note, never a stdout side effect). The
+  fallback is no longer silent (v0.3 B4): every `--daemon` response
+  says who served it — see **Provenance** below.
 
 ### Request/response
 
@@ -673,6 +711,25 @@ agent-facing protocol fails loudly on typos):
   the workspace). Responses carry the exact CLI report shapes as `data`.
 - `ping`/`stats` answer liveness + identity + the numbers below.
 - `shutdown` answers its ack envelope, then the daemon exits.
+
+**Provenance (v0.3 B4):** every scan/duplicates response the daemon
+serves — over the socket or through `scan --daemon` — carries two keys a
+plain in-process report omits:
+
+```json
+{ "served_by": "daemon", "stats": { "cache": { "hits": 52, "misses": 0 }, … } }
+```
+
+`served_by` is `"daemon"` when the warm-cache daemon produced the report
+and `"process"` when the CLI fell back in-process (dead socket, no
+daemon, or a daemon serving another workspace) — agents can SEE when the
+daemon is not serving instead of guessing. `stats.cache` is that one
+request's hit/miss delta against the daemon's warm cache (a cold routed
+scan shows `misses == files, hits == 0`; a warm re-scan `hits >= files,
+misses == 0`); the in-process fallback always reports
+`{"hits": 0, "misses": 0}` because nothing was warm. The cumulative
+counters (plus entries/bytes/evictions/bound) ride `ping`/`stats` — see
+the payload below.
 
 `ping`/`stats` `data` (abridged; every field always present):
 

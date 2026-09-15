@@ -20,7 +20,10 @@
 //!   force-split, and the completeness gate (`E_NAP_PENDING`);
 //! - [`nap`] — the synchronous compression protocol (ADR-0013): the tool
 //!   sequences and stores, the consuming agent writes every summary;
-//!   nothing ever runs in the background and no LLM lives in the binary.
+//!   nothing ever runs in the background and no LLM lives in the binary;
+//! - [`environment`] — the `wake` payload's environment notes (v0.3):
+//!   PATH probes for the language servers and git around the repo —
+//!   guidance with evidence (ADR-0017's delivery), never a runtime.
 //!
 //! Storage I/O is plain `std::fs` (append + fsync for the log; tmp+rename
 //! via [`crate::vfs::Os::write_atomic`] where a whole file is rewritten —
@@ -31,6 +34,7 @@
 //! `$XDG_CONFIG_HOME/janitor/GLOBAL.md` override, nothing else.
 
 pub mod context;
+pub mod environment;
 pub mod log;
 pub mod nap;
 pub mod pointer;

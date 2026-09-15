@@ -76,8 +76,10 @@ pub enum Command {
     /// Recall memory under a token budget: raw facts and summaries,
     /// oldest-first, plus the standing global layer and state (F6).
     Wake(WakeArgs),
-    /// Append one validated fact (one line, ≤ 280 bytes); --ptr anchors it
-    /// to a span taken from janitor's own reports, --commit to a commit.
+    /// Append one validated fact (one line, ≤ 280 bytes — as an argument
+    /// or piped via --stdin); --ptr anchors it with the notation
+    /// `path:byte_start-byte_end:kind_name` (spans from janitor's own
+    /// reports), --commit to a commit.
     Note(NoteArgs),
     /// The compression protocol: no args prints the next pending request;
     /// --slot + --text stores the agent-written summary line (F6).
@@ -141,14 +143,18 @@ pub struct WakeArgs {
 
 /// `janitor note` (PLAN §1.5.3, F6.7): exactly one anchor flavor — the
 /// compact pointer notation, a full stored-pointer JSON, a commit sha —
-/// or none (a free fact).
+/// or none (a free fact). v0.3 B5 adds `--stdin` as the text source
+/// (piped input, same validation).
 #[derive(Debug, Parser)]
 #[command(
-    group(clap::ArgGroup::new("anchor").args(["ptr", "commit"]))
+    group(clap::ArgGroup::new("anchor").args(["ptr", "commit"])),
+    group(clap::ArgGroup::new("note_source").required(true).args(["text", "stdin"]))
 )]
 pub struct NoteArgs {
-    /// Node anchor: `path:start-end:kind` (byte offsets from janitor
-    /// reports) or a stored pointer's JSON (re-anchorable).
+    /// Node anchor in the compact notation `path:byte_start-byte_end:kind_name`
+    /// — e.g. `src/lib.rs:120-480:function_item` — where the byte span comes
+    /// from janitor's own `scan` output; or a stored pointer's JSON
+    /// (re-anchorable).
     #[arg(long, conflicts_with = "commit")]
     pub ptr: Option<String>,
 
@@ -156,12 +162,18 @@ pub struct NoteArgs {
     #[arg(long = "commit")]
     pub commit: Option<String>,
 
+    /// Read the fact text from stdin instead of the argument (piped
+    /// evidence without quoting pain): reads to EOF, strips one trailing
+    /// newline; the one-line ≤ 280-byte validation is identical.
+    #[arg(long)]
+    pub stdin: bool,
+
     /// Mark the fact architectural_lock: never compressed, never dropped.
     #[arg(long)]
     pub lock: bool,
 
-    /// The fact itself: one line, ≤ 280 bytes.
-    pub text: String,
+    /// The fact itself: one line, ≤ 280 bytes (or pipe it via --stdin).
+    pub text: Option<String>,
 }
 
 /// `janitor nap` (PLAN §1.5.4, F6.7): `--slot` and `--text` travel
@@ -253,6 +265,17 @@ pub struct ScanArgs {
     /// (comment- and formatting-invariant) for grouping (default 8).
     #[arg(long, conflicts_with = "rule", default_value_t = crate::scan::DEFAULT_MIN_DUPLICATE_SIZE)]
     pub min_size: u32,
+
+    /// Duplicates mode: only groups with at least N members survive
+    /// (default 2 — a duplicate needs two; values below 2 behave as 2).
+    #[arg(long, conflicts_with = "rule")]
+    pub min_members: Option<u32>,
+
+    /// Duplicates mode: prepend the per-kind aggregate block — group and
+    /// member counts per (language, kind) plus totals, one envelope,
+    /// no jq.
+    #[arg(long, conflicts_with = "rule")]
+    pub summary: bool,
 
     /// Route through the warm-cache daemon when its socket answers `ping`
     /// for this workspace; otherwise run in-process, silently (ADR-0018
@@ -468,11 +491,33 @@ mod tests {
             unreachable!("scan subcommand");
         };
         assert_eq!(args.min_size, crate::scan::DEFAULT_MIN_DUPLICATE_SIZE);
+        // v0.3 B3: the new knobs default off/None (back-compat)…
+        assert!(!args.summary);
+        assert_eq!(args.min_members, None);
+
+        // …and parse under --duplicates.
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "scan",
+            "--duplicates",
+            "src",
+            "--summary",
+            "--min-members",
+            "3",
+        ])
+        .expect("duplicates with the v0.3 flags");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
+        assert!(args.summary);
+        assert_eq!(args.min_members, Some(3));
 
         for argv in [
             vec!["janitor", "scan", "--duplicates", "--rule", "_"],
             vec!["janitor", "scan", "--duplicates", "--strict-trivia"],
             vec!["janitor", "scan", "--rule", "_", "--min-size", "4"],
+            vec!["janitor", "scan", "--rule", "_", "--summary"],
+            vec!["janitor", "scan", "--rule", "_", "--min-members", "3"],
         ] {
             let err = Cli::try_parse_from(argv).expect_err("mode flags exclude each other");
             let (_envelope, code) = clap_error_envelope(&err);
@@ -563,8 +608,9 @@ mod tests {
         let Some(Command::Note(args)) = cli.command else {
             unreachable!("note subcommand");
         };
-        assert_eq!(args.text, "the overlay invariants hold");
+        assert_eq!(args.text.as_deref(), Some("the overlay invariants hold"));
         assert!(args.ptr.is_none() && args.commit.is_none() && !args.lock);
+        assert!(!args.stdin, "the argument is the default source");
 
         let cli = Cli::try_parse_from([
             "janitor",
@@ -616,6 +662,39 @@ mod tests {
         let err = Cli::try_parse_from(["janitor", "note"]).expect_err("text is required");
         let (_envelope, code) = clap_error_envelope(&err);
         assert_eq!(code, envelope::EXIT_USAGE);
+
+        // v0.3 B5: --stdin is the alternative text source — parses with
+        // every anchor flavor, and exactly one source is taken (both at
+        // once, or neither, is a usage error).
+        let cli =
+            Cli::try_parse_from(["janitor", "note", "--stdin", "--lock"]).expect("stdin note");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert!(args.stdin);
+        assert_eq!(args.text, None);
+        assert!(args.lock);
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "note",
+            "--ptr",
+            "src/lib.rs:120-480:function_item",
+            "--stdin",
+        ])
+        .expect("anchored stdin note");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert!(args.stdin && args.ptr.is_some() && args.text.is_none());
+
+        for argv in [
+            vec!["janitor", "note", "--stdin", "and an argument"],
+            vec!["janitor", "note", "--lock"],
+        ] {
+            let err = Cli::try_parse_from(argv).expect_err("exactly one note source");
+            let (_envelope, code) = clap_error_envelope(&err);
+            assert_eq!(code, envelope::EXIT_USAGE);
+        }
 
         // nap: bare (next pending), and slot+text together
         let cli = Cli::try_parse_from(["janitor", "nap"]).expect("nap");

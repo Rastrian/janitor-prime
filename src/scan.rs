@@ -163,6 +163,19 @@ pub struct ScanStats {
     pub matches: u64,
     /// Scanned files per language.
     pub langs: BTreeMap<String, u64>,
+    /// Warm-cache telemetry for THIS scan's serving (v0.3 B4): the
+    /// daemon's hit/miss delta over the request. Absent on plain scans;
+    /// `{0, 0}` on the in-process `--daemon` fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheTelemetry>,
+}
+
+/// Per-scan warm-cache counters (v0.3 B4): how many file lookups this
+/// one scan's serving hit the daemon's cache vs re-parsed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheTelemetry {
+    pub hits: u64,
+    pub misses: u64,
 }
 
 /// The `janitor scan` report payload (the `data` of the janitor.v1
@@ -172,6 +185,12 @@ pub struct ScanReport {
     pub rule: String,
     /// `"skip"` (ADR-0010 default) or `"strict"`.
     pub trivia: &'static str,
+    /// Who served this scan (v0.3 B4): `"daemon"` when routed through the
+    /// warm-cache daemon, `"process"` when the CLI fell back in-process.
+    /// Absent on plain scans — stdout is unchanged for every invocation
+    /// without `--daemon`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<&'static str>,
     /// Path-sorted, per-file canonically ordered matches.
     pub matches: Vec<ScanMatch>,
     /// language → files skipped because the rule names a kind that language
@@ -398,6 +417,7 @@ pub fn scan(
         } else {
             "skip"
         },
+        served_by: None,
         matches,
         skipped_for_language,
         skipped,
@@ -426,6 +446,13 @@ pub struct DuplicatesParams {
     /// Minimum subtree size, in participating nodes (comment- and
     /// formatting-invariant), for a subtree to be groupable.
     pub min_size: u32,
+    /// Only report groups with at least this many members (v0.3 B3;
+    /// `None` keeps the built-in floor of 2 — a duplicate needs two,
+    /// and values below 2 behave as 2).
+    pub min_members: Option<u32>,
+    /// Prepend the per-kind aggregate block (v0.3 B3): group/member
+    /// counts per kind plus totals, one envelope, no jq.
+    pub summary: bool,
     /// Keep entries warm after collection (the daemon's shape; default
     /// `false` — ADR-0007 streaming, F10a/ADR-0018 D4).
     pub retain_cache: bool,
@@ -440,6 +467,8 @@ impl DuplicatesParams {
             include_virtual: false,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             min_size: DEFAULT_MIN_DUPLICATE_SIZE,
+            min_members: None,
+            summary: false,
             retain_cache: false,
         }
     }
@@ -500,6 +529,40 @@ pub struct DuplicatesStats {
     pub langs: BTreeMap<String, u64>,
     /// Wall-clock time — the only non-deterministic field.
     pub wall_ms: u64,
+    /// Warm-cache telemetry for THIS scan's serving (v0.3 B4): the
+    /// daemon's hit/miss delta over the request. Absent on plain scans;
+    /// `{0, 0}` on the in-process `--daemon` fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheTelemetry>,
+}
+
+/// One per-kind aggregate row of the `--summary` block (v0.3 B3).
+#[derive(Clone, Debug, Serialize)]
+pub struct DuplicatesKindRow {
+    /// The grammar's language name (the `stats.langs` spelling).
+    pub lang: String,
+    /// The group's root kind name — every member of a group shares it
+    /// (the fingerprint covers the root kind); `<kind N>` when the name
+    /// is unknown to the registry.
+    pub kind: String,
+    /// Reported groups of this kind.
+    pub groups: u64,
+    /// Reported members across those groups.
+    pub members: u64,
+}
+
+/// The `--duplicates --summary` aggregate (v0.3 B3), prepended to the
+/// report: per-kind group/member counts over the reported groups, plus
+/// the totals — the ranking jq used to have to do, one envelope.
+#[derive(Clone, Debug, Serialize)]
+pub struct DuplicatesSummary {
+    /// Sorted by (lang, kind) — a BTreeMap walk, deterministic under any
+    /// rayon thread count.
+    pub kinds: Vec<DuplicatesKindRow>,
+    /// Total reported groups (== `stats.groups`).
+    pub groups: u64,
+    /// Total reported members (== `stats.members`).
+    pub members: u64,
 }
 
 /// The `janitor scan --duplicates` payload (the `data` of the janitor.v1
@@ -509,6 +572,14 @@ pub struct DuplicatesReport {
     pub kind: &'static str,
     /// The participating-node floor that gated grouping.
     pub min_size: u32,
+    /// Who served this scan (v0.3 B4): `"daemon"` when routed through the
+    /// warm-cache daemon, `"process"` when the CLI fell back in-process.
+    /// Absent on plain scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<&'static str>,
+    /// The per-kind aggregate (v0.3 B3), present only under `--summary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<DuplicatesSummary>,
     /// Groups ordered canonically: by first member's (path, start, end),
     /// then size descending; ids assigned in this order.
     pub groups: Vec<DuplicateGroup>,
@@ -683,10 +754,16 @@ pub fn duplicates(
         group: DuplicateGroup,
     }
 
+    // The member floor: the report's built-in >= 2, raised by
+    // `--min-members` when given (v0.3 B3). Filtering happens BEFORE ids,
+    // overlap flags, and stats exist, so everything downstream reports
+    // the survivors only.
+    let member_floor = params.min_members.map_or(2, |n| n.max(2)) as usize;
+
     // Canonical member order inside a group: (file order, start, end).
     let mut groups: Vec<Assembled> = groups_map
         .into_iter()
-        .filter(|(_, members)| members.len() >= 2)
+        .filter(|(_, members)| members.len() >= member_floor)
         .map(|((lang, fp), mut members)| {
             members.sort_by(|a, b| {
                 a.0.cmp(&b.0)
@@ -775,14 +852,51 @@ pub fn duplicates(
     stats.groups = groups.len() as u64;
     stats.members = groups.iter().map(|g| g.members.len() as u64).sum();
 
+    let summary = params.summary.then(|| summarize(&groups));
     stats.wall_ms = started.elapsed().as_millis() as u64;
     Ok(DuplicatesReport {
         kind: "duplicates",
         min_size: params.min_size,
+        served_by: None,
+        summary,
         groups,
         skipped,
         stats,
     })
+}
+
+/// Build the `--summary` aggregate (v0.3 B3) over the FINAL, canonically
+/// ordered groups: one row per (lang, root kind) with its group and
+/// member counts, plus the totals. A pure function of the group list —
+/// deterministic under any rayon thread count by construction.
+fn summarize(groups: &[DuplicateGroup]) -> DuplicatesSummary {
+    // (lang, kind) → (group count, member count); the BTreeMap's order IS
+    // the row order.
+    let mut by_kind: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    for group in groups {
+        // Members of a group share the root kind (the fingerprint covers
+        // it); the first member's name speaks for all of them.
+        let first = group.members.first();
+        let kind = first
+            .and_then(|m| m.kind.clone())
+            .unwrap_or_else(|| format!("<kind {}>", first.map_or(0, |m| m.kind_id)));
+        let counts = by_kind.entry((group.lang.clone(), kind)).or_insert((0, 0));
+        counts.0 += 1;
+        counts.1 += group.members.len() as u64;
+    }
+    DuplicatesSummary {
+        kinds: by_kind
+            .into_iter()
+            .map(|((lang, kind), (groups, members))| DuplicatesKindRow {
+                lang,
+                kind,
+                groups,
+                members,
+            })
+            .collect(),
+        groups: groups.len() as u64,
+        members: groups.iter().map(|g| g.members.len() as u64).sum(),
+    }
 }
 
 /// Resolve a `--lang` name to a registry id; a name this build does not
@@ -1339,6 +1453,101 @@ mod tests {
         huge.min_size = 10_000;
         let empty = session.duplicates(&huge).expect("scan runs");
         assert!(empty.groups.is_empty());
+        assert!(session.cache().is_empty(), "streaming, ADR-0007");
+    }
+
+    /// v0.3 B3: `--summary` prepends the per-kind aggregate (one
+    /// envelope, no jq) and `--min-members N` keeps only groups with at
+    /// least N members — golden-pinned on a known corpus: three identical
+    /// `trio` functions, two identical `pair` functions, one unique
+    /// `solo`. The nested body subtrees group too (the pair's block is a
+    /// 2-member group, the trio's a 3-member one), which the pinned
+    /// numbers account for. Defaults are unchanged: without the flags
+    /// there is no `summary` and the member floor stays at 2.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn duplicates_summary_and_min_members_are_golden() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let trio = "fn trio(x: u32) -> u32 {\n    let a = x + 1;\n    let b = a * 2;\n    b\n}\n";
+        let pair = "fn pair(y: u64) -> u64 {\n    let p = y + 3;\n    let q = p * 5;\n    q\n}\n";
+        for path in ["t1.rs", "t2.rs", "t3.rs"] {
+            std::fs::write(tmp.path().join(path), trio).expect("write trio copy");
+        }
+        for path in ["p1.rs", "p2.rs"] {
+            std::fs::write(tmp.path().join(path), pair).expect("write pair copy");
+        }
+        std::fs::write(
+            tmp.path().join("u1.rs"),
+            "fn solo(z: u8) -> u8 {\n    z.wrapping_add(1)\n}\n",
+        )
+        .expect("write solo");
+
+        let session = Session::new();
+
+        // Default (back-compat): no summary block, floor stays at 2.
+        let plain = session
+            .duplicates(&DuplicatesParams::new(tmp.path()))
+            .expect("default duplicates run");
+        assert!(plain.summary.is_none(), "no summary without --summary");
+        assert_eq!((plain.stats.groups, plain.stats.members), (10, 25));
+
+        // --summary: the golden aggregate over the SAME report (the
+        // groups are all still there).
+        let mut summarized = DuplicatesParams::new(tmp.path());
+        summarized.summary = true;
+        let with_summary = session.duplicates(&summarized).expect("summarized run");
+        assert_eq!(
+            with_summary.groups.len(),
+            10,
+            "summary prepends, not replaces"
+        );
+        let summary = with_summary.summary.as_ref().expect("summary present");
+        assert_eq!(
+            serde_json::to_value(&summary.kinds).expect("json"),
+            serde_json::json!([
+                {"lang": "rust", "kind": "block", "groups": 2, "members": 5},
+                {"lang": "rust", "kind": "function_item", "groups": 2, "members": 5},
+                {"lang": "rust", "kind": "let_declaration", "groups": 4, "members": 10},
+                {"lang": "rust", "kind": "source_file", "groups": 2, "members": 5},
+            ]),
+            "per-kind rows, (lang, kind)-sorted, exact counts"
+        );
+        assert_eq!((summary.groups, summary.members), (10, 25));
+        assert_eq!(summary.groups, with_summary.stats.groups);
+        assert_eq!(summary.members, with_summary.stats.members);
+
+        // --min-members 3: only the trio's groups survive — the pairs and
+        // their 2-member subtrees drop, ids/overlap/stats reflect the
+        // survivors only.
+        let mut floored = DuplicatesParams::new(tmp.path());
+        floored.min_members = Some(3);
+        let filtered = session.duplicates(&floored).expect("filtered run");
+        assert!(filtered.groups.iter().all(|g| g.members.len() >= 3));
+        assert_eq!((filtered.stats.groups, filtered.stats.members), (5, 15));
+        assert!(
+            filtered
+                .groups
+                .iter()
+                .flat_map(|g| &g.members)
+                .all(|m| !m.path.starts_with('p')),
+            "the pair copies are gone from every group"
+        );
+        for (i, group) in filtered.groups.iter().enumerate() {
+            assert_eq!(group.id, i as u32, "ids reassigned over the survivors");
+        }
+
+        // The flags compose: the summary over the filtered set.
+        let mut both = floored.clone();
+        both.summary = true;
+        let composed = session.duplicates(&both).expect("both flags");
+        let summary = composed.summary.as_ref().expect("summary");
+        assert_eq!((summary.groups, summary.members), (5, 15));
+        let row = summary
+            .kinds
+            .iter()
+            .find(|row| row.kind == "function_item")
+            .expect("function_item row");
+        assert_eq!((row.groups, row.members), (1, 3), "only the trio remains");
         assert!(session.cache().is_empty(), "streaming, ADR-0007");
     }
 }

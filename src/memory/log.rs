@@ -41,6 +41,10 @@ use crate::vfs::Os;
 /// math depends on it.
 pub const MAX_NOTE_BYTES: usize = 280;
 
+/// How many chars of an over-limit note the refusal previews (v0.3 B5) —
+/// enough to orient, never the whole evidence.
+pub const NOTE_PREVIEW_CHARS: usize = 60;
+
 /// The raw-fact log's on-disk name.
 pub const LOG_FILE: &str = "LOG.txt";
 
@@ -101,16 +105,19 @@ pub struct LogState {
 
 /// Validate a `note` text against the line discipline: non-empty, single
 /// line, ≤ [`MAX_NOTE_BYTES`] bytes (§1.5.3 — the typed refusal, never a
-/// silent truncation).
+/// silent truncation). The over-limit refusal carries the structured
+/// split evidence (v0.3 B5): actual bytes, the limit, a head preview.
 pub fn validate_note_text(text: &str) -> Result<(), MemoryError> {
     if text.is_empty() {
         return Err(MemoryError::NoteInvalid {
             detail: "note text is empty".to_owned(),
+            size: None,
         });
     }
     if text.contains('\n') || text.contains('\r') {
         return Err(MemoryError::NoteInvalid {
             detail: "note text must be a single line".to_owned(),
+            size: None,
         });
     }
     if text.len() > MAX_NOTE_BYTES {
@@ -119,6 +126,12 @@ pub fn validate_note_text(text: &str) -> Result<(), MemoryError> {
                 "note text is {len} bytes; the limit is {MAX_NOTE_BYTES} bytes, one line",
                 len = text.len()
             ),
+            size: Some(crate::error::NoteSize {
+                bytes: text.len(),
+                limit: MAX_NOTE_BYTES,
+                // Chars, not bytes: never splits a multibyte character.
+                preview: text.chars().take(NOTE_PREVIEW_CHARS).collect(),
+            }),
         });
     }
     Ok(())
@@ -479,7 +492,10 @@ mod tests {
     }
 
     /// The note line discipline: empty, multi-line, and over-budget texts
-    /// are the typed E_NOTE_INVALID; 280 bytes exactly is fine.
+    /// are the typed E_NOTE_INVALID; 280 bytes exactly is fine. The
+    /// over-budget refusal carries the v0.3 B5 split evidence — actual
+    /// bytes, the limit, a head preview — so the note can be split on the
+    /// first try (the ≤280 behavior itself is unchanged).
     #[test]
     fn note_text_discipline_is_typed() {
         assert_eq!(code(validate_note_text("").unwrap_err()), "E_NOTE_INVALID");
@@ -491,6 +507,12 @@ mod tests {
             code(validate_note_text("carriage\rreturn").unwrap_err()),
             "E_NOTE_INVALID"
         );
+        // The other refusals stay sentence-only (no structured payload).
+        for text in ["", "two\nlines"] {
+            let err: JanitorError = validate_note_text(text).unwrap_err().into();
+            assert!(err.details().is_some_and(|d| d.get("bytes").is_none()));
+        }
+
         let over = "x".repeat(MAX_NOTE_BYTES + 1);
         let err: JanitorError = validate_note_text(&over).unwrap_err().into();
         assert_eq!(err.code(), "E_NOTE_INVALID");
@@ -498,6 +520,29 @@ mod tests {
             err.details()
                 .and_then(|d| d["detail"].as_str().map(str::to_owned))
                 .is_some_and(|d| d.contains("281 bytes"))
+        );
+        assert_eq!(
+            err.details().unwrap()["bytes"],
+            serde_json::json!(MAX_NOTE_BYTES + 1)
+        );
+        assert_eq!(
+            err.details().unwrap()["limit"],
+            serde_json::json!(MAX_NOTE_BYTES)
+        );
+        assert_eq!(
+            err.details().unwrap()["preview"],
+            serde_json::json!("x".repeat(NOTE_PREVIEW_CHARS))
+        );
+
+        // Multibyte evidence: the preview counts chars, never splitting
+        // one; the byte count is the real length.
+        let multibyte = "é".repeat(MAX_NOTE_BYTES / 2 + 1); // 2 bytes/char ⇒ over
+        let err: JanitorError = validate_note_text(&multibyte).unwrap_err().into();
+        let details = err.details().unwrap();
+        assert_eq!(details["bytes"], serde_json::json!(multibyte.len()));
+        assert_eq!(
+            details["preview"].as_str().map(|p| p.chars().count()),
+            Some(NOTE_PREVIEW_CHARS)
         );
 
         validate_note_text(&"x".repeat(MAX_NOTE_BYTES)).expect("exactly at the limit");

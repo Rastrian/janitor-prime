@@ -44,6 +44,10 @@ prompts for you to verify with `scan`, not automated rules.
 - Janitor validates SYNTAX only (tree-sitter sees structure, not types or resolved
   imports). For semantic truth — types, unresolved symbols, dead code — rely on the
   project's language server (rust-analyzer, pyright, gopls, ruby-lsp, elixir-ls...).
-  When wake's environment notes say a language server is available, treat its
-  diagnostics as the semantic layer and cross-check non-obvious edits against it
-  before the final flush; when none is available, say so in your final report.
+  The `wake` payload's `environment.servers` block lists which of them its PATH
+  probe found (`available: true`, one row per name). When a row says available,
+  treat that server's diagnostics as the semantic layer and cross-check non-obvious
+  edits against it before the final flush; when none is available, say so in your
+  final report. `environment.git.dirty` is true when the working tree has
+  uncommitted changes (staged, unstaged, or untracked) — check it before claiming
+  the tree is clean, and `environment.janitor` is the version answering you.
