@@ -25,6 +25,11 @@ VFS, a tree-sitter structural search engine driven by an s-expression DSL,
 and an append-only memory with anti-hallucination syntax pointers and a
 synchronous compression protocol. Only `lang-rust` is CI-tested and
 supported in this version (see Known limitations).
+- **Fixed (KP-11 dogfood):** `scan --pretty` now parses after the subcommand
+  (docs/DSL.md §8 advertised the form; the binary rejected it with `E_USAGE`).
+  Root flag made a clap global + regression test.
+- **Renamed:** `AGE_ALPHA` → `PRESENT_BIAS_ALPHA` (the constant implements
+  ADR-0011's present-bias rule; the old name hid it).
 
 ### F0 - Scaffold, CI, JSON envelope (2026-09-13)
 

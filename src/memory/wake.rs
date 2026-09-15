@@ -13,7 +13,7 @@
 //! 2. **biased tiling** — otherwise the id range is tiled greedily from
 //!    the oldest end with aligned power-of-two blocks, and a block stays
 //!    whole only if its size is small relative to its *age* (the number
-//!    of newer facts): `size ≤ α × age` with `α =` [`AGE_ALPHA`]
+//!    of newer facts): `size ≤ α × age` with `α =` [`PRESENT_BIAS_ALPHA`]
 //!    (present-bias: detail spends on the recent, coarseness on the
 //!    ancient; a block at the very end has age 0 and demotes to raw, so
 //!    the newest facts are raw by construction); locked facts are
@@ -51,8 +51,8 @@ use crate::memory::tree_store::{BlockPlan, BlockSlot, TreeStore};
 pub const DEFAULT_BUDGET: u64 = 8192;
 
 /// Present-bias constant: a block stays whole only if
-/// `size ≤ AGE_ALPHA × age`, where age is the count of newer facts.
-pub const AGE_ALPHA: u64 = 8;
+/// `size ≤ PRESENT_BIAS_ALPHA × age`, where age is the count of newer facts.
+pub const PRESENT_BIAS_ALPHA: u64 = 8;
 
 /// The estimator declared in every wake payload (ADR-0011).
 pub const ESTIMATOR: &str = "chars4";
@@ -258,7 +258,7 @@ fn tile(facts: &[FactRecord], store: &TreeStore) -> Result<Vec<Tile>, JanitorErr
         while size > 1 && !plan.is_compressible(facts, size, p) {
             size /= 2;
         }
-        while size > 1 && size > AGE_ALPHA * (n - (p + size)) {
+        while size > 1 && size > PRESENT_BIAS_ALPHA * (n - (p + size)) {
             size /= 2;
         }
         if size == 1 {
@@ -573,7 +573,7 @@ mod tests {
     }
 
     /// The bias invariant itself: every served summary satisfies
-    /// `size ≤ AGE_ALPHA × age`, blocks are aligned, and items are
+    /// `size ≤ PRESENT_BIAS_ALPHA × age`, blocks are aligned, and items are
     /// oldest-first with disjoint coverage.
     #[test]
     fn summaries_satisfy_the_bias_and_cover_disjointly() {
@@ -597,7 +597,7 @@ mod tests {
                     assert!(lo.is_multiple_of(size), "aligned block");
                     let age = n - hi;
                     assert!(
-                        size <= AGE_ALPHA * age,
+                        size <= PRESENT_BIAS_ALPHA * age,
                         "bias violated for [{lo},{hi}) age {age}"
                     );
                     if let Some(end) = prev_end {
@@ -696,7 +696,7 @@ mod tests {
                         }
                         let size = hi - lo;
                         prop_assert!(lo.is_multiple_of(size));
-                        prop_assert!(size <= AGE_ALPHA * (total - hi), "bias for [{lo},{hi})");
+                        prop_assert!(size <= PRESENT_BIAS_ALPHA * (total - hi), "bias for [{lo},{hi})");
                         if let Some(end) = prev_end {
                             prop_assert!(lo >= end);
                         }

@@ -16,7 +16,7 @@
 //! refactor it just landed) before the budgeted wake. The nap step of the
 //! loop is unreachable with two facts — a size-2 block at the end of the
 //! log has age 0 and the biased tiling always demotes it to raw
-//! (`size ≤ AGE_ALPHA × age`, §1.5.2) — so the completeness gate needs a
+//! (`size ≤ PRESENT_BIAS_ALPHA × age`, §1.5.2) — so the completeness gate needs a
 //! third, newer fact to make the oldest pair compressible. Real agents
 //! write that note; the loop reads the same either way.
 
