@@ -82,6 +82,10 @@ pub enum Command {
     /// The compression protocol: no args prints the next pending request;
     /// --slot + --text stores the agent-written summary line (F6).
     Nap(NapArgs),
+    /// Serve the MCP stdio protocol (F10b, ADR-0019): janitor as native
+    /// tools for MCP clients (docs/MCP.md). Stdout carries MCP frames
+    /// only; run it from the client's config, not a terminal.
+    Mcp(McpArgs),
 }
 
 /// `janitor init` (PLAN §1.6, F6.7).
@@ -137,6 +141,16 @@ pub struct NapArgs {
     /// The one-line summary (≤ 256 bytes), written by the agent.
     #[arg(long, requires = "slot")]
     pub text: Option<String>,
+}
+
+/// `janitor mcp` (F10b, ADR-0019, docs/MCP.md).
+#[derive(Debug, Parser)]
+pub struct McpArgs {
+    /// The workspace every tool path resolves within (default: the current
+    /// directory). Paths that escape it are the typed E_VFS_INVALID_PATH
+    /// refusal — same rule as the daemon lane.
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
 }
 
 /// `janitor apply` (PLAN §3 F5.6, docs/SCHEMA.md): exactly one payload
@@ -423,6 +437,27 @@ mod tests {
             let (_envelope, code) = clap_error_envelope(&err);
             assert_eq!(code, envelope::EXIT_USAGE);
         }
+    }
+
+    /// F10b: `mcp` parses with and without --workspace; the flag is for
+    /// the client config, not the terminal.
+    #[test]
+    fn mcp_subcommand_parses() {
+        let cli = Cli::try_parse_from(["janitor", "mcp"]).expect("mcp");
+        let Some(Command::Mcp(args)) = cli.command else {
+            unreachable!("mcp subcommand");
+        };
+        assert_eq!(args.workspace, None);
+
+        let cli =
+            Cli::try_parse_from(["janitor", "mcp", "--workspace", "/tmp/repo"]).expect("workspace");
+        let Some(Command::Mcp(args)) = cli.command else {
+            unreachable!("mcp subcommand");
+        };
+        assert_eq!(
+            args.workspace.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
     }
 
     /// F5: `apply` parses its flags (docs/SCHEMA.md); exactly one payload

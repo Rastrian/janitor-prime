@@ -38,6 +38,7 @@ fn main() -> ExitCode {
         Some(Command::Wake(args)) => run_wake(args, cli.pretty),
         Some(Command::Note(args)) => run_note(args, cli.pretty),
         Some(Command::Nap(args)) => run_nap(args, cli.pretty),
+        Some(Command::Mcp(args)) => run_mcp(args),
         None => {
             let usage = Envelope::error(
                 "E_USAGE",
@@ -243,6 +244,45 @@ fn run_nap(args: cli::NapArgs, pretty: bool) -> ExitCode {
                 Some(serde_json::json!({ "slot": slot, "text": text })),
             );
             cli::emit(&usage, pretty, EXIT_USAGE)
+        }
+    }
+}
+
+/// `janitor mcp [--workspace DIR]` (F10b, ADR-0019): resolve the
+/// workspace (refusing loudly on stderr when it is not a directory — MCP
+/// mode owns stdout, so it must stay frame-pure even on startup
+/// failure), make it the process root so every `Session` the server
+/// builds has exactly the CLI's path semantics, and serve JSON-RPC until
+/// stdin closes.
+fn run_mcp(args: cli::McpArgs) -> ExitCode {
+    let workspace = args
+        .workspace
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let canonical = match workspace.canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        Ok(path) => {
+            tracing::error!("--workspace is not a directory: {}", path.display());
+            return ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL);
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "--workspace {:?} cannot be resolved", workspace);
+            return ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL);
+        }
+    };
+    if let Err(err) = std::env::set_current_dir(&canonical) {
+        tracing::error!(error = %err, "cannot enter workspace {:?}", canonical);
+        return ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL);
+    }
+    match janitor_prime::mcp::serve(
+        std::io::stdin().lock(),
+        std::io::stdout().lock(),
+        &canonical,
+    ) {
+        Ok(()) => ExitCode::from(EXIT_SUCCESS),
+        Err(err) => {
+            let err = JanitorError::from(err);
+            tracing::error!(code = err.code(), "MCP session failed: {err}");
+            ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL)
         }
     }
 }

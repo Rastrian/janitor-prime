@@ -20,7 +20,9 @@
 //!   position-derived ids and torn-tail quarantine (ADR-0006), the
 //!   re-anchorable `SyntaxPointer` anti-hallucination gate (ADR-0012),
 //!   and the synchronous `nap` compression protocol (ADR-0013);
-//! - `orchestrator` — the F4 `Session` composition root.
+//! - `orchestrator` — the F4 `Session` composition root;
+//! - `mcp` — the F10b MCP stdio server: the same `Session` code paths
+//!   the CLI dispatches, exposed as JSON-RPC tools (ADR-0019).
 //!
 //! Hard rules in force from F0 (PLAN §1.1): no `unwrap`/`expect`/`panic`
 //! in production code (clippy-denied; tests exempt), stdout is 100% JSON
@@ -35,6 +37,7 @@ pub mod ast;
 pub mod cli;
 pub mod envelope;
 pub mod error;
+pub mod mcp;
 pub mod memory;
 pub mod orchestrator;
 pub mod scan;
