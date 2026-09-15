@@ -32,6 +32,7 @@
 
 pub mod log;
 pub mod pointer;
+pub mod tree_store;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
