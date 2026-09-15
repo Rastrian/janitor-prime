@@ -34,6 +34,7 @@ pub mod log;
 pub mod nap;
 pub mod pointer;
 pub mod tree_store;
+pub mod wake;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
