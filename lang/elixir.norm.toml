@@ -1,0 +1,51 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-elixir 0.3.5
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-15 against the grammar's own tree output. Every entry must
+# resolve through `LangRegistry::resolve_kind` (conformance-fenced in
+# src/ast/lang/norm.rs tests).
+#
+# STATUS: EXPERIMENTAL (F9d, ADR-0015 appended note) — the mapping is
+# measured and conformance-fenced, but the FUNCTION over-breadth is the
+# tier's recorded debt: this grammar has NO dedicated def kind (`def`/
+# `defp` clauses are `call` nodes), so FUNCTION necessarily also matches
+# every ordinary invocation, `defmodule` included. A discriminator
+# (call whose target is the `def`/`defp` keyword, or head-with-do_block
+# shape) is post-v0.2 pattern work; promotion to the stable set must
+# decide whether the vocabulary grows a CLAUSE class for it.
+#
+# Grammar notes (the FUNCTION decision, cited from node-types.json):
+# a named function is `(call target: (identifier) (arguments
+# <head-call> …) (do_block …))` — the head `add(a, b)` is itself a
+# `call` nested in `arguments`, and the body lives in the `do_block`
+# child, whose statements are DIRECT children (no suite wrapper). Both
+# clause shapes measure identically at sibling level: `def f(x), do: e`
+# and `def f(x) do e end` are both `call`. Module attributes
+# (`@doc`/`@spec`/`@moduledoc`/`@unit`) are `unary_operator` nodes
+# wrapping a `call` — content-bearing siblings of def clauses, NOT
+# trivia. `fn … end` is `anonymous_function` (an expression — the
+# python-lambda precedent excludes it from FUNCTION). IDENT maps
+# `identifier` only: `alias` is the module namespace's name token
+# (IO, Enum, defmodule heads) — the ocaml namespace-typing precedent.
+# LITERAL: heredocs ARE `string` (measured — `"""` bodies parse as
+# string with interpolation children); `sigil` (~r/…/) is deliberately
+# excluded, the ruby-regexp precedent: a container with its own
+# name/modifier structure, not a bare literal. BLOCK diverges from
+# ruby's table ON PURPOSE: elixir's `do_block` is BOTH the do…end
+# expression AND the statement suite (statements are its direct
+# children — measured), so it maps BLOCK; `body` is the stab_clause
+# body (case/fn/receive clause interiors), `block` the parenthesized
+# `(a; b)` sequence.
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["call"]
+IDENT = ["identifier"]
+LITERAL = ["atom", "boolean", "char", "charlist", "float", "integer", "nil", "quoted_atom", "string"]
+BLOCK = ["block", "body", "do_block"]
