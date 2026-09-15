@@ -78,7 +78,16 @@ fn unknown_kind_is_loud_with_a_nearest_kind_suggestion() {
     let body = error_body(&envelope);
     assert_eq!(body["code"], "E_DSL_UNKNOWN_KIND");
     assert_eq!(body["details"]["kind"], "function_itm");
-    assert_eq!(body["details"]["lang"], "rust");
+    // `lang` names the whole enabled set (the registry-wide gate's scope),
+    // so it is "rust" under the default features and the full grammar list
+    // under --all-features — what must hold either way is that rust, the
+    // grammar owning the suggestion, is named.
+    assert!(
+        body["details"]["lang"]
+            .as_str()
+            .is_some_and(|langs| langs.split(", ").any(|l| l == "rust")),
+        "got {body}"
+    );
     assert_eq!(
         body["details"]["suggestion"], "function_item",
         "nearest known kind within edit distance 2"
