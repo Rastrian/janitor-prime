@@ -1,0 +1,214 @@
+# Release pipeline (PLAN §3 F7.3): tag-triggered binary release.
+#
+# build    — five legs: x86_64-unknown-linux-musl, x86_64-unknown-linux-gnu,
+#            aarch64-unknown-linux-musl (zigbuild for the musl targets, per
+#            the PLAN Appendix A.5 decision), x86_64-apple-darwin (zigbuild
+#            cross from the arm runner) and aarch64-apple-darwin (native).
+#            Every leg builds --features lang-all and passes --target
+#            explicitly so the binary path target/<target>/release/janitor
+#            is uniform (a bare `cargo build --release` would land in
+#            target/release/ and break that invariant).
+# release  — flattens the five per-target artifacts into a staging dir,
+#            verifies all five tarballs, emits SHA256SUMS with bare tarball
+#            names, then attaches everything to the GitHub release via the
+#            runner-preinstalled gh CLI.
+#
+# Stripping is owned by [profile.release] in Cargo.toml (strip = "symbols",
+# lto, panic = "abort") — the profile applies to every target built below,
+# so no per-leg strip step exists.
+#
+# Supply chain: all third-party actions pinned by commit SHA (PLAN §10),
+# version recorded next to each pin exactly as ci.yml does. gh is
+# first-party and preinstalled. Build-time only: nothing is fetched from
+# third-party hosts (the "no network at runtime" policy applies to the
+# shipped binary; the pipeline itself only uses runner images, crates.io
+# and the actions pinned below).
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+# Deliberately no workflow_dispatch: a release is cut by pushing a tag,
+# never by hand (F7 brief).
+
+concurrency:
+  # One pipeline per tag; never cancel an in-flight publish — a re-pushed
+  # tag re-runs the whole pipeline and `gh release upload --clobber`
+  # refreshes the assets.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # gh needs this to create the release and its assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Let every leg finish so one broken cross target doesn't hide another.
+      fail-fast: false
+      matrix:
+        include:
+          # Static Linux x86_64 via cargo-zigbuild — same install path as
+          # ci.yml's musl-smoke job (zig's self-contained CC; PLAN A.5).
+          # The musl-gcc fallback from A.5 is deliberately NOT mirrored
+          # here: musl-tools is x86_64-only, so the aarch64 leg has no
+          # first-party fallback and a release pipeline must build every
+          # leg the same way.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            builder: zigbuild
+            smoke: run
+          # glibc build for distros that prefer a dynamic binary.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            builder: cargo
+            smoke: run
+          # Static Linux aarch64 (cross): the x86_64 runner cannot execute
+          # the artifact, so this leg gates on file(1) + size instead.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            builder: zigbuild
+            smoke: file
+          # macOS x86_64 (cross from the arm64 runner): zig links against
+          # the host macOS SDK, which Apple ships universal, so the arm
+          # runner produces x86_64 binaries.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            builder: zigbuild
+            smoke: rosetta
+          # macOS arm64: native build on the arm64 runner.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            builder: cargo
+            smoke: run
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout (actions/checkout v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Toolchain (dtolnay/rust-toolchain@master)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Cache (Swatinem/rust-cache v2.9.2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          # One cache per cross target; rust-cache's default key follows
+          # the toolchain, not the --target being built.
+          key: ${{ matrix.target }}
+      - name: Build via cargo-zigbuild
+        if: ${{ matrix.builder == 'zigbuild' }}
+        # Same install path as ci.yml's musl-smoke job (A.5). zigbuild is
+        # a cargo wrapper: output lands in target/<target>/release/ too.
+        run: |
+          python3 -m pip install ziglang
+          cargo install cargo-zigbuild --locked
+          cargo zigbuild --release --target "$TARGET" --features lang-all
+      - name: Build (native cargo)
+        if: ${{ matrix.builder == 'cargo' }}
+        run: cargo build --release --target "$TARGET" --features lang-all
+      - name: Package janitor-${{ matrix.target }}.tar.gz
+        run: |
+          stage="$(mktemp -d)"
+          cp "target/$TARGET/release/janitor" "$stage/"
+          cp LICENSE-MIT LICENSE-APACHE NOTICE README.md "$stage/"
+          tar -czf "janitor-$TARGET.tar.gz" -C "$stage" \
+            janitor LICENSE-MIT LICENSE-APACHE NOTICE README.md
+          ls -l "janitor-$TARGET.tar.gz"
+      - name: "Smoke: envelope lists all seven grammars"
+        if: ${{ matrix.smoke == 'run' }}
+        # Executable legs: x86_64 musl is fully static, x86_64 gnu matches
+        # the ubuntu runner's ABI, aarch64-apple matches the arm64 mac
+        # runner natively.
+        run: |
+          "target/$TARGET/release/janitor" --version | jq -e '
+            .schema == "janitor.v1"
+            and .ok == true
+            and (.data.grammars | length == 7)
+          '
+      - name: "Smoke: cross artifact (not executable on this runner)"
+        if: ${{ matrix.smoke == 'file' }}
+        # aarch64-musl on the x86_64 ubuntu runner: no emulation is
+        # installed and adding qemu would mean third-party downloads,
+        # out of scope for a build-time-only pipeline. Gate on
+        # existence, non-trivial size and the ELF machine from file(1).
+        run: |
+          file "target/$TARGET/release/janitor"
+          file "target/$TARGET/release/janitor" | grep -q aarch64
+          size="$(stat -c%s "target/$TARGET/release/janitor")"
+          test "$size" -gt 1000000
+      - name: "Smoke: x86_64 slice on the arm runner (Rosetta or file)"
+        if: ${{ matrix.smoke == 'rosetta' }}
+        # x86_64-apple-darwin is cross-built on the arm64 mac runner,
+        # which cannot natively execute it. Rosetta 2 usually can via
+        # `arch -x86_64`, but that is not contractual on the runner
+        # image — the deterministic gate is the file(1) arch check; the
+        # Rosetta run is opportunistic on top of it.
+        run: |
+          file "target/$TARGET/release/janitor"
+          file "target/$TARGET/release/janitor" | grep -q x86_64
+          if arch -x86_64 "target/$TARGET/release/janitor" --version > "$RUNNER_TEMP/version.json" 2>/dev/null; then
+            jq -e '.schema == "janitor.v1" and .ok == true and (.data.grammars | length == 7)' "$RUNNER_TEMP/version.json"
+          else
+            echo "Rosetta unavailable — the file(1) arch check above is the gate"
+          fi
+      - name: Upload artifact (actions/upload-artifact v7.0.1)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: janitor-${{ matrix.target }}
+          path: janitor-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0    # the payload is already a .tar.gz
+
+  release:
+    name: attach artifacts to the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts (actions/download-artifact v8.0.1)
+        # merge-multiple flattens the five per-target artifacts into
+        # staging/ so SHA256SUMS can carry bare tarball names.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: staging
+          merge-multiple: true
+      - name: Verify the five tarballs
+        run: |
+          missing=0
+          for target in x86_64-unknown-linux-musl x86_64-unknown-linux-gnu \
+                        aarch64-unknown-linux-musl x86_64-apple-darwin \
+                        aarch64-apple-darwin; do
+            if [ ! -s "staging/janitor-${target}.tar.gz" ]; then
+              echo "::error::missing or empty tarball for ${target}"
+              missing=1
+            fi
+          done
+          ls -l staging
+          test "$missing" -eq 0
+      - name: Generate SHA256SUMS
+        working-directory: staging
+        run: |
+          sha256sum janitor-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release and attach assets
+        # gh is preinstalled on the runner and first-party, so there is
+        # no SHA to pin. GH_REPO is set because this job has no checkout
+        # for gh to read the git remote from.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release create "$tag" --verify-tag --generate-notes staging/*; then
+            # Re-run path: the release object already exists — refresh
+            # its assets instead of failing the pipeline.
+            gh release upload "$tag" staging/* --clobber
+          fi
