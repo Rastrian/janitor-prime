@@ -132,6 +132,7 @@ mechanically). Regenerate and re-commit whenever `Cargo.lock` moves.
 - [tracing-subscriber](https://github.com/tokio-rs/tracing) 0.3.23 — MIT
 - [tree-sitter](https://github.com/tree-sitter/tree-sitter) 0.27.0 — MIT
 - [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) 0.24.2 — MIT
+- [tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) 0.3.5 — Apache-2.0
 - [tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) 0.25.0 — MIT
 - [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) 0.23.5 — MIT
 - [tree-sitter-javascript](https://github.com/tree-sitter/tree-sitter-javascript) 0.25.0 — MIT

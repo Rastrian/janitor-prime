@@ -225,6 +225,20 @@ impl LangRegistry {
             fixture: include_str!("lang/fixtures/ocaml_interface.mli"),
             trivia: &["comment"],
         });
+        // Experimental tier (F9d): appended after the stable seven so
+        // registry order for any lang-all build is unchanged — the
+        // pin-check --version fence stays byte-stable. One LangId routes
+        // both elixir extensions: .ex and .exs are the same grammar (the
+        // distinction is script-vs-compile at the BEAM level, not a
+        // syntax split — unlike ocaml's .ml/.mli interface split).
+        #[cfg(feature = "lang-elixir")]
+        specs.push(LangSpec {
+            name: "elixir",
+            extensions: &["ex", "exs"],
+            language: ffi_shim::elixir_language(),
+            fixture: include_str!("lang/fixtures/elixir.ex"),
+            trivia: &["comment"],
+        });
         let kind_tables = specs.iter().map(|_| OnceLock::new()).collect();
         Self { specs, kind_tables }
     }
@@ -847,8 +861,123 @@ mod tests {
         );
     }
 
+    /// F9d: the elixir registration, same ladder as rust/python/go —
+    /// extension routing (.ex/.exs, one grammar for both: the split is
+    /// script-vs-compile at the BEAM level, not a syntax split),
+    /// named-kind resolution against the real grammar, the typed
+    /// `UnknownKind` for a kind elixir does not know, and the E5
+    /// order-independent kind table. The brief's `definition` guess is
+    /// fenced out here: that kind does NOT exist in tree-sitter-elixir
+    /// 0.3.5 — named functions are `call` nodes (the node-types.json
+    /// fact the norm table's FUNCTION decision stands on).
+    #[test]
+    #[cfg(feature = "lang-elixir")]
+    fn elixir_registry_resolution_is_typed_routed_and_seeded() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id = a
+            .for_extension("ex")
+            .expect("lang-elixir builds register the elixir grammar");
+        assert_eq!(a.name(id), Some("elixir"));
+        assert_eq!(a.for_extension("EX"), Some(id));
+        assert_eq!(a.for_extension("exs"), Some(id));
+        assert_eq!(a.for_extension("ExS"), Some(id));
+        assert_eq!(a.for_path(Path::new("/proj/lib/widgetry.ex")), Some(id),);
+        assert_eq!(a.for_path(Path::new("/proj/test/widgetry_test.exs")), Some(id),);
+
+        // Kind names verified against tree-sitter-elixir 0.3.5's
+        // node-types.json (45 named kinds) — the norm-table and KP-6
+        // anchors: the def-clause `call`, the attribute wrapper, the
+        // do-block and stab-clause interiors, the atom forms.
+        for kind in [
+            "source",
+            "call",
+            "do_block",
+            "body",
+            "block",
+            "stab_clause",
+            "anonymous_function",
+            "unary_operator",
+            "binary_operator",
+            "identifier",
+            "alias",
+            "atom",
+            "quoted_atom",
+            "arguments",
+            "keywords",
+            "keyword",
+            "pair",
+            "list",
+            "map",
+            "struct",
+            "tuple",
+            "bitstring",
+            "string",
+            "charlist",
+            "sigil",
+            "interpolation",
+            "boolean",
+            "char",
+            "float",
+            "integer",
+            "nil",
+            "comment",
+        ] {
+            assert!(
+                a.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "elixir grammar must know {kind}"
+            );
+        }
+
+        // The honest probe, both directions: `definition` (the brief's
+        // guessed def kind) and `function_item` (rust's) are unknown.
+        for kind in ["definition", "function_item"] {
+            let err = a
+                .resolve_kind(id, kind)
+                .expect_err("not an elixir kind name");
+            assert!(matches!(err, DslError::UnknownKind { .. }));
+            let umbrella: JanitorError = err.into();
+            assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+            assert_eq!(
+                umbrella.details(),
+                Some(serde_json::json!({ "lang": "elixir", "kind": kind }))
+            );
+        }
+
+        // E5 fence: order-independent seeding, round-tripping ids, seeded
+        // from the bundled fixture (the corpus exercises modules,
+        // behaviours, @doc/@spec clauses, keyword- and do-block-shaped
+        // defs, guards, case/cond/try, pipes, heredocs and fn captures).
+        let resolved: Vec<u16> = ["call", "identifier", "comment", "do_block"]
+            .iter()
+            .map(|kind| a.resolve_kind(id, kind).expect("kinds elixir knows"))
+            .collect();
+        let table_a = a.kind_table(id).expect("table seeds at first use");
+        let id_b = b
+            .for_extension("ex")
+            .expect("lang-elixir builds register elixir");
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: elixir seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() >= 45,
+            "the elixir grammar carries its symbol table (45 named kinds)"
+        );
+        for (kind, kind_id) in ["call", "identifier", "comment", "do_block"]
+            .iter()
+            .zip(resolved)
+        {
+            let name = a
+                .kind_name(id, kind_id)
+                .expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
     /// F9a, E5 fence for python: the kind table is a function of the
-    /// grammar alone — order-independent seeding, round-tripping ids, and
+/// grammar alone — order-independent seeding, round-tripping ids, and
     /// seeded from the bundled fixture corpus (never first-scan bias). The
     /// python fixture exercises decorators, classes, if/elif/else and
     /// comprehensions, so the fixture leg cross-checks a real parse too.

@@ -39,11 +39,12 @@ tree-sitter-typescript = { version = "=0.23.2", optional = true }  # ABI 14
 tree-sitter-java = { version = "=0.23.5", optional = true }        # ABI 14
 tree-sitter-c = { version = "=0.24.2", optional = true }           # ABI 15
 
-# --- experimental tier (F9c, ADR-0015 note): registered and e2e-tested but
-# NOT part of lang-all — the stable-set fence stays at seven grammars until
-# each experimental grammar's trivia corpus is fully curated ---
+# --- experimental tier (F9c/F9d, ADR-0015 note): registered and e2e-tested
+# but NOT part of lang-all — the stable-set fence stays at seven grammars
+# until each experimental grammar's trivia corpus is fully curated ---
 tree-sitter-ruby = { version = "=0.23.1", optional = true }         # ABI 14
 tree-sitter-ocaml = { version = "=0.26.0", optional = true }        # ABI 15 (ocaml + ocaml_interface + ocaml_type)
+tree-sitter-elixir = { version = "=0.3.5", optional = true }        # ABI 14 (elixir-lang org; scanner.c = quoted-content splitting, verified 2026-09-15)
 
 [features]
 default = ["lang-rust"]
@@ -56,12 +57,13 @@ lang-java = ["dep:tree-sitter-java"]
 lang-c = ["dep:tree-sitter-c"]
 lang-all = ["lang-rust", "lang-python", "lang-go", "lang-javascript",
             "lang-typescript", "lang-java", "lang-c"]
-# Experimental tier (F9c): ruby/ocaml build+test here; lang-all stays the
-# "stable set" ABI fence (ADR-0015 appended note). Promotion = move the
-# feature into lang-all when its trivia corpus is fully curated.
+# Experimental tier (F9c+F9d): ruby/ocaml/elixir build+test here; lang-all
+# stays the "stable set" ABI fence (ADR-0015 appended note). Promotion =
+# move the feature into lang-all when its trivia corpus is fully curated.
 lang-ruby = ["dep:tree-sitter-ruby"]
 lang-ocaml = ["dep:tree-sitter-ocaml"]
-lang-experimental = ["lang-ruby", "lang-ocaml"]
+lang-elixir = ["dep:tree-sitter-elixir"]
+lang-experimental = ["lang-ruby", "lang-ocaml", "lang-elixir"]
 # F1 kill-point spikes (PLAN §3 F1): self-contained measurement harnesses,
 # compiled only on demand and deleted at F3 entry. Deliberately NOT default
 # and NOT part of `lang-all` — a dedicated CI job builds/tests this feature

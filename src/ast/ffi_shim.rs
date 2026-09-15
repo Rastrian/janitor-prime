@@ -132,6 +132,22 @@ pub fn ocaml_interface_language() -> Language {
     tree_sitter_ocaml::LANGUAGE_OCAML_INTERFACE.into()
 }
 
+// --- experimental tier (F9d, ADR-0015 appended note): registered and
+// e2e-tested, but fenced out of lang-all until the trivia corpus is fully
+// curated. Same `LanguageFn` constructor shape as the stable set. ---
+
+/// The Elixir grammar (`lang-elixir`, experimental; routes `.ex`/`.exs`;
+/// pin-check 2026-09-15: =0.3.5 is ABI 14 — `parser.c`'s LANGUAGE_VERSION,
+/// verified against core 0.27's 13..=15 window — with the crate's only
+/// runtime dep `tree-sitter-language`, matching the stable set's graph).
+/// The crate's external `scanner.c` splits quoted content (heredocs/
+/// charlist interpolation) into lexer tokens; no unsafe reaches janitor
+/// code (Rule T6 — the C stays inside the upstream crate).
+#[cfg(feature = "lang-elixir")]
+pub fn elixir_language() -> Language {
+    tree_sitter_elixir::LANGUAGE.into()
+}
+
 // --- parsing (A.3.3 contract) ------------------------------------------------
 
 /// Parse an overlay snapshot through the chunked-callback API (PLAN §3 F3.1,
