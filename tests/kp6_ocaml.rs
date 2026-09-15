@@ -206,7 +206,7 @@ fn kp6_ocaml_corpus_wide_counts_are_hand_computed() {
     // Canonical path order over the unfiltered corpus: matches arrive
     // file-grouped, paths sorted.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(CORPUS);
-    let mut params = ScanParams::new(
+    let params = ScanParams::new(
         "(under let_binding (seq (capture @fn value_name) parameter))",
         &root,
     );
