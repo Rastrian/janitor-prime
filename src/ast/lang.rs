@@ -27,6 +27,8 @@ use smol_str::SmolStr;
 use crate::ast::ffi_shim::{self, Language, Node, Parser};
 use crate::error::{DslError, ParseError};
 
+pub mod norm;
+
 /// Index into a [`LangRegistry`]; handed out only by the registry itself, so
 /// it is always in range for the registry that minted it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -268,6 +270,17 @@ impl LangRegistry {
     pub fn kind_name(&self, id: LangId, kind: u16) -> Option<&SmolStr> {
         self.kind_table(id)?.get(kind)
     }
+
+    /// The language's normalized-vocabulary table (§1.4.2), embedded at
+    /// compile time from `lang/<name>.norm.toml` and parsed on demand.
+    /// `None` when the build's languages carry no table for `id` (the
+    /// file is the enablement); `Some(Err(_))` is a broken embedded
+    /// table, which the norm-module conformance tests surface before any
+    /// release.
+    pub fn norm_table(&self, id: LangId) -> Option<Result<norm::NormTable, norm::NormError>> {
+        let name = self.name(id)?;
+        norm::embedded_source(name).map(norm::NormTable::parse)
+    }
 }
 
 impl Default for LangRegistry {
@@ -447,6 +460,108 @@ mod tests {
         );
 
         for (kind, id) in ["function_item", "identifier", "line_comment", "impl_item"]
+            .iter()
+            .zip(resolved)
+        {
+            let name = a.kind_name(id_a, id).expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
+    /// F9a: the python registration is exercised the same way rust's is —
+    /// extension routing (.py/.pyi, case-insensitive), named-kind
+    /// resolution against the real grammar, and the typed `UnknownKind`
+    /// for a kind python does not know (a rust kind name is the honest
+    /// probe: same shape, provably absent).
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn python_registry_resolution_is_typed_and_routed() {
+        let registry = LangRegistry::new();
+        let id = registry
+            .for_extension("py")
+            .expect("lang-python builds register the python grammar");
+        assert_eq!(registry.name(id), Some("python"));
+        assert_eq!(registry.for_extension("PY"), Some(id));
+        assert_eq!(registry.for_extension("pyi"), Some(id));
+        assert_eq!(
+            registry.for_path(Path::new("/proj/app/models.py")),
+            Some(id),
+        );
+
+        // Kind names verified against tree-sitter-python 0.25.0's
+        // node-types.json (the grammar's own symbol table is the source;
+        // these are the norm-table and KP-6-python anchors).
+        for kind in [
+            "module",
+            "function_definition",
+            "decorated_definition",
+            "decorator",
+            "class_definition",
+            "identifier",
+            "block",
+            "if_statement",
+            "elif_clause",
+            "else_clause",
+            "import_statement",
+            "import_from_statement",
+            "expression_statement",
+            "comment",
+        ] {
+            assert!(
+                registry.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "python grammar must know {kind}"
+            );
+        }
+
+        let err = registry
+            .resolve_kind(id, "function_item")
+            .expect_err("a rust kind name is unknown to the python grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "python", "kind": "function_item" }))
+        );
+    }
+
+    /// F9a, E5 fence for python: the kind table is a function of the
+    /// grammar alone — order-independent seeding, round-tripping ids, and
+    /// seeded from the bundled fixture corpus (never first-scan bias). The
+    /// python fixture exercises decorators, classes, if/elif/else and
+    /// comprehensions, so the fixture leg cross-checks a real parse too.
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn python_kind_tables_are_order_independent_and_round_trip() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id_a = a
+            .for_extension("py")
+            .expect("lang-python builds register python");
+        let id_b = b
+            .for_extension("py")
+            .expect("lang-python builds register python");
+
+        let resolved: Vec<u16> = ["function_definition", "identifier", "block", "comment"]
+            .iter()
+            .map(|kind| {
+                a.resolve_kind(id_a, kind)
+                    .expect("kinds the python grammar knows")
+            })
+            .collect();
+        let table_a = a.kind_table(id_a).expect("table seeds at first use");
+
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: python seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 100,
+            "the python grammar carries a real symbol table (128 named kinds)"
+        );
+
+        for (kind, id) in ["function_definition", "identifier", "block", "comment"]
             .iter()
             .zip(resolved)
         {

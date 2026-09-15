@@ -1,0 +1,26 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-python 0.25.0
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-15. Every entry must resolve through `LangRegistry::resolve_kind`
+# (conformance-fenced in src/ast/lang/norm.rs tests).
+#
+# Grammar notes: `lambda` is deliberately NOT FUNCTION (v0.1 vocabulary
+# means def-shaped functions; lambdas are expressions — revisit only
+# with a use case); decorators wrap their def in `decorated_definition`,
+# so decorator-carrying FUNCTION matches still see the inner
+# `function_definition` (the decorated node is the parent, not a
+# replacement); `string` covers every quote form including f-strings
+# and bytes (they are `string` nodes carrying `interpolation`).
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["function_definition"]
+IDENT = ["identifier"]
+LITERAL = ["concatenated_string", "false", "float", "integer", "none", "string", "true"]
+BLOCK = ["block"]

@@ -69,6 +69,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test
+      - name: test (lang-python e2e)
+        # F9a: python joins the tested set — the registry, KP-6-python
+        # trivia corpus, norm-table conformance, the python agent-loop
+        # acceptance and the python determinism fence all run on every PR
+        # (the second-language guarantee, not just "grammar compiles" —
+        # that stays pin-check's job via lang-all).
+        run: cargo test --features lang-python
       - name: build with no default features
         run: cargo build --no-default-features
 

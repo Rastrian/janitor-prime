@@ -1,0 +1,18 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-rust 0.24.2
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-15. Every entry must resolve through `LangRegistry::resolve_kind`
+# (conformance-fenced in src/ast/lang/norm.rs tests).
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["function_item"]
+IDENT = ["identifier"]
+LITERAL = ["boolean_literal", "char_literal", "float_literal", "integer_literal", "negative_literal", "raw_string_literal", "string_literal"]
+BLOCK = ["block"]

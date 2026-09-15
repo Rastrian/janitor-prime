@@ -315,3 +315,41 @@ background routine exists, and no LLM lives in the binary.
 | `E_LOG_UNRECOVERABLE` | corruption before the trailing line — refused, never renumbered |
 | `E_TREE_CORRUPT` | TREE record structurally invalid |
 | `E_BUDGET_INVALID` | `wake --budget 0` |
+
+## Language support — python (F9a, v0.2 wave 1)
+
+Python is the second fully-supported language (rust was the first). What
+this means for the schemas above — nothing changes structurally; these
+are the python-specific facts a payload consumer needs:
+
+- **File routing**: `.py` / `.pyi` (case-insensitive) → the `python`
+  grammar, which must be compiled in (`--features lang-python`; the
+  release artifacts embed all seven via `lang-all`). A scan over a
+  mixed repo reports per-language counts in `stats.langs` and skips
+  files of languages whose grammar is absent from the build (never an
+  error — the files are simply not scan candidates).
+- **`skipped_for_language`** (see the scan report): a rule whose kinds
+  resolve in rust but not python (e.g. `function_item`) skips python
+  files and counts them there — the accounting is identical to the rust
+  direction.
+- **Kind names in reports** are the python grammar's own: `module` is
+  the root; functions are `function_definition` (decorators wrap them
+  in a `decorated_definition` — the def itself is still visible inside);
+  `identifier`, `block`, `if_statement` with `elif_clause`/`else_clause`
+  siblings, `comment` for trivia. The norm-table mapping for
+  cross-language rules lives in `lang/python.norm.toml`
+  (FUNCTION=`function_definition`, IDENT=`identifier`,
+  LITERAL=`integer|float|string|…`, BLOCK=`block`), conformance-fenced
+  against the grammar in CI.
+- **Trivia** (ADR-0010): python's table is `comment` only. NEWLINE and
+  INDENT/DEDENT are anonymous tokens (never named siblings), so
+  adjacency semantics port unchanged; `line_continuation` is a named
+  extra but only ever appears inside expressions, never between
+  statements. Measured in the KP-6-python corpus
+  (`tests/kp6_python.rs`): byte-strict loses 28.6% of method-adjacency
+  pairs and 10.5% of docstring-then-return pairs on the bundled corpus.
+- **The apply re-parse gate** runs under the python grammar: a diff
+  that would produce `ERROR`/`MISSING` nodes anywhere in the edited
+  python file is refused with `E_PARSE_INVALID` and node coordinates —
+  demonstrated end to end over the bundled fixture repo in
+  `tests/python_e2e.rs`.
