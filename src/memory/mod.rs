@@ -30,6 +30,7 @@
 //! reads only the embedded `share/GLOBAL.md` defaults and its
 //! `$XDG_CONFIG_HOME/janitor/GLOBAL.md` override, nothing else.
 
+pub mod context;
 pub mod log;
 pub mod nap;
 pub mod pointer;

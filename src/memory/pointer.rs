@@ -130,6 +130,92 @@ pub struct AnchorOutcome {
     pub anchored: SyntaxPointer,
 }
 
+/// What a `note --ptr` argument can be (the CLI accepts both, SCHEMA.md):
+/// the compact notation (stamped fresh from the current tree — the
+/// anti-hallucination gate is "this span+kind must be a real node *now*"),
+/// or a full stored pointer as JSON (the re-anchorable form — spans may
+/// have moved, the content hash is what tracks them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CliPointer {
+    /// `<path>:<start>-<end>:<kind>` — stamped at note time.
+    Fresh {
+        path: String,
+        span: (u64, u64),
+        kind_name: String,
+    },
+    /// A serialized [`SyntaxPointer`] (typically echoed from an earlier
+    /// note report) — resolved through the full three-way logic.
+    Stored(SyntaxPointer),
+}
+
+/// Parse a `--ptr` argument: JSON object ⇒ [`CliPointer::Stored`],
+/// otherwise the compact notation ⇒ [`CliPointer::Fresh`].
+pub fn parse_cli_pointer(arg: &str) -> Result<CliPointer, MemoryError> {
+    if arg.trim_start().starts_with('{') {
+        return serde_json::from_str::<SyntaxPointer>(arg)
+            .map(CliPointer::Stored)
+            .map_err(|err| MemoryError::PointerNotation {
+                detail: format!("not a valid pointer JSON object ({err})"),
+            });
+    }
+    match parse_notation(arg)? {
+        SyntaxPointer::Node {
+            path,
+            span,
+            kind_name,
+            ..
+        } => Ok(CliPointer::Fresh {
+            path,
+            span,
+            kind_name,
+        }),
+        SyntaxPointer::Commit { .. } => Err(MemoryError::PointerNotation {
+            detail: "use --commit <sha> for commit pointers".to_owned(),
+        }),
+    }
+}
+
+/// Stamp a fresh pointer from the current tree (the notation flow): the
+/// span+kind must hit a real node *exactly* — spans come from janitor's
+/// own reports (scan matches, note echoes), never from memory — and the
+/// content hash is written from that node's bytes. No hit ⇒ the typed
+/// dangling refusal: a hallucinated span is refused, not repaired.
+pub fn stamp_node_pointer(
+    registry: &LangRegistry,
+    path: &str,
+    span: (u64, u64),
+    kind_name: &str,
+    bytes: &Arc<[u8]>,
+) -> Result<SyntaxPointer, JanitorError> {
+    let lang = registry
+        .for_path(Path::new(path))
+        .ok_or_else(|| MemoryError::PointerNotation {
+            detail: format!(
+                "no enabled grammar parses {path:?}; a node pointer must target a \
+                 parseable file"
+            ),
+        })?;
+    let mut parser = registry.parser(lang)?;
+    let tree = parse_snapshot(&mut parser, bytes)?;
+
+    for node in Preorder::new(tree.root_node()) {
+        let range = node.byte_range();
+        if (range.start as u64, range.end as u64) == span && node.kind() == kind_name {
+            return Ok(SyntaxPointer::Node {
+                path: path.to_owned(),
+                span,
+                kind_name: kind_name.to_owned(),
+                content_sha: content_sha(&bytes[range]),
+            });
+        }
+    }
+    Err(MemoryError::PointerDangling {
+        path: path.to_owned(),
+        span,
+    }
+    .into())
+}
+
 /// Content hash of a node's bytes — identical convention to apply's
 /// `expect_sha`/`content_sha` (SipHash-1-3 over the slice, 16 lowercase
 /// hex): identity check, not a security property.
@@ -504,5 +590,77 @@ mod tests {
         let err = resolve_node_pointer(&registry, "README.md", (0, 4), "heading", "x", &bytes)
             .expect_err("no grammar for .md");
         assert_eq!(err.code(), "E_POINTER_INVALID");
+    }
+
+    /// The CLI accepts both forms: compact notation (fresh stamp) and a
+    /// full stored pointer as JSON (re-anchorable).
+    #[test]
+    fn cli_pointer_parses_notation_and_stored_json() {
+        let fresh = parse_cli_pointer("src/lib.rs:120-480:function_item").expect("notation");
+        assert_eq!(
+            fresh,
+            CliPointer::Fresh {
+                path: "src/lib.rs".to_owned(),
+                span: (120, 480),
+                kind_name: "function_item".to_owned(),
+            }
+        );
+
+        let stored_json = r#"{"path":"src/lib.rs","span":[120,480],"kind_name":"function_item","content_sha":"0f3ac1d8e5b24719"}"#;
+        let stored = parse_cli_pointer(stored_json).expect("stored json");
+        assert_eq!(
+            stored,
+            CliPointer::Stored(SyntaxPointer::Node {
+                path: "src/lib.rs".to_owned(),
+                span: (120, 480),
+                kind_name: "function_item".to_owned(),
+                content_sha: "0f3ac1d8e5b24719".to_owned(),
+            })
+        );
+        let commit_json = r#"{"sha":"0123456789abcdef0123456789abcdef01234567"}"#;
+        assert!(matches!(
+            parse_cli_pointer(commit_json).expect("commit json"),
+            CliPointer::Stored(SyntaxPointer::Commit { .. })
+        ));
+
+        // Broken JSON and bare notation mistakes stay typed.
+        assert_eq!(
+            code(parse_cli_pointer("{not json").unwrap_err()),
+            "E_POINTER_INVALID"
+        );
+    }
+
+    /// The stamp flow: an exact span+kind hit is stamped with the hash of
+    /// the real bytes; a span that is not a node boundary dangles — a
+    /// hallucinated span is refused, never repaired.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn stamping_takes_exact_hits_and_refuses_hallucinated_spans() {
+        let registry = LangRegistry::new();
+        let source: Arc<[u8]> = Arc::from(CORPUS.as_bytes());
+        let (span, sha) = nth_function(&registry, &source, 1);
+
+        let stamped =
+            stamp_node_pointer(&registry, "t.rs", span, "function_item", &source).expect("stamp");
+        assert_eq!(
+            stamped,
+            SyntaxPointer::Node {
+                path: "t.rs".to_owned(),
+                span,
+                kind_name: "function_item".to_owned(),
+                content_sha: sha,
+            }
+        );
+
+        // One byte off is not a node boundary: dangling.
+        let off = (span.0 + 1, span.1);
+        let err = stamp_node_pointer(&registry, "t.rs", off, "function_item", &source)
+            .expect_err("off-boundary span");
+        assert_eq!(err.code(), "E_POINTER_DANGLING");
+
+        // Wrong kind at the right span: dangling too.
+        let err = stamp_node_pointer(&registry, "t.rs", span, "impl_item", &source)
+            .expect_err("wrong kind");
+        assert_eq!(err.code(), "E_POINTER_DANGLING");
     }
 }
