@@ -16,8 +16,11 @@
 //!   rayon match, canonical janitor.v1 report;
 //! - `apply` — the F5 transactional rewrite loop: diff payload in,
 //!   whole-diff all-or-nothing stage → validate → flush out;
-//! - `memory`, `orchestrator` — `memory` is a typed skeleton for F6;
-//!   `orchestrator` is the F4 `Session` composition root.
+//! - `memory` — the F6 persistent layer: append-only JSONL fact log with
+//!   position-derived ids and torn-tail quarantine (ADR-0006), the
+//!   re-anchorable `SyntaxPointer` anti-hallucination gate (ADR-0012),
+//!   and the synchronous `nap` compression protocol (ADR-0013);
+//! - `orchestrator` — the F4 `Session` composition root.
 //!
 //! Hard rules in force from F0 (PLAN §1.1): no `unwrap`/`expect`/`panic`
 //! in production code (clippy-denied; tests exempt), stdout is 100% JSON
