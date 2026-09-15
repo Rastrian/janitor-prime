@@ -353,3 +353,45 @@ are the python-specific facts a payload consumer needs:
   python file is refused with `E_PARSE_INVALID` and node coordinates —
   demonstrated end to end over the bundled fixture repo in
   `tests/python_e2e.rs`.
+## `janitor scan --duplicates` (F8)
+
+Duplicate-detection mode (mutually exclusive with `--rule`). Groups every
+capturable subtree at or above `--min-size` participating nodes (default 8;
+comment- and formatting-invariant) by its 128-bit Merkle fingerprint, and
+reports groups with ≥ 2 members.
+
+```json
+{
+  "schema": "janitor.v1", "ok": true,
+  "data": {
+    "kind": "duplicates",
+    "groups": [
+      {
+        "id": 0,
+        "fingerprint": "6bcb9006d728…",
+        "lang": "rust",
+        "size": 67,
+        "members": [
+          { "path": "src/a.rs", "start_byte": 512, "end_byte": 900,
+            "start_point": {"row": 50, "column": 0},
+            "end_point": {"row": 62, "column": 0},
+            "kind": "function_item", "kind_id": 188,
+            "virtual_file": false, "overlap": false, "captures": [] }
+        ]
+      }
+    ],
+    "stats": { "files": 1, "bytes": 29000, "wall_ms": 3,
+               "files_matched": 1, "matches": 2, "langs": {"rust": 1} }
+  }
+}
+```
+
+- **Equivalence** (ADR-0010): named-node skeleton + leaf token texts plus
+  semantically-significant anonymous tokens (operators, separators);
+  comments and whitespace never affect the fingerprint. `x + y` and `x - y`
+  are NOT duplicates; renamed locals ARE different (leaf text is hashed).
+- **Order**: groups sorted by canonical first-member span (path, start_byte),
+  members within a group sorted the same way — byte-identical under any
+  rayon thread count (RAYON determinism fence covers this mode).
+- **Tuning**: `--min-size` raises the floor so import blocks and tiny
+  repeated idioms drop out; raise it until the report is actionable.
