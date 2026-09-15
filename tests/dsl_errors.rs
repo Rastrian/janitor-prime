@@ -108,18 +108,23 @@ fn duplicate_capture_symbol_is_a_compile_error() {
 }
 
 #[test]
-fn unify_is_refused_with_the_versioned_error() {
+fn unify_with_an_uncaptured_symbol_is_a_compile_error() {
+    // F8 lifted the E_UNSUPPORTED_VERSION refusal: unify now executes. The
+    // loud failure that replaces it is the constraint naming a symbol the
+    // rule never captures — a filter that could never pass would be a
+    // silent no-op (docs/DSL.md §7).
     let (_, envelope) = scan_rule(
         "(under function_item (seq (capture @fn identifier) block) \
-         (constraints (unify @fn @fn)))",
+         (constraints (unify @fn @ghost)))",
     );
     let body = error_body(&envelope);
-    assert_eq!(
-        body["code"], "E_UNSUPPORTED_VERSION",
-        "ADR-0016 (6): versioned refusal, never a silent no-match"
+    assert_eq!(body["code"], "E_DSL_COMPILE");
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("@ghost")),
+        "the message names the uncaptured symbol: {body}"
     );
-    assert_eq!(body["details"]["feature"], "unify");
-    assert_eq!(body["details"]["version"], "janitor.v1");
 }
 
 #[test]

@@ -160,12 +160,24 @@ pub struct ApplyArgs {
     pub dry_run: bool,
 }
 
-/// `janitor scan` (PLAN §3 F4.7, docs/DSL.md §8).
+/// `janitor scan` (PLAN §3 F4.7, docs/DSL.md §8; F8 adds `--duplicates`).
+/// Exactly one mode: `--rule` (structural search) or `--duplicates`
+/// (fingerprint-grouped duplicate detection, no rule).
 #[derive(Debug, Parser)]
+#[command(
+    group(clap::ArgGroup::new("scan_mode").required(true).args(["rule", "duplicates"]))
+)]
 pub struct ScanArgs {
-    /// The DSL rule, s-expression form (docs/DSL.md). Required.
+    /// The DSL rule, s-expression form (docs/DSL.md). The scan mode unless
+    /// --duplicates is given.
     #[arg(long)]
-    pub rule: String,
+    pub rule: Option<String>,
+
+    /// Duplicate-detection mode (F8): group all capturable subtrees at or
+    /// above --min-size by Merkle fingerprint and report the groups
+    /// (docs/SCHEMA.md). Mutually exclusive with --rule.
+    #[arg(long)]
+    pub duplicates: bool,
 
     /// Scan root (default: the current directory).
     pub path: Option<PathBuf>,
@@ -181,12 +193,18 @@ pub struct ScanArgs {
     pub include_virtual: bool,
 
     /// Byte-strict Seq adjacency (default: comment-skipping, ADR-0010).
-    #[arg(long)]
+    /// Rule mode only — duplicate equivalence is fixed by ADR-0010.
+    #[arg(long, conflicts_with = "duplicates")]
     pub strict_trivia: bool,
 
     /// Skip files larger than this many bytes (default 4 MiB).
     #[arg(long, default_value_t = crate::scan::DEFAULT_MAX_FILE_SIZE)]
     pub max_file_size: u64,
+
+    /// Duplicates mode: minimum subtree size in participating nodes
+    /// (comment- and formatting-invariant) for grouping (default 8).
+    #[arg(long, conflicts_with = "rule", default_value_t = crate::scan::DEFAULT_MIN_DUPLICATE_SIZE)]
+    pub min_size: u32,
 }
 
 /// Map a clap error onto (envelope, exit code) without emitting it.
@@ -316,8 +334,9 @@ mod tests {
         );
     }
 
-    /// F4: `scan` parses with every flag and its defaults (docs/DSL.md §8);
-    /// the root path is optional; a missing --rule is a usage error.
+    /// F4/F8: `scan` parses in both modes with every flag and its defaults
+    /// (docs/DSL.md §8); exactly one of --rule/--duplicates; a mode-less
+    /// scan is a usage error.
     #[test]
     fn scan_subcommand_parses_with_defaults() {
         let cli = Cli::try_parse_from(["janitor", "scan", "--rule", "(under block (seq _ _))"])
@@ -325,12 +344,14 @@ mod tests {
         let Some(Command::Scan(args)) = cli.command else {
             unreachable!("scan subcommand");
         };
-        assert_eq!(args.rule, "(under block (seq _ _))");
+        assert_eq!(args.rule.as_deref(), Some("(under block (seq _ _))"));
+        assert!(!args.duplicates);
         assert_eq!(args.path, None);
         assert_eq!(args.lang, None);
         assert!(!args.include_virtual);
         assert!(!args.strict_trivia);
         assert_eq!(args.max_file_size, crate::scan::DEFAULT_MAX_FILE_SIZE);
+        assert_eq!(args.min_size, crate::scan::DEFAULT_MIN_DUPLICATE_SIZE);
 
         let cli = Cli::try_parse_from([
             "janitor",
@@ -354,11 +375,47 @@ mod tests {
         assert!(args.include_virtual && args.strict_trivia);
         assert_eq!(args.max_file_size, 1024);
 
-        // --rule is required: usage error envelope, exit 2.
-        let err = Cli::try_parse_from(["janitor", "scan"]).expect_err("--rule is required");
+        // A mode is required: usage error envelope, exit 2.
+        let err = Cli::try_parse_from(["janitor", "scan"]).expect_err("a mode is required");
         let (envelope, code) = clap_error_envelope(&err);
         assert_eq!(code, envelope::EXIT_USAGE);
         assert!(!envelope.ok);
+    }
+
+    /// F8: the duplicates mode parses with its defaults and tunables, and
+    /// the mode flags keep each other honest — both modes at once, a
+    /// rule-mode-only flag under --duplicates, and a duplicates-only flag
+    /// under --rule are all usage errors.
+    #[test]
+    fn scan_duplicates_mode_parses_and_excludes_the_other_mode() {
+        let cli =
+            Cli::try_parse_from(["janitor", "scan", "--duplicates", "src", "--min-size", "12"])
+                .expect("duplicates with a tunable");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
+        assert!(args.duplicates);
+        assert_eq!(args.rule, None);
+        assert_eq!(args.path.as_deref(), Some(std::path::Path::new("src")));
+        assert_eq!(args.min_size, 12);
+        assert_eq!(args.max_file_size, crate::scan::DEFAULT_MAX_FILE_SIZE);
+
+        let cli = Cli::try_parse_from(["janitor", "scan", "--duplicates", "--lang", "rust"])
+            .expect("duplicates with the shared flags");
+        let Some(Command::Scan(args)) = cli.command else {
+            unreachable!("scan subcommand");
+        };
+        assert_eq!(args.min_size, crate::scan::DEFAULT_MIN_DUPLICATE_SIZE);
+
+        for argv in [
+            vec!["janitor", "scan", "--duplicates", "--rule", "_"],
+            vec!["janitor", "scan", "--duplicates", "--strict-trivia"],
+            vec!["janitor", "scan", "--rule", "_", "--min-size", "4"],
+        ] {
+            let err = Cli::try_parse_from(argv).expect_err("mode flags exclude each other");
+            let (_envelope, code) = clap_error_envelope(&err);
+            assert_eq!(code, envelope::EXIT_USAGE);
+        }
     }
 
     /// F5: `apply` parses its flags (docs/SCHEMA.md); exactly one payload

@@ -16,6 +16,7 @@ pub mod dsl;
 pub mod errors;
 pub mod eval;
 pub mod ffi_shim;
+pub mod fingerprint;
 pub mod lang;
 pub mod matchset;
 pub mod parse;

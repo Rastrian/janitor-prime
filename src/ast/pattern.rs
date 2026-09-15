@@ -11,10 +11,10 @@
 //! ([`crate::ast::compile`]) as a per-language `u16` kind id — the DSL
 //! surface never carries a language, so the pattern layer cannot pretend to.
 //!
-//! `Unify` parses (it is in the grammar) but never executes: a rule carrying
-//! unify constraints fails rule-compile with the versioned
-//! `E_UNSUPPORTED_VERSION` (ADR-0005 v0.1 scope note, ADR-0016 (6)) — never
-//! a silent no-match.
+//! `Unify` parses (it is in the grammar) and, since F8, executes: the
+//! constraint pair rides the compiled program and the evaluator applies it
+//! as a post-match filter over Merkle fingerprints
+//! (`crate::ast::fingerprint`; ADR-0005/ADR-0010).
 
 use smol_str::SmolStr;
 
@@ -52,7 +52,9 @@ pub enum Pattern {
     Seq(Vec<Pattern>),
     /// Bind the span the inner pattern covers to a symbol (once per rule).
     Capture(SmolStr, Box<Pattern>),
-    /// Isomorphism constraint — parsed, v0.2 (F8). Rejected at compile.
+    /// Isomorphism constraint — legal only inside `(constraints …)` (the
+    /// parser enforces this); compiled to a symbol-id pair and applied as
+    /// the post-match fingerprint filter (F8).
     Unify(SmolStr, SmolStr),
     /// Atom: match one node of exactly this kind.
     Kind(NodeType),
@@ -62,8 +64,8 @@ pub enum Pattern {
     AnyOf(Vec<Pattern>),
 }
 
-/// A complete rule: one root pattern plus its (v0.2, rejected) unify
-/// constraints, as written inside the top-level `(under …)`.
+/// A complete rule: one root pattern plus its unify constraints, as
+/// written inside the top-level `(under …)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub root: Pattern,

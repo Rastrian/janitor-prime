@@ -234,6 +234,58 @@ fn smol_path(name: &str) -> smol_str::SmolStr {
     smol_str::SmolStr::from(name)
 }
 
+/// The KP-8 F8 leg: the Merkle fingerprint pass (F8, §1.4.3 item 6) holds
+/// the same discipline as the matcher — its only growing allocations are
+/// the *result arrays* (per-node digest vector, span index, and the index
+/// arrays of the walk). Those grow amortized-logarithmically, so a build
+/// over the ~2.7k-node corpus performs tens of allocation events, all of
+/// them capacity doublings; a per-node allocation (a boxed something per
+/// visited node) would perform thousands. The bound encodes exactly that
+/// separation — three orders of magnitude, not single digits.
+#[test]
+#[cfg(feature = "lang-rust")]
+fn fingerprint_pass_allocates_nothing_per_node() {
+    use janitor_prime::ast::fingerprint::{FingerprintTable, trivia_kind_ids};
+
+    let registry = LangRegistry::new();
+    let id: LangId = registry
+        .for_extension("rs")
+        .expect("this test binary builds with lang-rust");
+    let trivia = trivia_kind_ids(&registry, id);
+    let tree = parsed_corpus();
+
+    ALLOC_EVENTS.store(0, Ordering::Relaxed);
+    let table = FingerprintTable::build(&tree, &corpus_arc(), &trivia);
+    let events = ALLOC_EVENTS.load(Ordering::Relaxed);
+
+    assert!(
+        table.participating() > 2_000,
+        "corpus must be big enough to expose a per-node leak (got {})",
+        table.participating()
+    );
+    assert!(
+        events <= 128,
+        "fingerprint pass allocated {events} times across a whole build \
+         (measured ~60 locally — capacity doublings only; budget 128, see \
+         the module docs)"
+    );
+
+    // The result arrays are the allowance's intended contents: rebuilding
+    // the same tree allocates the same order of events, not n more.
+    ALLOC_EVENTS.store(0, Ordering::Relaxed);
+    let again = FingerprintTable::build(&tree, &corpus_arc(), &trivia);
+    let rebuild = ALLOC_EVENTS.load(Ordering::Relaxed);
+    assert_eq!(again.digests(), table.digests(), "deterministic rebuild");
+    assert!(rebuild <= 128, "rebuild allocated {rebuild} times");
+}
+
+/// The corpus bytes as the shared snapshot the fingerprint pass indexes
+/// (Rule T2: offsets are only meaningful against these bytes).
+#[cfg(feature = "lang-rust")]
+fn corpus_arc() -> std::sync::Arc<[u8]> {
+    std::sync::Arc::from(corpus())
+}
+
 /// The counting allocator is genuinely installed in this binary (startup
 /// itself allocates), under every feature set — the F3 gate's
 /// `--no-default-features` leg keeps this file compiling meaningfully.
