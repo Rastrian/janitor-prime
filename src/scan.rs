@@ -323,9 +323,10 @@ pub fn scan(
                     ));
                 };
                 let (bytes, key, entry) =
-                    match read_parse_entry(overlay, cache, registry, worker_parser, &candidate)? {
+                    match read_candidate(overlay, cache, registry, worker_parser, &candidate)? {
+                        Some(parsed) => parsed,
                         // Binary content: honest skip (E6).
-                        ReadParsed::Binary => {
+                        None => {
                             let display = candidate.display.clone();
                             return Ok((
                                 candidate,
@@ -335,7 +336,6 @@ pub fn scan(
                                 }),
                             ));
                         }
-                        ReadParsed::Entry { bytes, key, entry } => (bytes, key, entry),
                     };
 
                 let mut reports = Vec::new();
@@ -672,8 +672,9 @@ pub fn duplicates(
             || None::<crate::ast::ffi_shim::Parser>,
             |worker_parser, candidate| -> Result<(Candidate, Outcome), JanitorError> {
                 let (bytes, key, entry) =
-                    match read_parse_entry(overlay, cache, registry, worker_parser, &candidate)? {
-                        ReadParsed::Binary => {
+                    match read_candidate(overlay, cache, registry, worker_parser, &candidate)? {
+                        Some(parsed) => parsed,
+                        None => {
                             let display = candidate.display.clone();
                             return Ok((
                                 candidate,
@@ -683,7 +684,6 @@ pub fn duplicates(
                                 }),
                             ));
                         }
-                        ReadParsed::Entry { bytes, key, entry } => (bytes, key, entry),
                     };
 
                 let trivia = trivia_by_lang
@@ -933,6 +933,30 @@ enum ReadParsed {
         key: crate::vfs::VfsPath,
         entry: ParseEntry,
     },
+}
+
+/// One candidate's parsed snapshot, its cache key, and its validated
+/// cache entry (the B6 shared prologue's cargo).
+type ParsedCandidate = (Arc<[u8]>, crate::vfs::VfsPath, ParseEntry);
+
+/// The per-candidate PROLOGUE both scan modes' workers share (B6: the
+/// twins this collapsed were the largest duplicate group in the repo —
+/// subtree size 129, found by `scan --duplicates --min-size 30` on this
+/// very crate): read + sniff + parse-or-cache, with the binary leg
+/// already mapped to its honest skip record. `Ok(None)` ⇒ skip binary.
+fn read_candidate(
+    overlay: &Overlay,
+    cache: &ParseCache,
+    registry: &LangRegistry,
+    worker_parser: &mut Option<crate::ast::ffi_shim::Parser>,
+    candidate: &Candidate,
+) -> Result<Option<ParsedCandidate>, JanitorError> {
+    Ok(
+        match read_parse_entry(overlay, cache, registry, worker_parser, candidate)? {
+            ReadParsed::Binary => None,
+            ReadParsed::Entry { bytes, key, entry } => Some((bytes, key, entry)),
+        },
+    )
 }
 
 fn read_parse_entry(

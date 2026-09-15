@@ -475,14 +475,10 @@ mod tests {
     use super::*;
     use crate::ast::dsl::parse_rule;
 
+    /// The shared rust-registry helper (B6: one definition, in
+    /// `crate::ast::testing`).
     #[cfg(feature = "lang-rust")]
-    fn rust() -> (LangRegistry, LangId) {
-        let registry = LangRegistry::new();
-        let id = registry
-            .for_extension("rs")
-            .expect("lang-rust is the default feature set");
-        (registry, id)
-    }
+    use crate::ast::testing::rust;
 
     /// One seq element per instruction, kinds pre-resolved to ids, `Match`
     /// terminating the main region — the ADR-0005 flat shape.

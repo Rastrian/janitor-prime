@@ -391,14 +391,10 @@ mod tests {
     use crate::ast::parse::parse_snapshot;
     use crate::vfs::Overlay;
 
+    /// The shared rust-registry helper (B6: one definition, in
+    /// `crate::ast::testing`).
     #[cfg(feature = "lang-rust")]
-    fn setup() -> (LangRegistry, crate::ast::lang::LangId) {
-        let registry = LangRegistry::new();
-        let id = registry
-            .for_extension("rs")
-            .expect("lang-rust is the default feature set");
-        (registry, id)
-    }
+    use crate::ast::testing::rust as setup;
 
     #[cfg(feature = "lang-rust")]
     fn entry_for(

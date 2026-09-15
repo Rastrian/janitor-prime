@@ -25,6 +25,26 @@ pub mod pattern;
 pub mod send_assert;
 pub mod walk;
 
+/// Shared test scaffolding for the `ast` submodule suites (B6): the
+/// triplicated rust-registry `setup()` helpers in cache/compile/errors
+/// were a size-72 duplicate group `scan --duplicates` flagged in this
+/// crate's own tests — one definition now.
+#[cfg(test)]
+pub(crate) mod testing {
+    use crate::ast::lang::{LangId, LangRegistry};
+
+    /// The rust registry and its `LangId` (`lang-rust` is the default
+    /// feature set, ADR-0015).
+    #[cfg(feature = "lang-rust")]
+    pub(crate) fn rust() -> (LangRegistry, LangId) {
+        let registry = LangRegistry::new();
+        let id = registry
+            .for_extension("rs")
+            .expect("lang-rust is the default feature set");
+        (registry, id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// R22 fence: outside the shim (and the `send_assert` canary), no
