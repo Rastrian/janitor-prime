@@ -258,6 +258,16 @@ are maintained by their language communities, not by this repo.
 For repository-scale policies (naming, structure, "no `unwrap` outside tests"),
 `scan --rule` is the deterministic gate — LSP diagnostics complement, not replace, it.
 
+## MCP: janitor as native agent tools
+
+`janitor mcp [--workspace DIR]` serves the engine over the Model Context
+Protocol stdio transport — six native tools (`janitor_wake`, `janitor_scan`,
+`janitor_apply`, `janitor_note`, `janitor_nap`, `janitor_status`) whose
+results are exactly the `janitor.v1` envelopes of docs/SCHEMA.md. Thin by
+design: no SDK, no new dependencies; stdout carries nothing but MCP frames.
+Client setup snippets (Claude Code, Cursor, generic), the tool table, and
+the workspace/no-traversal rules: [docs/MCP.md](docs/MCP.md).
+
 ## Roadmap
 
 - **v0.2** — `Unify` (cross-match unification / duplicate detection via

@@ -1,6 +1,17 @@
 ## [Unreleased] — v0.2.0 candidates
 
 ### Added
+- **MCP server (`janitor mcp`, F10b, ADR-0019):** the engine as six native
+  tools over the MCP stdio transport (`janitor_wake`, `janitor_scan`,
+  `janitor_apply`, `janitor_note`, `janitor_nap`, `janitor_status`) —
+  thin in-process wrappers over the CLI's own session paths, zero new
+  dependencies. Results carry the `janitor.v1` envelope as structured
+  content (`isError` + `E_*` on refusals); per-workspace with typed
+  `E_VFS_INVALID_PATH` traversal refusals; newline-delimited JSON-RPC per
+  the MCP spec with LSP-style `Content-Length` frames also accepted;
+  stdout stays frame-pure (pinned under `RUST_LOG=debug`). The v0.1
+  agent loop is e2e-tested through the layer (`tests/mcp_e2e.rs`); setup
+  and tool table in `docs/MCP.md`.
 - **Python** fully supported (F9a): registry, measured trivia table
   (`comment`), norm table (`lang/python.norm.toml`), end-to-end agent-loop
   acceptance, CI leg.
