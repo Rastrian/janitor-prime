@@ -204,6 +204,8 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         "rust" => Some(include_str!("../../../lang/rust.norm.toml")),
         #[cfg(feature = "lang-python")]
         "python" => Some(include_str!("../../../lang/python.norm.toml")),
+        #[cfg(feature = "lang-go")]
+        "go" => Some(include_str!("../../../lang/go.norm.toml")),
         _ => None,
     }
 }
@@ -228,7 +230,7 @@ mod tests {
     /// four classes.
     #[test]
     fn embedded_tables_parse_complete() {
-        for lang in ["rust", "python"] {
+        for lang in ["rust", "python", "go"] {
             let Some(source) = embedded_source(lang) else {
                 continue;
             };
