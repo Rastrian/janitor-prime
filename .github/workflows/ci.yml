@@ -19,8 +19,8 @@
 #              cargo-audit over Cargo.lock, both installed from source
 #              with --locked (first-party cargo install — no new
 #              third-party actions to pin).
-# lang-experimental — F9c: build + test the experimental tier
-#              (ruby + ocaml/ocaml_interface) in ONE job, deliberately
+# lang-experimental — F9c+F9d: build + test the experimental tier
+#              (ruby + ocaml/ocaml_interface + elixir) in ONE job, deliberately
 #              OUTSIDE the gates matrix and OUTSIDE lang-all (ADR-0015
 #              appended note): the stable set's fences stay untouched
 #              while the tier's registry, trivia corpora, norm tables
@@ -172,7 +172,7 @@ jobs:
         run: cargo audit
 
   lang-experimental:
-    name: experimental tier (ruby + ocaml)
+    name: experimental tier (ruby + ocaml + elixir)
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: stable
@@ -188,16 +188,17 @@ jobs:
       - name: Build the experimental tier
         run: cargo build --features lang-experimental
       - name: Test the experimental tier
-        # The registry paths, KP-6-ruby/ocaml trivia corpora, norm-table
-        # conformance and both e2e acceptances are all feature-gated on
-        # their languages — one test run covers the whole tier.
+        # The registry paths, KP-6-ruby/ocaml/elixir trivia corpora,
+        # norm-table conformance and all three e2e acceptances are
+        # feature-gated on their languages — one test run covers the
+        # whole tier.
         run: cargo test --features lang-experimental
       - name: "--version envelope lists the experimental grammar set"
         run: |
           ./target/debug/janitor --version | jq -e '
             .schema == "janitor.v1"
             and .ok == true
-            and .data.grammars == ["rust","ruby","ocaml","ocaml_interface"]
+            and .data.grammars == ["rust","ruby","ocaml","ocaml_interface","elixir"]
           '
 
   musl-smoke:
