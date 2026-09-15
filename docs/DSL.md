@@ -233,6 +233,9 @@ real matches wherever comments are idiomatic). The filter applies in
 | tsx         | `comment`, `html_comment`         |
 | java        | `line_comment`, `block_comment`   |
 | c           | `comment`                         |
+| ruby        | `comment` *(experimental, F9c)*   |
+| ocaml       | `comment` *(experimental, F9c)*   |
+| ocaml_interface | `comment` *(experimental, F9c)*|
 
 Anonymous nodes (punctuation, operators) are never in the sibling list in
 either mode — both modes are defined over named children.

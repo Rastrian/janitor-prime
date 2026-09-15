@@ -213,6 +213,9 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         // grammars fails the fence, not a scan.
         #[cfg(feature = "lang-typescript")]
         "typescript" | "tsx" => Some(include_str!("../../../lang/typescript.norm.toml")),
+        // Experimental tier (F9c) — same mechanism, fenced out of lang-all.
+        #[cfg(feature = "lang-ruby")]
+        "ruby" => Some(include_str!("../../../lang/ruby.norm.toml")),
         _ => None,
     }
 }
@@ -234,18 +237,22 @@ mod tests {
     use super::*;
 
     /// The embedded tables parse under the strict subset and carry all
-    /// four classes.
+    /// four classes. Registry-driven (F9c): every language this build
+    /// enabled and carries a table for is fenced — new languages join
+    /// by existing, the way the conformance test below already works.
     #[test]
     fn embedded_tables_parse_complete() {
-        for lang in ["rust", "python", "go", "typescript", "tsx"] {
-            let Some(source) = embedded_source(lang) else {
+        let registry = crate::ast::lang::LangRegistry::new();
+        for id in registry.ids() {
+            let name = registry.name(id).expect("registered name");
+            let Some(source) = embedded_source(name) else {
                 continue;
             };
             let table = NormTable::parse(source).expect("embedded table must parse");
             assert_eq!(
                 table.iter().filter(|(_, kinds)| !kinds.is_empty()).count(),
                 4,
-                "{lang}: every class mapped"
+                "{name}: every class mapped"
             );
         }
     }
