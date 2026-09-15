@@ -128,3 +128,114 @@ fn python_scan_json_is_byte_identical_across_rayon_thread_counts() {
     assert_eq!(skip["data"]["stats"]["matches"], 7);
     assert_eq!(strict["data"]["stats"]["matches"], 5);
 }
+
+/// F9b: the same fence over **go** — third language, same guarantee:
+/// byte-identical reports under `RAYON_NUM_THREADS=1` vs `=8`, over the
+/// bundled go fixture module (doc comments between functions, a grouped
+/// import block, struct tags — the shapes whose comment-skipping could
+/// in principle depend on interleaving if assembly were
+/// order-sensitive). Ground truth mirrors the KP-6-go measurement:
+/// function-adjacency counts 4 in skip mode and 2 under
+/// `--strict-trivia`.
+#[test]
+#[cfg(feature = "lang-go")]
+fn go_scan_json_is_byte_identical_across_rayon_thread_counts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/go")
+        .canonicalize()
+        .expect("fixture module");
+    let rule = "(under source_file (seq (kind function_declaration) (kind function_declaration)))";
+
+    let scan = |threads: u32, strict: bool| {
+        let bin = env!("CARGO_BIN_EXE_janitor");
+        let mut cmd = Command::new(bin);
+        cmd.env("RAYON_NUM_THREADS", threads.to_string())
+            .args(["scan", "--rule", rule]);
+        if strict {
+            cmd.arg("--strict-trivia");
+        }
+        let out = cmd.arg(&root).output().expect("binary runs");
+        assert_eq!(out.status.code(), Some(0), "scan under {threads} threads");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let strip_wall = |raw: &str| -> String {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(raw).unwrap_or_else(|err| panic!("not JSON: {err}"));
+        assert!(envelope["data"]["stats"]["wall_ms"].as_u64().is_some());
+        envelope["data"]["stats"]["wall_ms"].take();
+        serde_json::to_string(&envelope).expect("re-serialize")
+    };
+
+    for strict in [true, false] {
+        let one = strip_wall(&scan(1, strict));
+        let eight = strip_wall(&scan(8, strict));
+        assert_eq!(
+            one, eight,
+            "go report (strict-trivia={strict}) is thread-count-independent"
+        );
+    }
+
+    // The comparison bites: the KP-6-go hand-computed totals.
+    let skip: serde_json::Value = serde_json::from_str(&scan(8, false)).expect("re-parse");
+    let strict: serde_json::Value = serde_json::from_str(&scan(8, true)).expect("re-parse");
+    assert_eq!(skip["data"]["stats"]["matches"], 4);
+    assert_eq!(strict["data"]["stats"]["matches"], 2);
+}
+
+/// F9b: the same fence over **typescript and tsx** — one scan whose file
+/// set spans both grammars of the crate (`.ts` under typescript,
+/// `.tsx` under tsx) must be byte-identical under
+/// `RAYON_NUM_THREADS=1` vs `=8`, both trivia modes. Ground truth
+/// mirrors the KP-6-typescript measurement: exported-declaration
+/// adjacency counts 4 in skip mode and 2 under `--strict-trivia`.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_scan_json_is_byte_identical_across_rayon_thread_counts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/typescript")
+        .canonicalize()
+        .expect("fixture module");
+    let rule = "(under program (seq (kind export_statement) (kind export_statement)))";
+
+    let scan = |threads: u32, strict: bool| {
+        let bin = env!("CARGO_BIN_EXE_janitor");
+        let mut cmd = Command::new(bin);
+        cmd.env("RAYON_NUM_THREADS", threads.to_string())
+            .args(["scan", "--rule", rule]);
+        if strict {
+            cmd.arg("--strict-trivia");
+        }
+        let out = cmd.arg(&root).output().expect("binary runs");
+        assert_eq!(out.status.code(), Some(0), "scan under {threads} threads");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let strip_wall = |raw: &str| -> String {
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(raw).unwrap_or_else(|err| panic!("not JSON: {err}"));
+        assert!(envelope["data"]["stats"]["wall_ms"].as_u64().is_some());
+        envelope["data"]["stats"]["wall_ms"].take();
+        serde_json::to_string(&envelope).expect("re-serialize")
+    };
+
+    for strict in [true, false] {
+        let one = strip_wall(&scan(1, strict));
+        let eight = strip_wall(&scan(8, strict));
+        assert_eq!(
+            one, eight,
+            "ts/tsx report (strict-trivia={strict}) is thread-count-independent"
+        );
+    }
+
+    // The comparison bites: the KP-6-typescript hand-computed totals,
+    // and both grammars really took part in the scan.
+    let skip: serde_json::Value = serde_json::from_str(&scan(8, false)).expect("re-parse");
+    let strict: serde_json::Value = serde_json::from_str(&scan(8, true)).expect("re-parse");
+    assert_eq!(skip["data"]["stats"]["matches"], 4);
+    assert_eq!(strict["data"]["stats"]["matches"], 2);
+    assert_eq!(
+        skip["data"]["stats"]["langs"],
+        serde_json::json!({ "typescript": 2, "tsx": 1 })
+    );
+}

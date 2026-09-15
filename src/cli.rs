@@ -293,6 +293,7 @@ mod tests {
                     "go",
                     "javascript",
                     "typescript",
+                    "tsx",
                     "java",
                     "c"
                 ]

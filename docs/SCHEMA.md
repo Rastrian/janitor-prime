@@ -353,6 +353,91 @@ are the python-specific facts a payload consumer needs:
   python file is refused with `E_PARSE_INVALID` and node coordinates —
   demonstrated end to end over the bundled fixture repo in
   `tests/python_e2e.rs`.
+## Language support — go (F9b, v0.2 wave 2)
+
+Go is fully supported alongside rust and python. Same story as python:
+nothing in the payloads changes structurally; these are the go-specific
+facts a consumer needs:
+
+- **File routing**: `.go` (case-insensitive) → the `go` grammar
+  (`--features lang-go`; release artifacts embed it via `lang-all`).
+- **Kind names in reports** are the go grammar's own: `source_file` is
+  the root; plain functions are `function_declaration`, methods are
+  `method_declaration` (a distinct kind — its name child is a
+  `field_identifier`, not an `identifier`); a function body is
+  `block > statement_list`, so **statement-adjacency rules scope to
+  `statement_list`**, not `block` (a go block wraps a single
+  statement_list); grouped imports are `import_declaration >
+  import_spec_list > import_spec`; struct fields are
+  `field_declaration` inside `field_declaration_list` (tags are
+  `raw_string_literal` children). The norm table lives in
+  `lang/go.norm.toml` (FUNCTION=`function_declaration`+
+  `method_declaration`, IDENT=`identifier`, LITERAL includes go's named
+  `true`/`false`/`nil` kinds, BLOCK=`block`), conformance-fenced in CI.
+- **Trivia** (ADR-0010): go's table is `comment` only — line and block
+  comments are the same kind. Distinctive measured facts: same-line
+  comments are legal go between declaration children
+  (`func (t T) /* note */ Name()`, `if ok /* why */ {`) and land as
+  named siblings there; the else-if chain is same-line and
+  comment-immune between blocks. Measured in the KP-6-go corpus
+  (`tests/kp6_go.rs`): byte-strict loses 50% of file-level
+  function-adjacency pairs on the bundled module (2 vs 4).
+- **The apply re-parse gate** runs under the go grammar — demonstrated
+  end to end over the bundled fixture module in `tests/go_e2e.rs`
+  (atomic six-edit three-file rename, refused syntax-breaking diff with
+  coordinates, re-anchored pointer note). One honest go shape fact for
+  agents planning edits: go import lines carry package *paths*, not
+  symbol names, so a symbol rename's cross-file edits are def + call
+  sites — there is no import-statement edit to make (a package *move*
+  is what rewrites an import line).
+
+## Language support — typescript and tsx (F9b, v0.2 wave 2)
+
+TypeScript is fully supported, and the crate's second grammar ships
+with it. Payload shapes are unchanged; the ts-specific facts:
+
+- **File routing and the tsx decision**: `.ts`/`.mts`/`.cts` → the
+  `typescript` grammar; `.tsx` → the `tsx` grammar. The
+  `lang-typescript` feature registers **two** languages (one cargo
+  feature, two `LangId`s) because the plain typescript grammar does not
+  parse JSX — measured, a `.tsx` file under it yields `ERROR` nodes,
+  which would corrupt scans and make every valid JSX edit fail the
+  apply re-parse gate as if it were broken. `--version` lists both
+  (`…,"typescript","tsx",…`); `--lang tsx` scopes a scan to it; tsx
+  carries its own kind table (the JSX-bearing superset, 191 vs 183
+  named kinds) and shares the typescript norm table — every kind in
+  `lang/typescript.norm.toml` is conformance-checked against BOTH
+  grammars, so a divergence between them fails CI, not a scan.
+- **Kind names in reports** are the grammar's own: `program` is the
+  root; top-level declarations are usually wrapped in
+  `export_statement` (the decorator, if any, is a sibling of the class
+  inside the export); functions are `function_declaration` (methods:
+  `method_definition` in classes, `method_signature` in interfaces,
+  `abstract_method_signature` in abstract classes, `function_signature`
+  for ambient/overload declarations — all six are FUNCTION in the norm
+  table; `arrow_function`/`function_expression` are expression-position
+  and are NOT); interfaces are `interface_declaration > interface_body`
+  with `property_signature` members; bodies are `statement_block`.
+  `;`-separated and newline-separated members are equally adjacent —
+  separators are anonymous tokens.
+- **Trivia** (ADR-0010): the table is **two** kinds — `comment` (line,
+  block, JSDoc alike) and `html_comment` — for BOTH typescript and tsx.
+  Measured basis: the grammar accepts Annex-B HTML-like comments
+  (`<!-- … -->`) in plain `.ts` as named children between statement
+  siblings, and the tsx grammar additionally parks them between
+  `jsx_text` siblings inside JSX trees. `hash_bang_line` is a named
+  program child but only ever at index 0 — never between siblings — so
+  it is deliberately OUT of the trivia table. (This corrects the v0.1
+  seeded `["comment"]` table.) Measured in the KP-6-typescript corpus
+  (`tests/kp6_typescript.rs`): byte-strict loses 50% of
+  exported-declaration adjacency pairs on the bundled module (2 vs 4).
+- **The apply re-parse gate** runs under each file's own grammar
+  (typescript for `.ts`, tsx for `.tsx`) — demonstrated end to end in
+  `tests/typescript_e2e.rs`: an atomic seven-edit three-file rename
+  across both grammars in one diff (including import-line edits —
+  typescript's named imports carry the symbol), a refused
+  syntax-breaking diff with coordinates, and a re-anchored pointer
+  note.
 ## `janitor scan --duplicates` (F8)
 
 Duplicate-detection mode (mutually exclusive with `--rule`). Groups every

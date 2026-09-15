@@ -1,0 +1,35 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-go 0.25.0
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-15. Every entry must resolve through `LangRegistry::resolve_kind`
+# (conformance-fenced in src/ast/lang/norm.rs tests).
+#
+# Grammar notes: FUNCTION includes BOTH `function_declaration` and
+# `method_declaration` — in go a method is the def-shaped named function
+# (the receiver is just a leading parameter), and a FUNCTION rule that
+# missed methods would miss most real go code. `func_literal` is
+# deliberately NOT FUNCTION (the python `lambda` precedent: expression
+# position, revisit only with a use case). IDENT is plain `identifier`
+# only: `field_identifier` (struct fields and method names),
+# `type_identifier`, `package_identifier` and `blank_identifier` occupy
+# member/type/import/blank positions distinguishable by structure.
+# LITERAL excludes `composite_literal` and `func_literal` (structured,
+# not value leaves) and the `*_literal_content` kinds (spelling
+# interiors of string literals); go's `true`/`false`/`nil` ARE named
+# kinds, so they are literals here as in the python table. BLOCK is
+# `block` — note the go subtlety that a block wraps a single
+# `statement_list`, so statement adjacency rules scope to
+# `statement_list`, not `block` (docs/DSL.md §12).
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["function_declaration", "method_declaration"]
+IDENT = ["identifier"]
+LITERAL = ["false", "float_literal", "imaginary_literal", "int_literal", "interpreted_string_literal", "nil", "raw_string_literal", "rune_literal", "true"]
+BLOCK = ["block"]

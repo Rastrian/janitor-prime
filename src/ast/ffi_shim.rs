@@ -73,11 +73,23 @@ pub fn javascript_language() -> Language {
     tree_sitter_javascript::LANGUAGE.into()
 }
 
-/// The TypeScript grammar (`lang-typescript`; covers TSX — flagged in the
-/// feature docs per PLAN §9 noise list).
+/// The TypeScript grammar (`lang-typescript`, `.ts`/`.mts`/`.cts`).
+/// Does NOT parse JSX — a `.tsx` file must go to [`tsx_language`] (the
+/// same crate's second grammar); routing JSX to this grammar produces
+/// ERROR nodes, which the apply re-parse gate would misread as a broken
+/// diff (measured at F9b; the reason tsx is its own registry entry).
 #[cfg(feature = "lang-typescript")]
 pub fn typescript_language() -> Language {
     tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+}
+
+/// The TSX grammar (`lang-typescript` feature, `.tsx`): the same crate's
+/// JSX-bearing superset of [`typescript_language`]. One cargo feature,
+/// two registered languages — the multi-grammar-crate precedent (the
+/// ocaml crate ships ocaml + menhir the same way).
+#[cfg(feature = "lang-typescript")]
+pub fn tsx_language() -> Language {
+    tree_sitter_typescript::LANGUAGE_TSX.into()
 }
 
 /// The Java grammar (`lang-java`).

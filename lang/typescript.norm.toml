@@ -1,0 +1,42 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# Kind-name source (cite-on-edit): tree-sitter-typescript 0.23.2
+# `typescript/src/node-types.json` and `tsx/src/node-types.json`
+# (vendored in the grammar crate), verified 2026-09-15. This one table
+# serves BOTH registry entries (`typescript` and `tsx`): the tsx kind
+# space is the JSX-bearing superset, so every kind below resolves in
+# both — fenced per grammar by the conformance tests in
+# src/ast/lang/norm.rs.
+#
+# Grammar notes — FUNCTION is every *declaration-position* named
+# function, the shapes a rename or audit rule must see:
+# `function_declaration`, `generator_function_declaration` (the def
+# pair), `method_definition` (class bodies), `method_signature`
+# (interface members), `abstract_method_signature` (abstract class
+# members), and `function_signature` (ambient `declare function` and
+# overloads). Deliberately EXCLUDED, on the python `lambda` precedent:
+# `arrow_function`, `function_expression`, `generator_function`
+# (expression positions — revisit only with a use case) and
+# `function_type` (a *type* that happens to be shaped like a function,
+# e.g. `(value: T) => boolean`). IDENT is plain `identifier` only —
+# `property_identifier`/`private_property_identifier` (member names),
+# `type_identifier` (type positions), `nested_identifier`,
+# `shorthand_property_identifier` (object keys), `statement_identifier`
+# (labels) are structurally distinguishable positions. LITERAL: `1n`
+# parses as `number` in this grammar version (no `big_int` kind
+# exists); `regex_pattern`/`regex_flags` and `string_fragment`/
+# `template_substitution` are spelling interiors, not literals. BLOCK is
+# `statement_block` — the ts grammar has no separate `block` kind (no
+# standalone `{}` statement node).
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["function_declaration", "function_signature", "generator_function_declaration", "method_definition", "method_signature", "abstract_method_signature"]
+IDENT = ["identifier"]
+LITERAL = ["false", "null", "number", "regex", "string", "template_string", "true", "undefined"]
+BLOCK = ["statement_block"]

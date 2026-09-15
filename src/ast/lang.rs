@@ -110,7 +110,8 @@ pub struct LangRegistry {
 
 impl LangRegistry {
     /// Register every grammar its cargo feature gated in, in build.rs's
-    /// canonical order (`rust, python, go, javascript, typescript, java, c`).
+    /// canonical order (`rust, python, go, javascript, typescript, tsx,
+    /// java, c` — tsx is the one feature that registers two grammars).
     // The per-language pushes are cfg-gated, so from any single feature
     // set's view the "first" push is conditional — the lint cannot see that.
     #[allow(clippy::vec_init_then_push)]
@@ -151,10 +152,31 @@ impl LangRegistry {
         #[cfg(feature = "lang-typescript")]
         specs.push(LangSpec {
             name: "typescript",
-            extensions: &["ts", "tsx"],
+            extensions: &["ts", "mts", "cts"],
             language: ffi_shim::typescript_language(),
             fixture: include_str!("lang/fixtures/typescript.ts"),
-            trivia: &["comment"],
+            // `html_comment` is measured-in at F9b (KP-6-typescript): the
+            // grammar accepts Annex-B HTML-like comments (`<!-- … -->`) in
+            // plain .ts, as named children between statement siblings —
+            // comment-class, so ADR-0010's table needs both kinds. The
+            // v0.1 seeded table said `comment` only; corrected here.
+            trivia: &["comment", "html_comment"],
+        });
+        // tsx is a second registered language from the same cargo feature
+        // (F9b decision, docs/SCHEMA.md "Language support — typescript"):
+        // the typescript grammar does not parse JSX — measured, a .tsx
+        // file under it yields ERROR nodes, which the apply re-parse gate
+        // would misread as a broken diff — so .tsx routes to the crate's
+        // JSX-bearing superset grammar, with its own kind table; its
+        // trivia table additionally covers `html_comment` *inside* JSX
+        // trees (between jsx_text siblings, measured in the tsx fixture).
+        #[cfg(feature = "lang-typescript")]
+        specs.push(LangSpec {
+            name: "tsx",
+            extensions: &["tsx"],
+            language: ffi_shim::tsx_language(),
+            fixture: include_str!("lang/fixtures/tsx.tsx"),
+            trivia: &["comment", "html_comment"],
         });
         #[cfg(feature = "lang-java")]
         specs.push(LangSpec {
@@ -522,6 +544,275 @@ mod tests {
         assert_eq!(
             umbrella.details(),
             Some(serde_json::json!({ "lang": "python", "kind": "function_item" }))
+        );
+    }
+
+    /// F9b: the go registration is exercised the same way rust's and
+    /// python's are — extension routing (.go, case-insensitive), named-kind
+    /// resolution against the real grammar, and the typed `UnknownKind`
+    /// for a kind go does not know (a rust kind name is the honest probe).
+    #[test]
+    #[cfg(feature = "lang-go")]
+    fn go_registry_resolution_is_typed_and_routed() {
+        let registry = LangRegistry::new();
+        let id = registry
+            .for_extension("go")
+            .expect("lang-go builds register the go grammar");
+        assert_eq!(registry.name(id), Some("go"));
+        assert_eq!(registry.for_extension("GO"), Some(id));
+        assert_eq!(
+            registry.for_path(Path::new("/proj/pkg/widgets.go")),
+            Some(id),
+        );
+
+        // Kind names verified against tree-sitter-go 0.25.0's
+        // node-types.json (the grammar's own symbol table is the source;
+        // these are the norm-table and KP-6-go anchors).
+        for kind in [
+            "source_file",
+            "package_clause",
+            "import_declaration",
+            "import_spec_list",
+            "import_spec",
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "field_identifier",
+            "type_identifier",
+            "package_identifier",
+            "block",
+            "statement_list",
+            "if_statement",
+            "short_var_declaration",
+            "field_declaration_list",
+            "field_declaration",
+            "struct_type",
+            "interface_type",
+            "comment",
+            "int_literal",
+            "interpreted_string_literal",
+        ] {
+            assert!(
+                registry.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "go grammar must know {kind}"
+            );
+        }
+
+        let err = registry
+            .resolve_kind(id, "function_item")
+            .expect_err("a rust kind name is unknown to the go grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "go", "kind": "function_item" }))
+        );
+    }
+
+    /// F9b, E5 fence for go: the kind table is a function of the grammar
+    /// alone — order-independent seeding, round-tripping ids, seeded from
+    /// the bundled fixture corpus (never first-scan bias). The go fixture
+    /// exercises methods with receivers, generics, grouped imports, struct
+    /// tags and select/defer, so the fixture leg cross-checks a real parse.
+    #[test]
+    #[cfg(feature = "lang-go")]
+    fn go_kind_tables_are_order_independent_and_round_trip() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id_a = a.for_extension("go").expect("lang-go builds register go");
+        let id_b = b.for_extension("go").expect("lang-go builds register go");
+
+        let resolved: Vec<u16> = [
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "block",
+            "comment",
+        ]
+        .iter()
+        .map(|kind| {
+            a.resolve_kind(id_a, kind)
+                .expect("kinds the go grammar knows")
+        })
+        .collect();
+        let table_a = a.kind_table(id_a).expect("table seeds at first use");
+
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: go seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 100,
+            "the go grammar carries a real symbol table (112 named kinds)"
+        );
+
+        for (kind, id) in [
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "block",
+            "comment",
+        ]
+        .iter()
+        .zip(resolved)
+        {
+            let name = a.kind_name(id_a, id).expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
+    /// F9b: the typescript registration, and the tsx decision it forces.
+    /// One cargo feature (`lang-typescript`) registers TWO languages:
+    /// `.ts`/`.mts`/`.cts` → `typescript` (no JSX), `.tsx` → `tsx` (the
+    /// crate's JSX-bearing grammar) — measured basis: a .tsx source under
+    /// the typescript grammar yields ERROR nodes, so routing .tsx there
+    /// would make every scan report junk and every valid JSX edit fail
+    /// the apply re-parse gate. The routing fence asserts .tsx does NOT
+    /// resolve to the typescript entry.
+    #[test]
+    #[cfg(feature = "lang-typescript")]
+    fn typescript_and_tsx_registry_resolution_is_typed_and_routed() {
+        let registry = LangRegistry::new();
+        let ts = registry
+            .for_extension("ts")
+            .expect("lang-typescript builds register the typescript grammar");
+        let tsx = registry
+            .for_extension("tsx")
+            .expect("…and the crate's second, JSX-bearing grammar");
+        assert_ne!(ts, tsx, "tsx is its own LangId, not a second extension");
+        assert_eq!(registry.name(ts), Some("typescript"));
+        assert_eq!(registry.name(tsx), Some("tsx"));
+        assert_eq!(registry.for_extension("TS"), Some(ts));
+        assert_eq!(registry.for_extension("MTS"), Some(ts));
+        assert_eq!(registry.for_extension("cts"), Some(ts));
+        assert_eq!(
+            registry.for_path(Path::new("/proj/app/format.ts")),
+            Some(ts),
+        );
+
+        // Kind names verified against tree-sitter-typescript 0.23.2's
+        // node-types.json (both grammars' symbol tables; these are the
+        // norm-table and KP-6-typescript anchors).
+        for kind in [
+            "program",
+            "function_declaration",
+            "generator_function_declaration",
+            "function_signature",
+            "class_declaration",
+            "abstract_class_declaration",
+            "interface_declaration",
+            "interface_body",
+            "property_signature",
+            "method_signature",
+            "abstract_method_signature",
+            "method_definition",
+            "decorator",
+            "arrow_function",
+            "function_expression",
+            "lexical_declaration",
+            "variable_declarator",
+            "type_annotation",
+            "statement_block",
+            "identifier",
+            "type_identifier",
+            "property_identifier",
+            "import_statement",
+            "export_statement",
+            "comment",
+            "hash_bang_line",
+        ] {
+            assert!(
+                registry.resolve_kind(ts, kind).is_ok_and(|k| k != 0),
+                "typescript grammar must know {kind}"
+            );
+        }
+
+        // The tsx grammar is a superset: every typescript kind above
+        // resolves there too, plus the JSX surface.
+        for kind in ["jsx_element", "jsx_self_closing_element", "html_comment"] {
+            assert!(
+                registry.resolve_kind(tsx, kind).is_ok_and(|k| k != 0),
+                "tsx grammar must know {kind}"
+            );
+        }
+
+        // The honest probe in both directions: a rust kind name is
+        // unknown to each grammar.
+        for id in [ts, tsx] {
+            let err = registry
+                .resolve_kind(id, "function_item")
+                .expect_err("a rust kind name is unknown to the ts grammars");
+            assert!(matches!(err, DslError::UnknownKind { .. }));
+            let umbrella: JanitorError = err.into();
+            assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+            assert_eq!(
+                umbrella.details(),
+                Some(serde_json::json!({
+                    "lang": registry.name(id).unwrap_or_default(),
+                    "kind": "function_item"
+                }))
+            );
+        }
+    }
+
+    /// F9b, E5 fence for typescript and tsx: kind tables are functions of
+    /// their grammars alone — order-independent seeding, round-tripping
+    /// ids — and the two grammars' tables genuinely differ (the tsx table
+    /// carries the JSX kinds the typescript table lacks).
+    #[test]
+    #[cfg(feature = "lang-typescript")]
+    fn typescript_and_tsx_kind_tables_are_independent_and_round_trip() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let ts_a = a.for_extension("ts").expect("typescript registered");
+        let ts_b = b.for_extension("ts").expect("typescript registered");
+        let tsx_a = a.for_extension("tsx").expect("tsx registered");
+
+        let resolved: Vec<u16> = [
+            "function_declaration",
+            "identifier",
+            "statement_block",
+            "comment",
+        ]
+        .iter()
+        .map(|kind| {
+            a.resolve_kind(ts_a, kind)
+                .expect("kinds the typescript grammar knows")
+        })
+        .collect();
+        let table_a = a.kind_table(ts_a).expect("table seeds at first use");
+        let table_b = b.kind_table(ts_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: typescript seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 150,
+            "the typescript grammar carries a real symbol table (183 named kinds)"
+        );
+
+        for (kind, id) in [
+            "function_declaration",
+            "identifier",
+            "statement_block",
+            "comment",
+        ]
+        .iter()
+        .zip(resolved)
+        {
+            let name = a.kind_name(ts_a, id).expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+
+        // The two grammars' tables differ where it matters: the JSX
+        // kinds are id-known to tsx, absent from typescript.
+        let tsx_table = a.kind_table(tsx_a).expect("tsx table seeds");
+        assert_ne!(table_a, tsx_table, "two grammars, two tables");
+        assert!(
+            tsx_table.len() > table_a.len(),
+            "tsx's symbol table is the superset (191 vs 183 named kinds)"
         );
     }
 

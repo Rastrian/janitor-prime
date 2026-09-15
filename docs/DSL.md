@@ -8,10 +8,11 @@ error you get back is documented in [§7](#7-error-codes-the-full-table)
 with a fixing recipe.
 
 * Schema version: `janitor.v1`
-* Languages: **rust** is the supported, CI-tested language of v0.1. Other
-  grammars (python, go, javascript, typescript, java, c) may be enabled at
-  build time; kind-name behavior for them follows [§4](#4-kinds-per-language)
-  and their trivia tables are seeded but not yet conformance-tested (F9).
+* Languages: **rust**, **python**, **go**, and **typescript/tsx** are the
+  supported, CI-tested languages (see §11–§13). The remaining grammars
+  (javascript, java, c) may be enabled at build time; kind-name behavior
+  for them follows [§4](#4-kinds-per-language) and their trivia tables are
+  seeded but not yet conformance-tested (future F9 waves).
 * A rule describes **structure** — node kinds and their adjacency — never
   text. There is no regex, no string matching, no field names in v0.1.
 
@@ -198,8 +199,10 @@ vocabulary in v0.1. Resolution follows one behavior:
    silent zero-match. Restricting the run with `--lang rust` scopes both
    the scan and this accounting.
 3. The `--lang` flag accepts exactly the canonical names (`rust`, `python`,
-   `go`, `javascript`, `typescript`, `java`, `c`); a name whose grammar is
-   not in the build fails with `E_PARSE_NO_GRAMMAR_FOR_LANG`.
+   `go`, `javascript`, `typescript`, `tsx`, `java`, `c`); a name whose
+   grammar is not in the build fails with `E_PARSE_NO_GRAMMAR_FOR_LANG`.
+   (`typescript` and `tsx` are two names for the two grammars one cargo
+   feature registers — see [§13](#13-typescript--tsx-v02-f9b)).
 
 Kind matching in the hot loop is by integer kind id, but that is invisible
 to rule authors: you always write names, reports always carry both `kind`
@@ -217,7 +220,8 @@ real matches wherever comments are idiomatic). The filter applies in
   matches `a /*c*/ b`.
 * `--strict-trivia` (`trivia: "strict"`): trivia kinds stay in the sibling
   list — a comment between two pattern siblings breaks the sequence.
-* Trivia kinds per grammar (v0.1 table):
+* Trivia kinds per grammar (KP-6-measured table; go/typescript/tsx
+  pinned at F9b, the rest seeded and awaiting their F9 wave):
 
 | language    | trivia kinds                      |
 |-------------|-----------------------------------|
@@ -225,7 +229,8 @@ real matches wherever comments are idiomatic). The filter applies in
 | python      | `comment`                         |
 | go          | `comment`                         |
 | javascript  | `comment`                         |
-| typescript  | `comment`                         |
+| typescript  | `comment`, `html_comment`         |
+| tsx         | `comment`, `html_comment`         |
 | java        | `line_comment`, `block_comment`   |
 | c           | `comment`                         |
 
@@ -538,3 +543,182 @@ comments between methods — real code, really unmatchable byte-strict.
 - Import groups: `import x` and `from x import y` are *different kinds*
   (`import_statement` vs `import_from_statement`) — a rule over an
   import group that mixes both needs `any-of`.
+
+---
+
+## 12. Go (v0.2, F9b) — kinds, trivia, and worked examples
+
+Go is fully supported and CI-tested alongside rust and python
+(`--features lang-go`). Everything in §1–§11 applies verbatim; this
+section gives the go-specific kind names and two worked examples with
+measured counts.
+
+**Common go kinds** (tree-sitter-go 0.25.0): `source_file` (the root),
+`package_clause`, `function_declaration` (plain functions),
+`method_declaration` (methods — the name child is a `field_identifier`,
+not an `identifier`), `identifier`, `type_identifier` (types),
+`field_identifier` (struct fields and method names), `block` (a braced
+body — it wraps a single `statement_list`), `statement_list` (**the**
+statement-adjacency scope), `if_statement`, `short_var_declaration`
+(the `v, ok := …` init inside an if), `field_declaration_list` /
+`field_declaration` (struct bodies and fields; tags are
+`raw_string_literal` children), `import_declaration` >
+`import_spec_list` > `import_spec`, `type_declaration` > `type_spec`,
+`comment`, `int_literal` / `float_literal` / `interpreted_string_literal`
+/ `raw_string_literal` / `rune_literal` / `imaginary_literal` (and the
+named `true`/`false`/`nil` leaves).
+
+**Trivia** (§5): go's table is `comment` only — line and block comments
+are the same kind. Two distinctive measured facts: same-line comments
+are legal go between declaration children (`func (t T) /* note */ Name()`,
+`if ok /* why */ {`) and land as named siblings, exactly like comments
+on their own line; and the else-if chain is same-line, so no comment can
+ever sit between its blocks. Measured (KP-6-go): comment-skipping is
+load-bearing — byte-strict loses 50% of file-level function-adjacency
+pairs on the bundled module.
+
+### Example 1 — doc-comment-above-func (the go file shape)
+
+Every exported go function carries a doc comment, which parks between it
+and the previous declaration as a named sibling of `source_file`:
+
+```scheme
+(under source_file
+  (seq (kind function_declaration) (kind function_declaration)))
+```
+
+Match counts on the KP-6-go curated snippet
+(`tests/fixtures/kp6_go/doc_func_pair.go`): **strict 1, skip 2** — the
+documented pair is invisible byte-strict. Over the bundled module
+(`tests/fixtures/go/`): **strict 2, skip 4**.
+
+To capture the name of every plain function (methods need
+`field_identifier` — see below):
+
+```scheme
+(under function_declaration
+  (seq (capture @fn identifier) parameter_list))
+```
+
+### Example 2 — refactor rule (find methods whose receiver is unused)
+
+The method-with-receiver shape, scoped inside `method_declaration` —
+the receiver is the leading `parameter_list`, the name a
+`field_identifier`:
+
+```scheme
+(under method_declaration
+  (seq (kind parameter_list) (capture @name field_identifier) (kind parameter_list)))
+```
+
+This matches every method that has a receiver, a name, and a parameter
+list (the `(capture @name field_identifier)` binds the method name for
+the report). The same-line-comment subtlety: a `/* role */` note between
+receiver and name is legal go and a named sibling — strict loses that
+method, skip keeps it (measured in `tests/kp6_go.rs`).
+
+### Go authoring notes
+
+- **Statement adjacency scopes to `statement_list`**, not `block`: a go
+  `block` has exactly one named child. `(under block …)` matches
+  nothing; write `(under statement_list …)`.
+- Methods are `method_declaration`, and their names are
+  `field_identifier`s — a name-capturing rule over methods must name
+  that kind (the norm table's FUNCTION covers both kinds; IDENT does
+  not cover `field_identifier`).
+- Struct fields and grouped imports are adjacency scopes too:
+  `field_declaration_list` and `import_spec_list` are where field and
+  import notes park as named siblings.
+- `true`/`false`/`nil` are named leaves in go (unlike rust, where they
+  are one `boolean_literal`); LITERAL rules see them per-kind.
+
+---
+
+## 13. TypeScript + TSX (v0.2, F9b) — kinds, trivia, and worked examples
+
+TypeScript is fully supported and CI-tested (`--features
+lang-typescript`), and the feature registers **two** languages:
+`typescript` (`.ts`/`.mts`/`.cts`) and `tsx` (`.tsx`). The split is
+measured, not stylistic: the plain typescript grammar does not parse
+JSX — a `.tsx` file under it yields `ERROR` nodes — so `.tsx` routes to
+the crate's second grammar, with its own kind table. A single scan over
+a mixed module compiles the rule per grammar and reports both. The norm
+table (`lang/typescript.norm.toml`) is shared, and every kind in it is
+conformance-checked against both grammars.
+
+**Common kinds** (tree-sitter-typescript 0.23.2): `program` (the root),
+`export_statement` (wraps most top-level declarations; a decorator is a
+sibling of the class inside it), `function_declaration`,
+`generator_function_declaration`, `method_definition` (class bodies),
+`method_signature` (interface members), `abstract_method_signature`,
+`function_signature` (ambient/overloads), `arrow_function`,
+`lexical_declaration` > `variable_declarator` (with `type_annotation`
+as a named sibling of the name), `interface_declaration` >
+`interface_body` > `property_signature`, `class_declaration` >
+`class_body` > `method_definition`, `import_statement`, `decorator`,
+`statement_block` (bodies — there is no separate `block` kind),
+`identifier`, `type_identifier`, `property_identifier` (member names),
+`comment`, `number`/`string`/`template_string`/`regex`/`true`/`false`/
+`null`/`undefined`.
+
+**Trivia** (§5): the table is `comment` **and** `html_comment`, for
+both languages. The grammar accepts Annex-B HTML-like comments
+(`<!-- … -->`) in plain `.ts` as named siblings between statements, and
+inside tsx they also park between `jsx_text` siblings. `hash_bang_line`
+is a named program child but only ever at index 0 — never between
+siblings — so it is NOT in the table. Measured (KP-6-typescript):
+byte-strict loses 50% of exported-declaration adjacency pairs on the
+bundled module.
+
+### Example 1 — JSDoc-above-function (the module shape)
+
+```scheme
+(under program
+  (seq (kind export_statement) (kind export_statement)))
+```
+
+Exported-declaration adjacency over the bundled module
+(`tests/fixtures/typescript/`): **strict 2, skip 4** — each file's
+JSDoc/divider comments hide one pair from byte-strict. To capture
+function names instead:
+
+```scheme
+(under function_declaration
+  (seq (capture @fn identifier) formal_parameters))
+```
+
+(this unwraps `export_statement` — the function is an ordinary child
+inside it — and works unchanged under the tsx grammar).
+
+### Example 2 — refactor rule (decorated classes to audit)
+
+```scheme
+(under export_statement
+  (seq (kind decorator) (capture @cls class_declaration)))
+```
+
+The decorator and the class are named siblings inside the
+`export_statement` — a comment between them is legal typescript and
+hides the pair from byte-strict (measured: strict 1, skip 2 on the
+KP-6-typescript curated snippet).
+
+### TypeScript authoring notes
+
+- Top-level functions usually live inside `export_statement`: scope
+  module-level adjacency rules to `export_statement` pairs, and scope
+  name/parameter/body rules to the inner `function_declaration` (it
+  works inside the wrapper, like python's defs inside
+  `decorated_definition`).
+- Interface member style never matters: `;` and newline separators are
+  anonymous tokens, equally invisible. Comments between members are
+  the only separator that bites (strict loses the pair).
+- `arrow_function` and `function_expression` are expression-position
+  functions and are NOT the norm table's FUNCTION (the python `lambda`
+  precedent); `function_type` is a type, not a function.
+- `.d.ts` shapes: `function_signature` and `abstract_method_signature`
+  are declaration-position FUNCTIONs; a rename rule that misses them is
+  incomplete — the norm table includes them for exactly that reason.
+- In `.tsx` files the JSX surface (`jsx_element`, `jsx_self_closing_element`,
+  `jsx_text`, `html_comment`) is addressable like any other kind;
+  `{/* … */}` is a plain `comment` inside a `jsx_expression`, while a
+  bare `<!-- … -->` is an `html_comment` between `jsx_text` siblings.

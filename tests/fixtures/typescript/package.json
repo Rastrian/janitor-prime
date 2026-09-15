@@ -1,0 +1,6 @@
+{
+  "name": "shapes-ts",
+  "private": true,
+  "type": "module",
+  "main": "src/report.ts"
+}

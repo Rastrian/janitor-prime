@@ -22,24 +22,28 @@ with 100% JSON output and zero network calls:
 
 [tree-sitter]: https://tree-sitter.github.io/
 
-## Status: v0.1.0 + python (F9a)
+## Status: v0.1.0 + python, go, typescript (F9)
 
 Shipped: `init` · `wake` · `scan` · `apply` · `note` · `nap` — the full agent
 loop, end-to-end tested through the real binary. ~180 tests + no-panic fuzz
 targets + determinism/determinism-of-output fences in CI; musl/gnu × x86_64/
 aarch64 + macOS release matrix.
 
-Languages: **rust** and **python** are fully supported — both CI-tested
-end-to-end on every PR (`cargo test` and `cargo test --features lang-python`):
-registry/kind resolution, the KP-6 trivia corpus (ADR-0010's comment-skipping
-default measured per language), normalized-vocabulary norm tables
-(`lang/*.norm.toml`), the full agent-loop acceptance test, and the
-thread-count determinism fence all run for both. The other five grammars
-(go/js/ts/java/c) compile and register; their enablement follows the same
-recipe.
+Languages: **rust**, **python**, **go**, and **typescript** (+ **tsx**) are
+fully supported — all CI-tested end-to-end on every PR (`cargo test`,
+`cargo test --features lang-python`, `--features lang-go`, and
+`--features lang-typescript`): registry/kind resolution, the KP-6 trivia
+corpus (ADR-0010's comment-skipping default measured per language),
+normalized-vocabulary norm tables (`lang/*.norm.toml`), the full agent-loop
+acceptance test, and the thread-count determinism fence all run for each.
+The `lang-typescript` feature registers two grammars — `.ts` routes to
+`typescript`, `.tsx` to `tsx` (the plain grammar errors on JSX; measured).
+The other three grammars (js/java/c) compile and register; their enablement
+follows the same recipe.
 
-Known limits (honest): `Unify` (duplicate detection) is v0.2; the five
-remaining grammars are compile-and-register only until their F9 wave; no LSP,
+Known limits (honest): the three
+remaining grammars (js/java/c) are compile-and-register only until their F9
+wave; no LSP,
 no watch mode, no daemon; linux + macOS only. The measured-numbers changelog
 is in [CHANGELOG.md](CHANGELOG.md); the authoritative plan with every decision
 and kill-point result is [docs/planning/PLAN.md](docs/planning/PLAN.md).
@@ -51,13 +55,13 @@ Download the static binary from [releases](https://github.com/Rastrian/janitor-p
 
 ```sh
 cargo build --release          # rust grammar (default)
-cargo build --release --features lang-all   # all 7 grammars
+cargo build --release --features lang-all   # all 8 grammars
 ```
 
 Every release artifact answers `--version` with the embedded grammar list:
 
 ```json
-{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","java","c"]}}
+{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","tsx","java","c"]}}
 ```
 
 ## Use cases
@@ -207,7 +211,7 @@ success, `1` operational error, `2` usage error.
 
 ```sh
 cargo build                                  # default: rust grammar only
-cargo build --features lang-all              # all 7 grammars
+cargo build --features lang-all              # all 8 grammars
 cargo build --no-default-features
 cargo test --all-features                    # full matrix
 ```
@@ -219,9 +223,10 @@ Grammars are cargo features: `lang-rust` (default), `lang-python`,
 ## Roadmap
 
 - **v0.2** — `Unify` (cross-match unification / duplicate detection via
-  Merkle fingerprints, ADR-0010 equivalence); multi-language runtime support
-  **started with python (F9a, shipped)** — go/typescript next, following the
-  same enablement recipe (registry tests, trivia corpus, norm table, e2e).
+  Merkle fingerprints, ADR-0010 equivalence) **shipped (F8)**; multi-language
+  runtime support **shipped for python (F9a), go and typescript/tsx (F9b)** —
+  javascript/java/c follow the same enablement recipe (registry tests,
+  trivia corpus, norm table, e2e).
 - **v0.2+** — LSP surface, watch mode, warm parse cache/daemon (F10).
 - **KP-11 (the project's own kill-point)** — a one-week dogfood: an agent
   running `wake → scan → apply → note` on a real repo vs a git-worktree +
