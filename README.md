@@ -54,9 +54,25 @@ per-language caveats (ruby's `heredoc_body` parking between statements;
 ocaml's right-nested `let..in` chains; elixir's `call`-shaped def
 clauses) are documented in docs/DSL.md §12–§15 and docs/SCHEMA.md.
 
+**F10a (v0.2): the warm-cache daemon.** `janitor daemon` runs a long-lived
+process over one workspace: a Unix-socket server (`$JANITOR_SOCK` or
+`/tmp/janitor-$UID.sock`, perms 0600, same `janitor.v1` envelope —
+`scan`/`duplicates`/`ping`/`stats`/`shutdown`) plus a polling watcher that
+incrementally re-parses changed files between requests. `janitor scan
+--daemon` routes through it when it answers `ping` for this workspace and
+falls back to the in-process path silently otherwise. The warm cache is
+bounded (`--max-cache-mb`, default 512, LRU eviction) and every served
+entry is re-validated against live bytes (Rule T4) — the watcher is an
+optimization, never a correctness dependency. Design record:
+ADR-0018; protocol reference: docs/SCHEMA.md § The daemon. Still no
+async runtime (thread-per-connection on the existing rayon pool) and
+still zero network — a Unix domain socket is kernel-local IPC, not a
+dial-out.
+
 Known limits (honest): the three remaining grammars (js/java/c) are
-compile-and-register only until their F9 wave; no LSP,
-no watch mode, no daemon; linux + macOS only. The measured-numbers changelog
+compile-and-register only until their F9 wave; no LSP; `apply` stays
+CLI-only (not socket-exposed, ADR-0018 D5); linux + macOS only. The
+measured-numbers changelog
 is in [CHANGELOG.md](CHANGELOG.md); the authoritative plan with every decision
 and kill-point result is [docs/planning/PLAN.md](docs/planning/PLAN.md).
 
@@ -182,8 +198,9 @@ stateDiagram-v2
 |---|---|---|
 | `janitor init` | create `.janitor/` in the target repo | memory skeleton + STATE.json |
 | `janitor wake --budget N` | load context within a token budget | `estimator:"chars4"`; `E_NAP_PENDING` if a compression is owed; locks always raw |
-| `janitor scan --rule "..."` | structural search | ADR-0016 semantics: local maxima, overlap flags, canonical order; `--include-virtual` default OFF; binary/oversized files reported as skipped |
+| `janitor scan --rule "..."` | structural search | ADR-0016 semantics: local maxima, overlap flags, canonical order; `--include-virtual` default OFF; binary/oversized files reported as skipped; `--daemon` routes through the warm-cache daemon when reachable (silent in-process fallback, ADR-0018) |
 | `janitor apply --diff '...'` | staged, validated, all-or-nothing edits | `--dry-run` available; typed refusals carry retryable coordinates |
+| `janitor daemon` | warm-cache daemon over a Unix socket (F10a) | 0600 socket, workspace-pinned paths, LRU-bounded cache, idle death, stale-socket recovery; `ping`/`stats` carry hit/miss + eviction + watcher counters |
 | `janitor note --ptr ... "text"` | persist an anchored fact | ≤ 280 bytes; re-anchors across edits; `E_POINTER_DANGLING` for invented code |
 | `janitor nap` / `nap --slot lo-hi --text "..."` | compression protocol | the agent writes the summary; out-of-order and over-length slots refused; idempotent resubmission |
 
@@ -274,8 +291,11 @@ the workspace/no-traversal rules: [docs/MCP.md](docs/MCP.md).
   Merkle fingerprints, ADR-0010 equivalence) **shipped (F8)**; multi-language
   runtime support **shipped for python (F9a), go and typescript/tsx (F9b)** —
   javascript/java/c follow the same enablement recipe (registry tests,
-  trivia corpus, norm table, e2e).
-- **v0.2+** — LSP surface, watch mode, warm parse cache/daemon (F10).
+  trivia corpus, norm table, e2e); the **warm-cache daemon + watch mode
+  shipped (F10a, ADR-0018)**.
+- **v0.2+** — LSP surface; socket-side `apply`; inotify-backed watching
+  (the detection seam is already isolated); disk parse cache (still
+  reserved, ADR-0007).
 - **KP-11 (the project's own kill-point)** — a one-week dogfood: an agent
   running `wake → scan → apply → note` on a real repo vs a git-worktree +
   ast-grep baseline. If the loop does not measurably reduce broken edits or

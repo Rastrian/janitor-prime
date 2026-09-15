@@ -77,6 +77,10 @@ pub struct ScanParams {
     pub strict_trivia: bool,
     /// Files above this many bytes are skipped with `reason: "size"`.
     pub max_file_size: u64,
+    /// Keep each file's `ParseEntry` after its report is collected instead
+    /// of evicting it (default `false` — ADR-0007's streaming discipline;
+    /// the daemon, F10a/ADR-0018 D4, flips it for its warm process).
+    pub retain_cache: bool,
 }
 
 impl ScanParams {
@@ -89,6 +93,7 @@ impl ScanParams {
             include_virtual: false,
             strict_trivia: false,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
+            retain_cache: false,
         }
     }
 }
@@ -333,8 +338,9 @@ pub fn scan(
                 matchset::flag_overlaps(&mut reports);
 
                 // Collection is the only cache-touching moment; streaming
-                // eviction keeps retention at the working set (ADR-0007).
-                evict_after_use(cache, &key, &entry);
+                // eviction keeps retention at the working set (ADR-0007)
+                // unless the caller retains warmth (the daemon, F10a).
+                finish_cache_use(cache, &key, &entry, params.retain_cache);
 
                 Ok((
                     candidate,
@@ -420,6 +426,9 @@ pub struct DuplicatesParams {
     /// Minimum subtree size, in participating nodes (comment- and
     /// formatting-invariant), for a subtree to be groupable.
     pub min_size: u32,
+    /// Keep entries warm after collection (the daemon's shape; default
+    /// `false` — ADR-0007 streaming, F10a/ADR-0018 D4).
+    pub retain_cache: bool,
 }
 
 impl DuplicatesParams {
@@ -431,6 +440,7 @@ impl DuplicatesParams {
             include_virtual: false,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             min_size: DEFAULT_MIN_DUPLICATE_SIZE,
+            retain_cache: false,
         }
     }
 }
@@ -616,8 +626,9 @@ pub fn duplicates(
                 };
 
                 // Collection is the only cache-touching moment; streaming
-                // eviction keeps retention at the working set (ADR-0007).
-                evict_after_use(cache, &key, &entry);
+                // eviction keeps retention at the working set (ADR-0007)
+                // unless the caller retains warmth (the daemon, F10a).
+                finish_cache_use(cache, &key, &entry, params.retain_cache);
 
                 Ok((candidate, Outcome::Hit(scanned)))
             },
@@ -840,12 +851,22 @@ fn read_parse_entry(
     Ok(ReadParsed::Entry { bytes, key, entry })
 }
 
-/// The streaming-eviction epilogue (ADR-0007 / ADR-0016 (7)): collection
-/// is the only cache-touching moment, and the entry is dropped right after
-/// its report is collected.
-fn evict_after_use(cache: &ParseCache, key: &crate::vfs::VfsPath, entry: &ParseEntry) {
+/// The cache epilogue (ADR-0007 / ADR-0016 (7)): collection is the only
+/// cache-touching moment. The default is streaming — the entry lands in the
+/// cache and is dropped right after its report is collected, so the process
+/// never retains O(repo) bytes+trees. `retain` (the daemon, F10a/ADR-0018
+/// D4) keeps the entry warm: the insert stamps LRU recency and enforces the
+/// cache's bound, and the next scan of the same unchanged file hits.
+fn finish_cache_use(
+    cache: &ParseCache,
+    key: &crate::vfs::VfsPath,
+    entry: &ParseEntry,
+    retain: bool,
+) {
     cache.insert(key.clone(), entry.clone());
-    cache.take(key);
+    if !retain {
+        cache.take(key);
+    }
 }
 
 /// The walk/classification phase shared by rule scans and the duplicates

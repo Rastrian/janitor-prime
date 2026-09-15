@@ -90,6 +90,15 @@ fn collect_error_reports(root: Node<'_>, out: &mut Vec<ErrorReport>) {
     }
 }
 
+/// Whole-tree node count (F10a): one pooled-cursor walk, the basis of a
+/// [`crate::ast::cache::ParseEntry`]'s retained-cost estimate — the daemon's
+/// LRU bound (`--max-cache-mb`, ADR-0018 D4) accounts trees, not just source
+/// bytes, because the tree is the dominant retention cost of a warm entry.
+pub fn node_count(root: Node<'_>) -> u64 {
+    let mut pool = CursorPool::new();
+    pool.dfs(root).count() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

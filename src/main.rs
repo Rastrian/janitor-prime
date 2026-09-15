@@ -39,6 +39,7 @@ fn main() -> ExitCode {
         Some(Command::Note(args)) => run_note(args, cli.pretty),
         Some(Command::Nap(args)) => run_nap(args, cli.pretty),
         Some(Command::Mcp(args)) => run_mcp(args),
+        Some(Command::Daemon(args)) => run_daemon(args, cli.pretty),
         None => {
             let usage = Envelope::error(
                 "E_USAGE",
@@ -56,9 +57,27 @@ fn main() -> ExitCode {
 /// `janitor scan`: one session, one scan, one envelope — success carries
 /// the report `data`; every typed failure maps through the envelope. F8
 /// adds the second mode: `--duplicates` (fingerprint-grouped duplicate
-/// detection, docs/SCHEMA.md) instead of `--rule`.
+/// detection, docs/SCHEMA.md) instead of `--rule`. F10a adds `--daemon`:
+/// opt-in routing through the warm-cache daemon when its socket answers
+/// `ping` for this workspace, silent in-process fallback otherwise
+/// (ADR-0018 D7).
 fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
-    let root = args.path.unwrap_or_else(|| std::path::PathBuf::from("."));
+    let root = args
+        .path
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if args.daemon {
+        if let Some(response) = daemon_route(&args, &root) {
+            let ok = response.get("ok").and_then(serde_json::Value::as_bool);
+            let code = if ok == Some(true) {
+                EXIT_SUCCESS
+            } else {
+                janitor_prime::envelope::EXIT_OPERATIONAL
+            };
+            return emit_json(&response, pretty, code);
+        }
+        tracing::debug!("daemon unreachable; running in-process");
+    }
     let session = Session::new();
     // clap's scan-mode group guarantees exactly one of --rule/--duplicates;
     // the total match keeps future callers honest instead of inventing a
@@ -71,6 +90,7 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 include_virtual: args.include_virtual,
                 max_file_size: args.max_file_size,
                 min_size: args.min_size,
+                retain_cache: false,
             };
             match session.duplicates(&params) {
                 Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
@@ -85,6 +105,7 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 include_virtual: args.include_virtual,
                 strict_trivia: args.strict_trivia,
                 max_file_size: args.max_file_size,
+                retain_cache: false,
             };
             match session.scan(&params) {
                 Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
@@ -180,6 +201,87 @@ fn read_file_bytes(path: &str) -> Result<Vec<u8>, JanitorError> {
 fn emit_error(err: JanitorError, pretty: bool) -> ExitCode {
     let envelope: Envelope<serde_json::Value> = err.into();
     cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)
+}
+
+/// The `--daemon` routing decision (ADR-0018 D7): build the socket request
+/// from the CLI flags and hand it to the client's router — `None` means
+/// "no daemon for this workspace", the caller falls back in-process.
+fn daemon_route(args: &cli::ScanArgs, root: &std::path::Path) -> Option<serde_json::Value> {
+    let sock = janitor_prime::daemon::protocol::default_sock_path();
+    let mut request = if args.duplicates {
+        let mut request =
+            janitor_prime::daemon::protocol::Request::duplicates(Some(root.display().to_string()));
+        request.min_size = Some(args.min_size);
+        request
+    } else {
+        janitor_prime::daemon::protocol::Request::scan(
+            args.rule.clone().unwrap_or_default(),
+            Some(root.display().to_string()),
+        )
+    };
+    request.lang = args.lang.clone();
+    request.include_virtual = args.include_virtual;
+    request.max_file_size = Some(args.max_file_size);
+    if args.strict_trivia {
+        request.strict_trivia = true;
+    }
+    janitor_prime::daemon::client::route_request(
+        &sock,
+        root,
+        &request,
+        janitor_prime::daemon::client::PING_TIMEOUT,
+    )
+}
+
+/// Re-emit a daemon response envelope verbatim (it already IS a janitor.v1
+/// envelope; stdout stays 100% JSON either way).
+fn emit_json(value: &serde_json::Value, pretty: bool, code: u8) -> ExitCode {
+    let text = if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    };
+    let mut text = match text {
+        Ok(text) => text,
+        Err(err) => {
+            tracing::error!(%err, "response re-serialization failed");
+            return ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL);
+        }
+    };
+    text.push('\n');
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => ExitCode::from(code),
+        Err(err) => {
+            tracing::error!(%err, "stdout emission failed");
+            ExitCode::from(janitor_prime::envelope::EXIT_OPERATIONAL)
+        }
+    }
+}
+
+/// `janitor daemon` (F10a, ADR-0018): run until shutdown or idle; exactly
+/// two envelope lines on stdout (startup + exit), everything else on the
+/// socket or stderr.
+fn run_daemon(args: cli::DaemonArgs, pretty: bool) -> ExitCode {
+    let config = janitor_prime::daemon::DaemonConfig {
+        workspace: args
+            .workspace
+            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        sock: args
+            .sock
+            .unwrap_or_else(janitor_prime::daemon::protocol::default_sock_path),
+        interval: std::time::Duration::from_secs(args.interval),
+        max_cache_bytes: args.max_cache_mb * 1024 * 1024,
+        idle: std::time::Duration::from_secs(args.idle_secs),
+    };
+    match janitor_prime::daemon::run(config, pretty) {
+        Ok(()) => ExitCode::from(EXIT_SUCCESS),
+        Err(err) => emit_error(err, pretty),
+    }
 }
 
 /// `janitor init [--force]` (F6.7): one session, one skeleton.

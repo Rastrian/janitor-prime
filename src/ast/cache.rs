@@ -23,12 +23,21 @@
 //! dashmap×rayon insertion rule (ADR-0016 note 7): workers never hold shard
 //! guards across a `par_iter` join — `get` scopes its guard to the clone
 //! and inserts happen at collection. The race test pins both.
+//!
+//! **F10a (ADR-0018):** the cache grows an optional warm shape — exact
+//! hit/miss counters, and a byte bound with LRU eviction over accounted
+//! entry cost (snapshot bytes + tree estimate). The CLI stays unbounded +
+//! streaming bit-for-bit; only the daemon binds a budget and retains
+//! entries across scans.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use serde::Serialize;
 
 use crate::ast::errors::error_count;
 use crate::ast::ffi_shim::Tree;
@@ -57,7 +66,16 @@ pub struct ParseEntry {
     /// it runs on first use and never for rule-only scans. Shared across
     /// clones (one table per parse, however the entry travels).
     fingerprints: Arc<OnceLock<Arc<FingerprintTable>>>,
+    /// Lazily-computed node count (F10a, ADR-0018 D4): the retained-cost
+    /// estimate's tree leg. Once set, it propagates to later clones.
+    nodes: OnceLock<u64>,
 }
+
+/// The per-node share of a tree's retained memory a warm entry is charged
+/// (ADR-0018 D4): tree-sitter stores each subtree inline in the tree's node
+/// arena; ~16 B/slot is the documented approximation. The bound is a
+/// *budget over accounted bytes*, an honest estimate — not an RSS promise.
+pub const TREE_BYTES_PER_NODE: u64 = 16;
 
 impl ParseEntry {
     /// Pin a fresh parse: computes `error_count` and the content hash here
@@ -71,7 +89,18 @@ impl ParseEntry {
             tree: Arc::new(tree),
             error_count,
             fingerprints: Arc::new(OnceLock::new()),
+            nodes: OnceLock::new(),
         }
+    }
+
+    /// The entry's retained-cost estimate (ADR-0018 D4): snapshot bytes
+    /// plus the tree's accounted share. Computed once (the C-level
+    /// descendant count is a walk), then cached.
+    pub fn cost_bytes(&self) -> u64 {
+        let nodes = *self
+            .nodes
+            .get_or_init(|| self.tree.root_node().descendant_count() as u64);
+        self.bytes.len() as u64 + TREE_BYTES_PER_NODE * nodes
     }
 
     /// The entry's Merkle fingerprint table, computed on first use against
@@ -96,19 +125,84 @@ impl ParseEntry {
     }
 }
 
-/// The in-process parse cache (ADR-0007: no disk cache in v0.1; cold each
-/// CLI invocation). Concurrent-safe for rayon workers under the ADR-0016
-/// insertion rule — shard guards are held only to clone in [`Self::get`].
+/// One cache slot: the entry plus its LRU tick (monotonic; refreshed on
+/// [`ParseCache::get`] and stamped on insert — the recency the daemon's
+/// bound evicts by, ADR-0018 D4).
+#[derive(Clone, Debug)]
+struct Slot {
+    entry: ParseEntry,
+    tick: u64,
+}
+
+/// The in-process parse cache (ADR-0007: no disk cache; cold each CLI
+/// invocation — the daemon, F10a/ADR-0018, is the warm process). Concurrent-
+/// safe for rayon workers under the ADR-0016 insertion rule — shard guards
+/// are held only to clone/tick in [`Self::get`].
+///
+/// F10a additions (all additive; the CLI's unbounded + streaming shape is
+/// unchanged): exact hit/miss counters, and an optional **byte bound** with
+/// LRU eviction over accounted entry cost. An unbounded cache (the CLI)
+/// never computes costs or sweeps — zero overhead on the cold path; a
+/// bounded cache (the daemon) pays one cost computation per retained entry.
 pub struct ParseCache {
-    entries: DashMap<VfsPath, ParseEntry>,
+    entries: DashMap<VfsPath, Slot>,
+    /// Monotonic LRU clock.
+    tick: AtomicU64,
+    /// `None` = unbounded (the CLI; the streaming discipline is the bound).
+    bound_bytes: Option<u64>,
+    /// Running accounted-bytes total, maintained only when bounded.
+    total_cost: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+}
+
+/// A cache's stats snapshot (the daemon's `ping`/`stats` payload, ADR-0018).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct CacheStats {
+    pub entries: usize,
+    /// Accounted bytes (snapshot + tree estimate); 0-semantics honest only
+    /// for a bounded cache — the CLI's streaming cache stays ~empty.
+    pub bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub bound_bytes: Option<u64>,
 }
 
 impl ParseCache {
-    /// An empty cache.
+    /// An empty, unbounded cache (the CLI's shape — the streaming
+    /// discipline is the bound, ADR-0007).
     pub fn new() -> Self {
+        Self::unbounded()
+    }
+
+    /// An empty cache with no bound.
+    pub fn unbounded() -> Self {
         Self {
             entries: DashMap::new(),
+            tick: AtomicU64::new(0),
+            bound_bytes: None,
+            total_cost: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
+    }
+
+    /// An empty cache bounded to `max_bytes` accounted bytes: inserts
+    /// evict least-recently-used entries until the total fits (ADR-0018
+    /// D4). Eviction is free for correctness — nothing is ever locked; a
+    /// later query just re-parses.
+    pub fn bounded(max_bytes: u64) -> Self {
+        Self {
+            bound_bytes: Some(max_bytes),
+            ..Self::unbounded()
+        }
+    }
+
+    fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Entries currently held (the streaming discipline keeps this at the
@@ -122,41 +216,157 @@ impl ParseCache {
         self.entries.is_empty()
     }
 
+    /// The paths the cache currently holds entries for (the daemon
+    /// watcher's warm set, ADR-0018 D2).
+    pub fn paths(&self) -> Vec<VfsPath> {
+        self.entries
+            .iter()
+            .map(|guard| guard.key().clone())
+            .collect()
+    }
+
     /// Store an entry (collection phase only, per the ADR-0016 insertion
-    /// rule; last writer wins among identical-content racers).
+    /// rule; last writer wins among identical-content racers). Under a
+    /// bound, the insert stamps the slot's recency and enforces the LRU
+    /// budget.
     pub fn insert(&self, path: VfsPath, entry: ParseEntry) {
-        self.entries.insert(path, entry);
+        let cost = self.accounted_cost(&entry);
+        let slot = Slot {
+            entry,
+            tick: self.next_tick(),
+        };
+        let replaced = self.entries.insert(path, slot);
+        if let (Some(bound), Some(cost)) = (self.bound_bytes, cost) {
+            if let Some(old) = replaced {
+                self.total_cost.fetch_sub(
+                    self.accounted_cost(&old.entry).unwrap_or_default(),
+                    Ordering::Relaxed,
+                );
+            }
+            self.total_cost.fetch_add(cost, Ordering::Relaxed);
+            self.enforce_bound(bound);
+        }
+    }
+
+    /// A fresh entry's accounted cost — computed (and cached on the entry)
+    /// only when a bound makes it meaningful; the CLI path never pays this.
+    fn accounted_cost(&self, entry: &ParseEntry) -> Option<u64> {
+        self.bound_bytes.map(|_| entry.cost_bytes())
+    }
+
+    /// Evict least-recently-used slots until the accounted total fits
+    /// `bound`. Skipped entirely while under budget (the common case). The
+    /// `remove_if` tick check refuses to evict a slot that was refreshed
+    /// after the snapshot — a racing reader can keep its file warm.
+    fn enforce_bound(&self, bound: u64) {
+        if self.total_cost.load(Ordering::Relaxed) <= bound {
+            return;
+        }
+        let mut order: Vec<(u64, u64, VfsPath)> = self
+            .entries
+            .iter()
+            .map(|guard| (guard.tick, guard.entry.cost_bytes(), guard.key().clone()))
+            .collect();
+        order.sort_unstable_by_key(|&(tick, _, _)| tick);
+        for (tick, cost, path) in order {
+            if self.total_cost.load(Ordering::Relaxed) <= bound {
+                break;
+            }
+            // The tick match guarantees the removed slot is the snapshot's
+            // entry, so the snapshot's cost is the exact accounting delta.
+            if self
+                .entries
+                .remove_if(&path, |_, slot| slot.tick == tick)
+                .is_some()
+            {
+                self.total_cost.fetch_sub(cost, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Look up the entry for `path` validated against the overlay's current
     /// `(generation, bytes)` — a **shared-read clone** of the Arcs (Rule T1:
     /// concurrent reads through shared handles are the blessed pattern).
-    /// A stale entry is never served and is evicted on sight.
+    /// A stale entry is never served and is evicted on sight. Hits and
+    /// misses are counted exactly (the daemon's `ping` payload).
     pub fn get(
         &self,
         path: &VfsPath,
         generation: Generation,
         current: &Arc<[u8]>,
     ) -> Option<ParseEntry> {
-        // Guard scope ends at the clone — never held across anything else.
-        let candidate = {
-            let guard = self.entries.get(path)?;
-            guard.value().clone()
+        // Guard scope ends at the tick + clone — never held across a parse
+        // or traversal (§1.1).
+        let candidate = match self.entries.get_mut(path) {
+            Some(mut guard) => {
+                guard.tick = self.next_tick();
+                Some(guard.entry.clone())
+            }
+            None => None,
         };
-        if candidate.is_valid_for(generation, current) {
-            Some(candidate)
-        } else {
-            self.entries.remove(path);
-            None
+        match candidate {
+            Some(entry) if entry.is_valid_for(generation, current) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(entry)
+            }
+            _ => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                // Stale-on-sight eviction is T4 doing its job, not an LRU
+                // eviction — deliberately not counted in `evictions`.
+                drop(self.remove_slot(path));
+                None
+            }
         }
     }
 
+    /// Validity check without the counters or the LRU refresh — the
+    /// watcher's content probe (F10a, ADR-0018 D3): a stamp change alone
+    /// must not register as cache traffic or keep a file artificially warm.
+    pub fn peek(&self, path: &VfsPath, generation: Generation, current: &Arc<[u8]>) -> bool {
+        let candidate = match self.entries.get(path) {
+            Some(guard) => guard.entry.clone(),
+            None => return false,
+        };
+        candidate.is_valid_for(generation, current)
+    }
+
+    /// Remove a slot, keeping the accounted total honest under a bound.
+    fn remove_slot(&self, path: &VfsPath) -> Option<ParseEntry> {
+        let (_, slot) = self.entries.remove(path)?;
+        if let Some(cost) = self.accounted_cost(&slot.entry) {
+            self.total_cost.fetch_sub(cost, Ordering::Relaxed);
+        }
+        Some(slot.entry)
+    }
+
     /// Remove the entry and hand over ownership — the apply path's one-way
-    /// door (§1.2.1 step 5 / ADR-0007): the caller ends up holding the only
-    /// `Arc<Tree>` handle, which is what the exclusivity guard demands
-    /// before `Tree::edit`.
+    /// door (§1.2.1 step 5 / ADR-0007), and the daemon watcher's re-parse
+    /// path (ADR-0018 D3): the caller ends up holding the only `Arc<Tree>`
+    /// handle chain, which is what the exclusivity guard demands before
+    /// `Tree::edit`.
     pub fn take(&self, path: &VfsPath) -> Option<ParseEntry> {
-        self.entries.remove(path).map(|(_, entry)| entry)
+        self.remove_slot(path)
+    }
+
+    /// The counters + size snapshot (`ping`/`stats`, ADR-0018 D1).
+    pub fn stats(&self) -> CacheStats {
+        let bytes = match self.bound_bytes {
+            // Maintained incrementally (approximate under insert races; the
+            // budget is a budget, not a ledger).
+            Some(_) => self.total_cost.load(Ordering::Relaxed),
+            // The CLI's streaming cache holds ~nothing; a precise sum is
+            // cheap at that size.
+            None => self.entries.iter().map(|g| g.entry.cost_bytes()).sum(),
+        };
+        CacheStats {
+            entries: self.entries.len(),
+            bytes,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            bound_bytes: self.bound_bytes,
+        }
     }
 }
 
@@ -453,5 +663,136 @@ mod tests {
             mangled.error_count,
             "the stored count matches a fresh walk"
         );
+    }
+
+    /// F10a (ADR-0018 D4): hit/miss counters are exact — a served lookup
+    /// is a hit, an absent or stale lookup is a miss, and the stale one is
+    /// evicted on sight without counting as an LRU eviction.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn counters_track_hits_and_misses_exactly() {
+        let (registry, id) = setup();
+        let cache = ParseCache::new();
+        let path = VfsPath::new("/proj/counters.rs").expect("canonical path");
+        let generation = Generation::default();
+        let bytes: Arc<[u8]> = Arc::from(b"fn hit() -> u32 { 1 }\n".as_slice());
+        cache.insert(path.clone(), entry_for(&registry, id, generation, &bytes));
+
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses, stats.evictions), (0, 0, 0));
+
+        assert!(cache.get(&path, generation, &bytes).is_some());
+        assert!(cache.get(&path, generation, &bytes).is_some());
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses), (2, 0));
+
+        // Absent path: a miss.
+        let absent = VfsPath::new("/proj/absent.rs").expect("canonical path");
+        assert!(cache.get(&absent, generation, &bytes).is_none());
+        assert_eq!(cache.stats().misses, 1);
+
+        // Stale bytes at the same generation: a miss, evicted on sight,
+        // NOT an LRU eviction.
+        let diverged: Arc<[u8]> = Arc::from(b"fn other() -> u32 { 2 }\n".as_slice());
+        assert!(cache.get(&path, generation, &diverged).is_none());
+        let stats = cache.stats();
+        assert_eq!((stats.hits, stats.misses, stats.evictions), (2, 2, 0));
+        assert_eq!(cache.len(), 0, "stale entry evicted on sight");
+    }
+
+    /// F10a (ADR-0018 D4): a bounded cache evicts least-recently-used
+    /// entries when an insert crosses the budget; a `get` refresh keeps a
+    /// file warm past its insertion age. Costs are accounted (snapshot +
+    /// tree estimate), so the test derives its budget from the entries'
+    /// own reported costs rather than hand-computing node counts.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn bounded_cache_evicts_lru_order() {
+        let (registry, id) = setup();
+        let generation = Generation::default();
+        let sources: Vec<(VfsPath, Arc<[u8]>)> = (0..3_u32)
+            .map(|i| {
+                (
+                    VfsPath::new(format!("/proj/lru{i}.rs")).expect("canonical path"),
+                    Arc::from(
+                        format!("fn l{i}() -> u32 {{\n    let x{i} = {i};\n    x{i} + 1\n}}\n")
+                            .into_bytes(),
+                    ),
+                )
+            })
+            .collect();
+        let entries: Vec<ParseEntry> = sources
+            .iter()
+            .map(|(_, bytes)| entry_for(&registry, id, generation, bytes))
+            .collect();
+        let cost: Vec<u64> = entries.iter().map(ParseEntry::cost_bytes).collect();
+        assert!(cost.iter().all(|c| *c > 0));
+
+        // Budget: exactly two of the three entries fit.
+        let bound = cost[0] + cost[1];
+        let cache = ParseCache::bounded(bound);
+
+        cache.insert(sources[0].0.clone(), entries[0].clone());
+        cache.insert(sources[1].0.clone(), entries[1].clone());
+        assert_eq!(cache.len(), 2, "two fit exactly");
+        assert_eq!(cache.stats().evictions, 0);
+
+        // Touch entry 0 so entry 1 becomes the LRU, then insert entry 2.
+        assert!(
+            cache
+                .get(&sources[0].0, generation, &sources[0].1)
+                .is_some()
+        );
+        cache.insert(sources[2].0.clone(), entries[2].clone());
+
+        assert_eq!(cache.len(), 2, "the bound still holds");
+        assert_eq!(cache.stats().evictions, 1, "one LRU eviction");
+        assert_eq!(cache.stats().bytes, cost[0] + cost[2]);
+        // The refreshed entry 0 survived; entry 1 (older tick) was evicted;
+        // the just-inserted entry 2 is present.
+        assert!(
+            cache
+                .get(&sources[0].0, generation, &sources[0].1)
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(&sources[2].0, generation, &sources[2].1)
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(&sources[1].0, generation, &sources[1].1)
+                .is_none()
+        );
+
+        // A later query on the evicted path re-parses on demand (here:
+        // re-insert) — eviction never loses data, only warmth.
+        cache.insert(sources[1].0.clone(), entries[1].clone());
+        assert!(
+            cache
+                .get(&sources[1].0, generation, &sources[1].1)
+                .is_some()
+        );
+    }
+
+    /// F10a: the unbounded (CLI) shape never computes costs — `stats` on a
+    /// streaming-shaped cache stays honest, and `take` keeps the one-way
+    /// door behavior the apply choreography relies on.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn unbounded_cache_streams_and_takes_as_before() {
+        let (registry, id) = setup();
+        let generation = Generation::default();
+        let cache = ParseCache::new();
+        assert_eq!(cache.stats().bound_bytes, None);
+        let path = VfsPath::new("/proj/stream.rs").expect("canonical path");
+        let bytes: Arc<[u8]> = Arc::from(b"fn stream() -> u32 { 9 }\n".as_slice());
+        cache.insert(path.clone(), entry_for(&registry, id, generation, &bytes));
+
+        let entry = cache.take(&path).expect("one-way door still hands over");
+        assert_eq!(Arc::strong_count(&entry.tree), 1);
+        assert!(cache.take(&path).is_none());
+        assert_eq!(cache.len(), 0);
     }
 }

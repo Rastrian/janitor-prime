@@ -172,6 +172,29 @@ pub enum OutputError {
     Io(String),
 }
 
+/// Daemon domain errors (F10a, ADR-0018) — the socket server's typed
+/// surface. Append-only per the F0 frozen-surface rule.
+#[derive(Debug, Error)]
+pub enum DaemonError {
+    #[error("cannot bind daemon socket {path:?}: {detail}")]
+    Bind { path: String, detail: String },
+    #[error("a daemon is already listening at {path}")]
+    AlreadyRunning { path: String },
+    #[error("path {path:?} is outside the daemon's workspace {workspace:?}")]
+    PathOutsideWorkspace { path: String, workspace: String },
+    #[error("request malformed: {detail}")]
+    RequestMalformed { detail: String },
+    #[error("request line of {len} bytes exceeds the {max}-byte cap")]
+    RequestTooLarge { len: usize, max: usize },
+    #[error("daemon busy: {active} connections exceed the cap of {max}")]
+    Busy { active: usize, max: usize },
+    #[error("daemon socket {path:?} did not answer: {detail}")]
+    Connect { path: String, detail: String },
+    /// The response line is not a janitor.v1 envelope (protocol break).
+    #[error("daemon protocol error at {path:?}: {detail}")]
+    Protocol { path: String, detail: String },
+}
+
 /// The umbrella over the whole taxonomy (PLAN §1.7).
 #[derive(Debug, Error)]
 pub enum JanitorError {
@@ -191,6 +214,8 @@ pub enum JanitorError {
     Memory(#[from] MemoryError),
     #[error(transparent)]
     Output(#[from] OutputError),
+    #[error(transparent)]
+    Daemon(#[from] DaemonError),
 }
 
 impl JanitorError {
@@ -244,6 +269,16 @@ impl JanitorError {
             Self::Memory(MemoryError::TreeCorrupt { .. }) => "E_TREE_CORRUPT",
             Self::Output(OutputError::Serialization(_)) => "E_OUTPUT",
             Self::Output(OutputError::Io(_)) => "E_OUTPUT",
+            Self::Daemon(DaemonError::Bind { .. }) => "E_DAEMON_BIND",
+            Self::Daemon(DaemonError::AlreadyRunning { .. }) => "E_DAEMON_ALREADY_RUNNING",
+            Self::Daemon(DaemonError::PathOutsideWorkspace { .. }) => {
+                "E_DAEMON_PATH_OUTSIDE_WORKSPACE"
+            }
+            Self::Daemon(DaemonError::RequestMalformed { .. }) => "E_DAEMON_REQUEST_MALFORMED",
+            Self::Daemon(DaemonError::RequestTooLarge { .. }) => "E_DAEMON_REQUEST_TOO_LARGE",
+            Self::Daemon(DaemonError::Busy { .. }) => "E_DAEMON_BUSY",
+            Self::Daemon(DaemonError::Connect { .. }) => "E_DAEMON_CONNECT",
+            Self::Daemon(DaemonError::Protocol { .. }) => "E_DAEMON_PROTOCOL",
         }
     }
 
@@ -344,6 +379,28 @@ impl JanitorError {
             }
             Self::Memory(MemoryError::SlotInvalid { slot, detail }) => {
                 Some(serde_json::json!({ "slot": slot, "detail": detail }))
+            }
+            Self::Daemon(DaemonError::Bind { path, detail }) => {
+                Some(serde_json::json!({ "path": path, "detail": detail }))
+            }
+            Self::Daemon(DaemonError::AlreadyRunning { path }) => {
+                Some(serde_json::json!({ "path": path }))
+            }
+            Self::Daemon(DaemonError::PathOutsideWorkspace { path, workspace }) => {
+                Some(serde_json::json!({ "path": path, "workspace": workspace }))
+            }
+            Self::Daemon(DaemonError::RequestMalformed { detail }) => {
+                Some(serde_json::json!({ "detail": detail }))
+            }
+            Self::Daemon(DaemonError::RequestTooLarge { len, max }) => {
+                Some(serde_json::json!({ "len": len, "max": max }))
+            }
+            Self::Daemon(DaemonError::Busy { active, max }) => {
+                Some(serde_json::json!({ "active": active, "max": max }))
+            }
+            Self::Daemon(DaemonError::Connect { path, detail })
+            | Self::Daemon(DaemonError::Protocol { path, detail }) => {
+                Some(serde_json::json!({ "path": path, "detail": detail }))
             }
             _ => None,
         }
