@@ -617,6 +617,21 @@ Merkle fingerprint pass (§1.4.3.6) over the named-node skeleton **plus semantic
 
 *Execution order (v0.2, eval-2 amendment 6):* F9 (multi-language, python) runs **before** F8 (`Unify`) — validate ADR-0002's architecture on a second language before feature depth on one. Phase letter ids F8/F9 stay unchanged everywhere; only execution order swaps.
 
+*F8 outcome (2026-09-15, wave 1): shipped.* `src/ast/fingerprint.rs` — 128-bit
+SipHash-1-3 over the trivia-excluded skeleton with leaf texts and significant
+anonymous tokens hashed (E2 rule), computed bottom-up per parse into a lazily
+built `FingerprintTable` (O(n), allocation-disciplined). `(unify @a @b)` compiles
+and filters post-match; `scan --duplicates --min-size N` (default 8) groups by
+fingerprint with canonical deterministic ordering (RAYON 1/8 byte-identical, in
+the determinism fence). Acceptance: `x + y` vs `x - y` NOT duplicates,
+`foo(a, b)` vs `foo(a; b)` NOT duplicates, comment/whitespace-invariance,
+renamed-locals-differ — all green (186 tests at merge). Self-dogfood: `--duplicates`
+over this repo's own `src/` (726 KB, 47 files) found 21 significant groups at
+min-size 60, including 3 real function-level duplicate pairs. Fingerprint pass
+measured at ~0.73 ms/KB (≈ 11 ms per 15 KB source file; table build 520 ms for
+726 KB) — an append to the KP-7 fence; a dedicated criterion leg lands with the
+next bench touch. SCHEMA.md documents the duplicates payload.
+
 ### F9 — Multi-language breadth *(v0.2)*
 
 Enable + CI-test `lang-python` first (the real test of ADR-0002), then go/typescript; normalized-vocabulary tables (`lang/*.norm.toml`) for global rules; per-grammar kind-name conformance tests fed by KP-5 outputs.
