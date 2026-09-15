@@ -731,9 +731,29 @@ first-nearest (collision measured: drift 28 to the @spec occurrence).
 (5) CI `lang-experimental` job (same shape as PR #12's) build+tests
 `--features lang-experimental` and pins the tier's `--version` set.
 
-### F10 — Beyond *(unfunded, explicit non-goals until v0.1 proves out)*
+### F10 — Beyond *(explicit non-goals until v0.1 proves out)*
 
 LSP server (tower-lsp + tokio enter here, revisiting ADR-0008; refactree's server shape — overlays via `DidOpen`/`DidChange`, last-good snapshot — is the template, A.4) · long-lived daemon / warm parse cache (ADR-0007 disk format) · watch mode · web viewer · gix-based Commit pointers (ADR-0013) · `forget` command · tree-sitter-query import as DSL sugar · refactree-style semantic anchoring (`@ref` hyperlink holes) as a future DSL atom.
+
+**F10 outcome — wave a daemon (F10a, 2026-09-15): warm cache + watch,
+shipped on `f10a/daemon`.** The owner funded the daemon increment after
+KP-11 passed; the design and its decisions live in a dedicated file,
+**ADR-0018 (`docs/planning/ADR-0018-daemon.md`)** — the first ADR to get
+one, because the increment (socket protocol, watcher, LRU bound, security
+posture, lifecycle, ADR-0008's partial reversal) outgrew a §4 paragraph.
+One-paragraph summary: `janitor daemon` is a std-only (no tokio —
+ADR-0008's async half stands; what reversed is "no long-lived process")
+Unix-socket server speaking the same janitor.v1 envelope (0600 socket,
+workspace-pinned paths, stale-socket recovery, idle death) over the
+existing `Session`/rayon pipelines with retention flipped on; a polling
+watcher (2 s default, zero new deps) re-parses changed warm files
+incrementally under the T1 exclusivity door, with correctness never
+depending on it (Rule T4 revalidates every serve); the cache is
+LRU-bounded by accounted cost (snapshot bytes + 16 B/node tree estimate,
+default 512 MiB); `scan --daemon` routes through it with silent
+in-process fallback; `apply` stays CLI-only (D5). Measured (this repo's
+src/, debug build): cold 175 ms → warm 102 ms, 52/52 hits. Eleven e2e
+fences over real sockets/subprocesses in `tests/daemon_e2e.rs`.
 
 ---
 
@@ -915,6 +935,8 @@ New risks (not the BRIEF's own list), folded with eval-2's §6 where our mitigat
 ---
 
 **ADR-0017 — Semantic validation is a GUIDELINE (configure an external LSP), never a runtime dependency.** *Context:* F10 considered an in-process LSP/watch; the discovery is that janitor's gate (tree-sitter re-parse) covers syntax, while the semantic layer (types, resolved imports) is already owned by mature per-language servers (rust-analyzer, pyright, gopls, ruby-lsp, elixir-ls) that this repo would otherwise half-replicate. *Decision:* janitor instructs consuming agents — via `wake`'s guidance surface and `share/GLOBAL.md` — to run the project's language server and treat its diagnostics as the semantic layer; janitor's own gate stays the write-time syntax check. Delivery is documentation + guidance only: no tokio, no JSON-RPC, no editor matrix in this runtime (ADR-0008 unchanged; the LSP/daemon/watch F10 items become their own future decision, decoupled from validation). *Rejected:* embedding or wrapping a language server (permanent maintenance of a second public contract, competing badly with community-maintained servers); ignoring semantics (agents would rely on implicit trust where a verifier is cheap). *Consequences:* zero runtime cost; guidance quality is the product surface (GLOBAL.md is versioned and reviewed); if a future user population demands bundled tooling, this ADR is revisited — not silently extended.
+
+**ADR-0018 — The daemon: warm parse cache, watch mode, and a janitor.v1 Unix socket (F10a).** Lives in its own file — `docs/planning/ADR-0018-daemon.md` — the first ADR to do so (the increment outgrew a §4 paragraph). Decisions D1–D8 cover: the socket protocol (same envelope, one request per connection, 0600, `$JANITOR_SOCK`/`/tmp/janitor-$UID.sock`), polling watch over the warm set (why inotify/notify is deferred), freshness keyed on Rule T4 rather than the watcher (external disk changes cannot bump overlay generations — staging them in would shadow disk with stale bytes), the LRU cost model (snapshot bytes + 16 B/node) behind `--max-cache-mb`, the concurrency/locking story (`apply` deliberately CLI-only in v0.2), the security posture (unix socket ≠ network), lifecycle (idle death, probe-and-remove stale sockets, two-envelope stdout contract), and ADR-0008's partial reversal (long-lived processes in scope; tokio still out — ADR-0017 untouched: performance layer, not semantic validation). Outcome notes in §3 F10 above; fences in `tests/daemon_e2e.rs`.
 
 ---
 

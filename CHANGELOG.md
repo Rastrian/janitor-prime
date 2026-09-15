@@ -1,5 +1,46 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (F10a)
+- **Warm-cache daemon + watch mode** (ADR-0018,
+  `docs/planning/ADR-0018-daemon.md`): `janitor daemon [--workspace
+  --sock --interval --max-cache-mb --idle-secs]` — a long-lived process
+  serving the same `janitor.v1` envelope over a 0600 Unix socket
+  (`scan`/`duplicates`/`ping`/`stats`/`shutdown`, one request per
+  connection), with a polling watcher (default 2 s; dot-dirs and
+  `target/` ignored) that re-parses changed warm files **incrementally**
+  (KP-1's `Tree::edit` path under the `ParseCache::take` exclusivity
+  door). `janitor scan --daemon` routes through it when it answers
+  `ping` for this workspace; otherwise it falls back in-process
+  silently. ADR-0008 partially reversed (long-lived processes yes, tokio
+  still no); ADR-0017 untouched (this is a performance layer, not
+  semantic validation).
+- **Measured (self-dogfood, this repo's `src/`, 52 files / 858 KB,
+  debug build):** cold scan 175 ms → warm scan 102 ms (52/52 cache hits,
+  0 misses; the warm pass parses nothing), ~1.7× wall on a small corpus
+  where parse is not yet dominant; the e2e fence proves strict warm<cold
+  on a 2 MB corpus. Warm retention accounted at 3.9 MB for 858 KB of
+  source (bytes + 16 B/node tree estimate) — the `--max-cache-mb` bound
+  (default 512) evicts LRU against exactly that number.
+- **ParseCache grew a warm shape, additively:** exact hit/miss counters,
+  optional byte bound with LRU eviction (eviction is free — later queries
+  re-parse), cost accounting = snapshot bytes + node count × 16 B; the
+  CLI's unbounded streaming path is unchanged and pays none of it.
+- **Daemon fences** (`tests/daemon_e2e.rs`, 11 tests over real sockets,
+  real subprocesses for lifecycle): warm-cache proof (byte-identical
+  report cold vs warm vs in-process, modulo `stats.wall_ms`),
+  incremental (watcher re-parses exactly the changed file; the next scan
+  is all hits), eviction (bound respected, later queries re-parse),
+  concurrency (parallel scans + pings + watcher mutations under a
+  bounded wait — no torn envelopes, no deadlock), hygiene (0600;
+  `..`/absolute/symlink-escape paths typed-refused), crash safety
+  (`kill -9` → stale socket → next start probes, removes, serves), plus
+  request validation, already-running probe, connection cap, idle death,
+  and the CLI routing contract.
+- New error family: `E_DAEMON_BIND`, `E_DAEMON_ALREADY_RUNNING`,
+  `E_DAEMON_PATH_OUTSIDE_WORKSPACE`, `E_DAEMON_REQUEST_MALFORMED`,
+  `E_DAEMON_REQUEST_TOO_LARGE`, `E_DAEMON_BUSY`, `E_DAEMON_CONNECT`,
+  `E_DAEMON_PROTOCOL`.
+
 ### Added
 - **MCP server (`janitor mcp`, F10b, ADR-0019):** the engine as six native
   tools over the MCP stdio transport (`janitor_wake`, `janitor_scan`,

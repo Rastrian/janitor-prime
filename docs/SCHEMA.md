@@ -621,3 +621,98 @@ per-language facts a consumer needs.
   IS caught (MISSING nodes) and is what the e2e refusal demonstrates.
   ADR-0010's equivalence semantics otherwise generalize unchanged;
   this is the one per-language caveat the experimental tier records.
+
+## The daemon (F10a, v0.2) — `janitor daemon` and the socket protocol
+
+ADR-0018 (`docs/planning/ADR-0018-daemon.md`) is the design record. The
+daemon is a long-lived process owning a warm parse cache (kept fresh by a
+polling watcher with incremental re-parses) and serving the SAME
+`janitor.v1` envelope over a Unix domain socket. **A Unix domain socket is
+not a network**: it is a kernel-local IPC object addressable only through
+the filesystem — the daemon performs zero network calls of any kind.
+
+### Lifecycle
+
+```
+janitor daemon [--workspace DIR] [--sock PATH] [--interval SECS]
+               [--max-cache-mb N] [--idle-secs N]
+```
+
+- Socket path: `$JANITOR_SOCK`, else `/tmp/janitor-$UID.sock`; file
+  permissions **0600** (owner-only).
+- Startup/exit: exactly two envelope lines on stdout (`listening: true`
+  with the config, then `reason: "shutdown" | "idle"`); everything else
+  is the socket or stderr.
+- Idle death: `--idle-secs` (default 1800) without connections exits the
+  process, so stale daemons die naturally. `kill -9` leaves the socket
+  file; the next start probes it (a live daemon answers → typed
+  `E_DAEMON_ALREADY_RUNNING`; a dead one's leftover is removed and the
+  bind retried).
+- The CLI never spawns the daemon in v0.2. `janitor scan --daemon`
+  (opt-in) routes through the socket iff it answers `ping` AND its
+  workspace covers the scan root; anything else falls back to the
+  in-process path silently (a stderr note, never a stdout side effect).
+
+### Request/response
+
+One JSON request line in, one envelope line out, one request per
+connection. Unknown fields are refused (`deny_unknown_fields` — an
+agent-facing protocol fails loudly on typos):
+
+```json
+{"schema":"janitor.v1","cmd":"ping"}
+{"schema":"janitor.v1","cmd":"scan","rule":"(kind function_item)","path":"src",
+ "lang":null,"include_virtual":false,"strict_trivia":false,"max_file_size":4194304}
+{"schema":"janitor.v1","cmd":"duplicates","path":"src","min_size":8}
+{"schema":"janitor.v1","cmd":"stats"}
+{"schema":"janitor.v1","cmd":"shutdown"}
+```
+
+- `scan`/`duplicates` take the same options as their CLI counterparts;
+  `path` is workspace-relative or absolute-inside-the-workspace (default:
+  the workspace). Responses carry the exact CLI report shapes as `data`.
+- `ping`/`stats` answer liveness + identity + the numbers below.
+- `shutdown` answers its ack envelope, then the daemon exits.
+
+`ping`/`stats` `data` (abridged; every field always present):
+
+```json
+{"cmd":"ping","version":"0.2.0","pid":1234,"uptime_secs":12,
+ "workspace":"/abs/workspace","sock":"/tmp/janitor-1000.sock",
+ "cache":{"entries":52,"bytes":4087026,"hits":52,"misses":0,
+          "evictions":0,"bound_bytes":536870912},
+ "watch":{"interval_secs":2,"passes":7,"reparses":1,"warm":52}}
+```
+
+- `cache.bytes` is the accounted cost — snapshot bytes **plus** an
+  estimated tree share (16 B/node, computed from the parse) — and
+  `bound_bytes` is the `--max-cache-mb` budget LRU-evicted against.
+  Eviction is free for correctness: a later scan simply re-parses.
+- `watch.reparses` counts incremental re-parses (KP-1's `Tree::edit` path)
+  performed on changed warm files between polls.
+
+### Watch mode (ADR-0018 D2/D3)
+
+Polling every `--interval` seconds (default 2) over the warm set —
+exactly the cached paths; ignore set is dot-prefixed entries (`.git/`,
+`.janitor/`) and `target/`. Detection is polling, not inotify: zero new
+dependencies, portable, deterministic to test; correctness NEVER depends
+on it — every served entry is re-validated against live bytes (Rule T4:
+generation ∧ content-hash), so a change the watcher has not seen yet is a
+miss and a fresh parse, never a stale serve.
+
+### Error codes
+
+`E_DAEMON_BIND`, `E_DAEMON_ALREADY_RUNNING`,
+`E_DAEMON_PATH_OUTSIDE_WORKSPACE` (requests — including symlink escapes,
+resolved via canonicalization — must stay inside the pinned workspace),
+`E_DAEMON_REQUEST_MALFORMED` (bad JSON, wrong schema, unknown cmd/field,
+mode violations), `E_DAEMON_REQUEST_TOO_LARGE` (1 MiB request cap),
+`E_DAEMON_BUSY` (64-connection cap), `E_DAEMON_CONNECT`,
+`E_DAEMON_PROTOCOL` (client-side).
+
+`apply` is deliberately NOT socket-exposed in v0.2 (ADR-0018 D5): the one
+destructive operation keeps the CLI's one-writer-per-invocation
+discipline; the only mutating paths inside the daemon are the watcher's
+re-parses and LRU eviction, both under the `ParseCache::take` exclusivity
+door (Rule T1).
