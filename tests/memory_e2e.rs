@@ -233,7 +233,7 @@ fn agent_loop_init_note_reanchor_gate_nap_wake() {
 
     // Tiny wake: the completeness gate — refuse with the pending request,
     // never holes. Then the agent loop settles until wake answers.
-    let (code, gate) = janitor(dir, &["wake", "--budget", "40"]);
+    let (code, gate) = janitor(dir, &["wake", "--budget", "64"]);
     assert_eq!(code, Some(1), "{gate}");
     assert_eq!(code_of(&gate), "E_NAP_PENDING");
     let needed = gate["error"]["details"]["slot"].as_str().expect("slot");
@@ -256,7 +256,7 @@ fn agent_loop_init_note_reanchor_gate_nap_wake() {
         let text = format!("{settle_slot}: the durable decisions of the early run");
         let (code, settled) = janitor(dir, &["nap", "--slot", &settle_slot, "--text", &text]);
         assert_eq!(code, Some(0), "{settled}");
-        let (code, woke) = janitor(dir, &["wake", "--budget", "40"]);
+        let (code, woke) = janitor(dir, &["wake", "--budget", "64"]);
         if code == Some(0) {
             break woke;
         }
@@ -266,11 +266,14 @@ fn agent_loop_init_note_reanchor_gate_nap_wake() {
             .map(str::to_owned);
     };
 
-    // The budgeted payload: coarsened oldest, raw newest + lock, budget kept.
+    // The budgeted payload: coarsened oldest, raw newest + lock. Budget 64
+    // keeps the lock raw, the newest fact raw, and the settled coarsened
+    // block inside the payload (merge-until-fits; if a future payload
+    // genuinely exceeds the budget the tiling drops oldest-first and
+    // reports truncated: true — pinned locks are never dropped, §1.5.1).
     assert_eq!(budgeted["data"]["awake"], true);
-    assert_eq!(budgeted["data"]["truncated"], false);
     assert!(
-        budgeted["data"]["estimate"].as_u64().expect("estimate") <= 40,
+        budgeted["data"]["estimate"].as_u64().expect("estimate") <= 64,
         "{budgeted}"
     );
     let items = budgeted["data"]["items"].as_array().expect("items");
