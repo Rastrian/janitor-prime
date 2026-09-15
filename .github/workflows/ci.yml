@@ -76,6 +76,18 @@ jobs:
         # (the second-language guarantee, not just "grammar compiles" —
         # that stays pin-check's job via lang-all).
         run: cargo test --features lang-python
+      - name: test (lang-go e2e)
+        # F9b: go joins the tested set — the registry, KP-6-go trivia
+        # corpus, go norm table, the go agent-loop acceptance and the go
+        # determinism fence leg run on every PR.
+        run: cargo test --features lang-go
+      - name: test (lang-typescript e2e)
+        # F9b: typescript AND tsx join the tested set — the registry
+        # (including the tsx LangId routing fence), KP-6-typescript
+        # trivia corpus, the shared norm table (conformance-checked
+        # against BOTH grammars), the ts/tsx agent-loop acceptance and
+        # the cross-grammar determinism fence leg.
+        run: cargo test --features lang-typescript
       - name: build with no default features
         run: cargo build --no-default-features
 
@@ -95,12 +107,14 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Build all grammars against tree-sitter 0.27.0
         run: cargo build --features lang-all
-      - name: "--version envelope lists all seven grammars"
+      - name: "--version envelope lists all eight grammars"
+        # F9b: the lang-typescript feature registers TWO grammars
+        # (typescript + tsx), so lang-all surfaces eight entries.
         run: |
           ./target/debug/janitor --version | jq -e '
             .schema == "janitor.v1"
             and .ok == true
-            and .data.grammars == ["rust","python","go","javascript","typescript","java","c"]
+            and .data.grammars == ["rust","python","go","javascript","typescript","tsx","java","c"]
           '
 
   spikes:
