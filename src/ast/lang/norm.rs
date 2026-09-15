@@ -220,6 +220,11 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         "ocaml" => Some(include_str!("../../../lang/ocaml.norm.toml")),
         #[cfg(feature = "lang-ocaml")]
         "ocaml_interface" => Some(include_str!("../../../lang/ocaml_interface.norm.toml")),
+        // Experimental tier (F9d): same one-arm cost; the FUNCTION
+        // over-breadth decision (no dedicated def kind — `call` covers
+        // def clauses AND invocations) is documented in the table header.
+        #[cfg(feature = "lang-elixir")]
+        "elixir" => Some(include_str!("../../../lang/elixir.norm.toml")),
         _ => None,
     }
 }
