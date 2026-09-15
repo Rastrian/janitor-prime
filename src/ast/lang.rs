@@ -525,6 +525,122 @@ mod tests {
         );
     }
 
+    /// F9b: the go registration is exercised the same way rust's and
+    /// python's are — extension routing (.go, case-insensitive), named-kind
+    /// resolution against the real grammar, and the typed `UnknownKind`
+    /// for a kind go does not know (a rust kind name is the honest probe).
+    #[test]
+    #[cfg(feature = "lang-go")]
+    fn go_registry_resolution_is_typed_and_routed() {
+        let registry = LangRegistry::new();
+        let id = registry
+            .for_extension("go")
+            .expect("lang-go builds register the go grammar");
+        assert_eq!(registry.name(id), Some("go"));
+        assert_eq!(registry.for_extension("GO"), Some(id));
+        assert_eq!(
+            registry.for_path(Path::new("/proj/pkg/widgets.go")),
+            Some(id),
+        );
+
+        // Kind names verified against tree-sitter-go 0.25.0's
+        // node-types.json (the grammar's own symbol table is the source;
+        // these are the norm-table and KP-6-go anchors).
+        for kind in [
+            "source_file",
+            "package_clause",
+            "import_declaration",
+            "import_spec_list",
+            "import_spec",
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "field_identifier",
+            "type_identifier",
+            "package_identifier",
+            "block",
+            "statement_list",
+            "if_statement",
+            "short_var_declaration",
+            "field_declaration_list",
+            "field_declaration",
+            "struct_type",
+            "interface_type",
+            "comment",
+            "int_literal",
+            "interpreted_string_literal",
+        ] {
+            assert!(
+                registry.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "go grammar must know {kind}"
+            );
+        }
+
+        let err = registry
+            .resolve_kind(id, "function_item")
+            .expect_err("a rust kind name is unknown to the go grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "go", "kind": "function_item" }))
+        );
+    }
+
+    /// F9b, E5 fence for go: the kind table is a function of the grammar
+    /// alone — order-independent seeding, round-tripping ids, seeded from
+    /// the bundled fixture corpus (never first-scan bias). The go fixture
+    /// exercises methods with receivers, generics, grouped imports, struct
+    /// tags and select/defer, so the fixture leg cross-checks a real parse.
+    #[test]
+    #[cfg(feature = "lang-go")]
+    fn go_kind_tables_are_order_independent_and_round_trip() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id_a = a.for_extension("go").expect("lang-go builds register go");
+        let id_b = b.for_extension("go").expect("lang-go builds register go");
+
+        let resolved: Vec<u16> = [
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "block",
+            "comment",
+        ]
+        .iter()
+        .map(|kind| {
+            a.resolve_kind(id_a, kind)
+                .expect("kinds the go grammar knows")
+        })
+        .collect();
+        let table_a = a.kind_table(id_a).expect("table seeds at first use");
+
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: go seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 100,
+            "the go grammar carries a real symbol table (112 named kinds)"
+        );
+
+        for (kind, id) in [
+            "function_declaration",
+            "method_declaration",
+            "identifier",
+            "block",
+            "comment",
+        ]
+        .iter()
+        .zip(resolved)
+        {
+            let name = a.kind_name(id_a, id).expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
+        }
+    }
+
     /// F9a, E5 fence for python: the kind table is a function of the
     /// grammar alone — order-independent seeding, round-tripping ids, and
     /// seeded from the bundled fixture corpus (never first-scan bias). The
