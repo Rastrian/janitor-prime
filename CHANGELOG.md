@@ -1,3 +1,40 @@
+## [Unreleased] — v0.2.0 candidates
+
+### Added
+- **Python** fully supported (F9a): registry, measured trivia table
+  (`comment`), norm table (`lang/python.norm.toml`), end-to-end agent-loop
+  acceptance, CI leg.
+- **Go** fully supported (F9b): trivia = `["comment"]`, norm table, e2e +
+  determinism leg. `method_declaration` documented alongside
+  `function_declaration`.
+- **TypeScript + TSX** fully supported (F9b): trivia =
+  `["comment", "html_comment"]`; **tsx is its own LangId** (`.ts` →
+  `typescript`, `.tsx` → `tsx`); norm table covers both; e2e + determinism
+  leg.
+- **Experimental tier (F9c+F9d): ruby, ocaml, elixir** — registered,
+  trivia-measured, norm-tabled and e2e-tested through the same ladder,
+  fenced OUT of `lang-all` behind `lang-experimental` until trivia corpora
+  are fully curated. One CI job covers the tier. Language decisions:
+  ocaml `.ml`/`.mli` are two languages (`ocaml`, `ocaml_interface`); elixir
+  `.ex`/`.exs` are one (`elixir`).
+- **`Unify` + `scan --duplicates`** (F8): 128-bit SipHash-1-3 Merkle
+  fingerprints over the trivia-excluded skeleton (significant anonymous
+  tokens hashed — `x + y` ≠ `x - y`; renamed locals differ). `(unify @a
+  @b)` compiles as a post-match filter. `--duplicates --min-size N` groups
+  provably-isomorphic subtrees deterministically.
+- **CI:** lang-python/go/typescript e2e legs; experimental-tier job;
+  `alloc.rs` fingerprint fence.
+
+### Fixed
+- `merge_oldest` re-checks the present-bias rule before creating a parent
+  block (property test found `n=17, budget=23`: `[0,8)+[8,16)` → `[0,16)`
+  violated `size ≤ α×age`). Found via CI proptest, minimized automatically.
+- `FingerprintTable::build` pre-reserves storage from
+  `descendant_count()` — the alloc fence measured 213 events (budget 128)
+  from capacity doublings; now 12 flat across corpus sizes.
+- Ruby trivia corpus and ocaml `.ml`/`.mli` mapping caveats documented
+  (heredoc parking; `let..in` nesting).
+
 # Changelog
 
 All notable changes to janitor-prime are documented in this file. The format
