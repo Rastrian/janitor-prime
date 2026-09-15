@@ -35,7 +35,11 @@
 //! **Cost discipline (KP-7's fence extends here, KP-8's too):** one pass per
 //! parse, O(n) — a single postorder walk with pooled cursors, one hash per
 //! node over `O(children)` fixed-width words. Storage is the result map only
-//! (per-node digest vector + span lookup); no per-node heap allocations.
+//! (per-node digest vector + span lookup), and every array the walk touches
+//! is reserved in full before the first push (from the root's O(1)
+//! `descendant_count`), so a build performs a fixed dozen one-time allocation
+//! events with **zero per-node allocation** — events do not grow with tree
+//! size, the property `tests/alloc.rs`'s fence asserts over two corpus sizes.
 //! The pass is iterative, so pathological depth cannot overflow the stack.
 //! The table is cacheable on [`crate::ast::cache::ParseEntry`] and computed
 //! lazily on first use.
@@ -312,26 +316,56 @@ impl FingerprintTable {
         // finalizes each node's hash from its children's already-final
         // hashes. The work stack is explicit: no recursion, so depth is
         // bounded by memory, not the call stack.
-        let mut nodes: Vec<Node<'_>> = Vec::new();
-        let mut fps: Vec<Fp> = Vec::new();
-        let mut sizes: Vec<u32> = Vec::new();
-        let mut first_child: Vec<u32> = Vec::new();
-        let mut next_sibling: Vec<u32> = Vec::new();
-        let mut last_child: Vec<u32> = Vec::new();
-        let mut child_buf: Vec<Node<'_>> = Vec::new();
-        let mut cursors: Vec<TreeCursor<'_>> = Vec::new();
+        //
+        // Storage is reserved up front, in full, from the tree's own
+        // counts: `descendant_count` is the tree's visible-node count
+        // (tree-sitter precomputes it per subtree — O(1) here, no counting
+        // pass), and the walk below visits a subset — visible nodes minus
+        // trivia subtrees (comments are visible leaves) — so it is an
+        // exact-to-within-trivia upper bound and nothing grows mid-walk.
+        // A build therefore performs a fixed dozen one-time allocation
+        // events whatever the tree's size — the KP-8/F8 fence contract.
+        // The unreserved form this replaces regrew every array by capacity
+        // doubling: events grew log-ish with tree size and never decayed
+        // across builds (each build starts from empty Vecs) — the F8
+        // regression this reserve fixed.
+        let root = tree.root_node();
+        let node_count = root.descendant_count();
+        // Root fan-out: the widest sibling group in ordinary source (files
+        // are item lists, so the root's child list is the width high-water;
+        // the first stack expansion holds one Post per root child).
+        let root_width = root.child_count() as usize;
+        // Depth-shaped scratch (`open`, the stack's depth margin): ordinary
+        // code nests tens deep, not thousands — a pathological chain still
+        // just doubles these a log-handful of times, never per node.
+        const DEPTH_RESERVE: usize = 128;
+
+        let mut nodes: Vec<Node<'_>> = Vec::with_capacity(node_count);
+        let mut fps: Vec<Fp> = Vec::with_capacity(node_count);
+        let mut sizes: Vec<u32> = Vec::with_capacity(node_count);
+        let mut first_child: Vec<u32> = Vec::with_capacity(node_count);
+        let mut next_sibling: Vec<u32> = Vec::with_capacity(node_count);
+        let mut last_child: Vec<u32> = Vec::with_capacity(node_count);
+        let mut child_buf: Vec<Node<'_>> = Vec::with_capacity(root_width);
+        // One cursor covers the whole walk: Pre visits are sequential (a
+        // cursor is never held across a stack push), so the pool recycles
+        // the same spare.
+        let mut cursors: Vec<TreeCursor<'_>> = Vec::with_capacity(1);
 
         enum Visit<'t> {
             Pre(Node<'t>),
             Post(usize),
         }
-        let mut stack: Vec<Visit<'_>> = Vec::new();
+        let mut stack: Vec<Visit<'_>> = Vec::with_capacity(root_width + DEPTH_RESERVE);
         // Path of open node indexes (top = the parent new children link to).
-        let mut open: Vec<u32> = Vec::new();
-        stack.push(Visit::Pre(tree.root_node()));
+        let mut open: Vec<u32> = Vec::with_capacity(DEPTH_RESERVE);
+        stack.push(Visit::Pre(root));
 
-        let mut digests: Vec<SpanDigest> = Vec::new();
-        let mut by_span: HashMap<(u32, u32, u16), Fp> = HashMap::new();
+        // Participating nodes ≤ all nodes (only trivia subtrees shrink
+        // it), so both result stores hold at the same reserve with zero
+        // growth during the walk.
+        let mut digests: Vec<SpanDigest> = Vec::with_capacity(node_count);
+        let mut by_span: HashMap<(u32, u32, u16), Fp> = HashMap::with_capacity(node_count);
 
         while let Some(visit) = stack.pop() {
             match visit {
@@ -429,6 +463,18 @@ impl FingerprintTable {
                 }
             }
         }
+
+        // The reserves' load-bearing invariants: the walk stays within the
+        // `descendant_count` bound, and every visited node digests exactly
+        // once. If a core pin-swap ever breaks the visible-node semantics
+        // these assume, this fires in every test run long before any fence
+        // misreads doubled capacity as budget.
+        debug_assert!(nodes.len() <= node_count);
+        debug_assert_eq!(
+            digests.len(),
+            nodes.len(),
+            "every visited node digests exactly once"
+        );
 
         Self { digests, by_span }
     }

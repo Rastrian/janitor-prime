@@ -74,11 +74,19 @@ static ALLOCATOR: Counting = Counting;
 /// of magnitude).
 const ALLOWANCE: usize = 8;
 
-/// Deterministic synthetic Rust (~80 units; a few thousand nodes) — varied
-/// item shapes so the tree has real width and depth, unlike a uniform fan.
+/// Deterministic synthetic Rust (80 units ≈ 10.7k participating nodes) —
+/// varied item shapes so the tree has real width and depth, unlike a
+/// uniform fan. [`corpus_units`] parameterizes the size for the fences that
+/// need a second, bigger tree.
 fn corpus() -> Vec<u8> {
+    corpus_units(80)
+}
+
+/// The same generator at an arbitrary unit count (the F8 fence's second
+/// corpus is 240 units ≈ 3× the first).
+fn corpus_units(units: u32) -> Vec<u8> {
     let mut out = String::from("use std::collections::HashMap;\n\n");
-    for i in 0..80_u32 {
+    for i in 0..units {
         out.push_str(&format!(
             "/// Doc for unit {i}.\n\
              fn unit_{i}_alpha(count: u32) -> u32 {{\n\
@@ -235,13 +243,20 @@ fn smol_path(name: &str) -> smol_str::SmolStr {
 }
 
 /// The KP-8 F8 leg: the Merkle fingerprint pass (F8, §1.4.3 item 6) holds
-/// the same discipline as the matcher — its only growing allocations are
-/// the *result arrays* (per-node digest vector, span index, and the index
-/// arrays of the walk). Those grow amortized-logarithmically, so a build
-/// over the ~2.7k-node corpus performs tens of allocation events, all of
-/// them capacity doublings; a per-node allocation (a boxed something per
-/// visited node) would perform thousands. The bound encodes exactly that
-/// separation — three orders of magnitude, not single digits.
+/// the same discipline as the matcher — a build performs only its one-time
+/// storage reserves (seven per-node index arrays, the digest vector, and
+/// the span map — all sized up front from the root's O(1)
+/// `descendant_count` — plus four depth/width-shaped scratch buffers) and
+/// **allocates nothing per node**. The fence asserts the structural form
+/// of that: the SAME event count on two tree sizes (~10.7k and ~32k
+/// participating nodes), because anything per-node scales with the tree
+/// while reserves do not. Measured 12 on both corpora (the reserves
+/// themselves, rustc 1.98.0, tree-sitter 0.27.0); the budget is those 12
+/// plus a small margin for allocator noise on a busy runner. The F8 form
+/// this regression-fences against left the arrays unreserved, so every
+/// build re-paid its capacity doublings — 123 events on the 80-unit
+/// corpus, 144 on the 240-unit one: growth with size is exactly what the
+/// two-corpus same-constant assertion forbids.
 #[test]
 #[cfg(feature = "lang-rust")]
 fn fingerprint_pass_allocates_nothing_per_node() {
@@ -252,38 +267,66 @@ fn fingerprint_pass_allocates_nothing_per_node() {
         .for_extension("rs")
         .expect("this test binary builds with lang-rust");
     let trivia = trivia_kind_ids(&registry, id);
-    let tree = parsed_corpus();
 
-    ALLOC_EVENTS.store(0, Ordering::Relaxed);
-    let table = FingerprintTable::build(&tree, &corpus_arc(), &trivia);
-    let events = ALLOC_EVENTS.load(Ordering::Relaxed);
+    /// The measured one-time reserves (12) plus margin.
+    const FINGERPRINT_BUDGET: usize = 16;
 
-    assert!(
-        table.participating() > 2_000,
-        "corpus must be big enough to expose a per-node leak (got {})",
-        table.participating()
-    );
-    assert!(
-        events <= 128,
-        "fingerprint pass allocated {events} times across a whole build \
-         (measured ~60 locally — capacity doublings only; budget 128, see \
-         the module docs)"
-    );
+    let mut participating = 0_usize;
+    for units in [80_u32, 240] {
+        // Everything the walk reads is built OUTSIDE the measured windows:
+        // the corpus, its snapshot Arc, and the parse (the earlier form of
+        // this test regenerated the corpus inside the window and measured
+        // its own format! calls — ~90 events of noise on top of the walk).
+        let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(corpus_units(units));
+        let mut parser = registry.parser(id).expect("ABI-verified pair");
+        let tree = parse_snapshot(&mut parser, &bytes).expect("corpus is valid rust");
 
-    // The result arrays are the allowance's intended contents: rebuilding
-    // the same tree allocates the same order of events, not n more.
-    ALLOC_EVENTS.store(0, Ordering::Relaxed);
-    let again = FingerprintTable::build(&tree, &corpus_arc(), &trivia);
-    let rebuild = ALLOC_EVENTS.load(Ordering::Relaxed);
-    assert_eq!(again.digests(), table.digests(), "deterministic rebuild");
-    assert!(rebuild <= 128, "rebuild allocated {rebuild} times");
-}
+        ALLOC_EVENTS.store(0, Ordering::Relaxed);
+        let table = FingerprintTable::build(&tree, &bytes, &trivia);
+        let events = ALLOC_EVENTS.load(Ordering::Relaxed);
 
-/// The corpus bytes as the shared snapshot the fingerprint pass indexes
-/// (Rule T2: offsets are only meaningful against these bytes).
-#[cfg(feature = "lang-rust")]
-fn corpus_arc() -> std::sync::Arc<[u8]> {
-    std::sync::Arc::from(corpus())
+        if units == 80 {
+            participating = table.participating();
+            assert!(
+                participating > 2_000,
+                "corpus must be big enough to expose a per-node leak (got {participating})"
+            );
+        } else {
+            assert!(
+                table.participating() >= 2 * participating,
+                "the second corpus must be substantially bigger ({} vs {participating}) \
+                 for the same-budget assertion to mean anything",
+                table.participating()
+            );
+        }
+        assert!(
+            events <= FINGERPRINT_BUDGET,
+            "fingerprint build over {table_participating} participating nodes allocated \
+             {events} times (measured 12 — one-time reserves only; budget \
+             {FINGERPRINT_BUDGET}, see the test docs)",
+            table_participating = table.participating()
+        );
+
+        // Repeated builds pay the same one-time reserves every time (each
+        // build starts from empty arrays) — the count neither grows nor
+        // decays across builds — and rebuild byte-deterministically.
+        let mut best = usize::MAX;
+        for _ in 0..4 {
+            ALLOC_EVENTS.store(0, Ordering::Relaxed);
+            let again = FingerprintTable::build(&tree, &bytes, &trivia);
+            best = best.min(ALLOC_EVENTS.load(Ordering::Relaxed));
+            assert_eq!(
+                again.digests(),
+                table.digests(),
+                "deterministic rebuild ({units} units)"
+            );
+        }
+        assert!(
+            best <= FINGERPRINT_BUDGET,
+            "repeated rebuilds allocated {best} times (measured 12; budget \
+             {FINGERPRINT_BUDGET})"
+        );
+    }
 }
 
 /// The counting allocator is genuinely installed in this binary (startup
