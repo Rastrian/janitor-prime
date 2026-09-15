@@ -122,13 +122,33 @@ fn wait_for<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
     }
 }
 
-/// Strip the only non-deterministic field so reports compare byte-for-byte
-/// (works at both shapes compared here: a bare report and a full envelope).
+/// Strip the fields that differ between daemon and in-process runs BY
+/// DESIGN so the rest compares byte-for-byte: `stats.wall_ms` (the only
+/// non-deterministic field) and the v0.3 B4 provenance surface
+/// (`served_by` + `stats.cache` — the daemon answers "daemon" with real
+/// counters, the in-process report omits both). Works at both shapes
+/// compared here: a bare report and a full envelope.
 fn without_wall(value: &Value) -> Value {
     let mut value = value.clone();
     for pointer in ["/stats/wall_ms", "/data/stats/wall_ms"] {
         if let Some(wall) = value.pointer_mut(pointer) {
             *wall = Value::Null;
+        }
+    }
+    // Provenance keys are REMOVED, not nulled: the in-process report omits
+    // them entirely, and a null key is still a key.
+    for pointer in [
+        "/served_by",
+        "/data/served_by",
+        "/stats/cache",
+        "/data/stats/cache",
+    ] {
+        let (parent, key) = match pointer.rsplit_once('/') {
+            Some(split) => split,
+            None => continue,
+        };
+        if let Some(object) = value.pointer_mut(parent).and_then(Value::as_object_mut) {
+            object.remove(key);
         }
     }
     value
@@ -883,6 +903,133 @@ fn scan_daemon_flag_routes_and_falls_back() {
         foreign_files,
         Some(3),
         "the fallback scanned `other` locally"
+    );
+
+    stop(daemon);
+}
+
+// --- provenance + cache telemetry (v0.3 B4) --------------------------------
+
+/// The mandated honesty fence: a `scan --daemon` response SAYS who served
+/// it — `"daemon"` with the per-request warm-cache hit/miss delta through
+/// a live socket, `"process"` with `{hits: 0, misses: 0}` on the
+/// dead-socket fallback (both modes) — and the `stats` op exposes the
+/// counters: nonzero `cache.hits` after a routed scan, no new misses on
+/// the warm re-scan.
+#[test]
+fn scan_daemon_responses_say_who_served_them() {
+    let ws = tempfile::tempdir().expect("workspace");
+    seed_corpus(ws.path(), 4, 6);
+    let files = 4_u64;
+    let sock = ws.path().join("prov.sock");
+
+    // Dead socket, rule mode: the fallback is no longer silent.
+    let dead = ws.path().join("dead.sock");
+    let (code, cold) = cli_scan(
+        &["scan", "--rule", "(kind function_item)", "--daemon"],
+        ws.path(),
+        &dead.display().to_string(),
+    );
+    assert_eq!(code, Some(0), "fallback exits 0: {cold}");
+    assert_eq!(
+        cold.pointer("/data/served_by").and_then(Value::as_str),
+        Some("process"),
+        "the in-process fallback names itself: {cold}"
+    );
+    assert_eq!(
+        cold.pointer("/data/stats/cache"),
+        Some(&serde_json::json!({"hits": 0, "misses": 0})),
+        "no warm cache was consulted: {cold}"
+    );
+
+    // Dead socket, duplicates mode: same provenance.
+    let (code, dup) = cli_scan(
+        &["scan", "--duplicates", "--daemon"],
+        ws.path(),
+        &dead.display().to_string(),
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        dup.pointer("/data/served_by").and_then(Value::as_str),
+        Some("process")
+    );
+    assert_eq!(
+        dup.pointer("/data/stats/cache"),
+        Some(&serde_json::json!({"hits": 0, "misses": 0}))
+    );
+
+    // Live socket: routed responses name the daemon and carry the
+    // per-request delta — cold (all misses), then all hits on the re-scan.
+    let daemon = start(ws.path(), &sock);
+    let (code, routed_cold) = cli_scan(
+        &["scan", "--rule", "(kind function_item)", "--daemon"],
+        ws.path(),
+        &sock.display().to_string(),
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        routed_cold
+            .pointer("/data/served_by")
+            .and_then(Value::as_str),
+        Some("daemon")
+    );
+    assert_eq!(
+        routed_cold
+            .pointer("/data/stats/cache/misses")
+            .and_then(Value::as_u64),
+        Some(files),
+        "the cold routed pass re-parsed every file: {routed_cold}"
+    );
+    assert_eq!(
+        routed_cold
+            .pointer("/data/stats/cache/hits")
+            .and_then(Value::as_u64),
+        Some(0)
+    );
+
+    let (code, routed_warm) = cli_scan(
+        &["scan", "--rule", "(kind function_item)", "--daemon"],
+        ws.path(),
+        &sock.display().to_string(),
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        routed_warm
+            .pointer("/data/served_by")
+            .and_then(Value::as_str),
+        Some("daemon")
+    );
+    assert_eq!(
+        routed_warm
+            .pointer("/data/stats/cache/misses")
+            .and_then(Value::as_u64),
+        Some(0),
+        "the warm re-scan re-parsed nothing: {routed_warm}"
+    );
+    assert!(
+        routed_warm
+            .pointer("/data/stats/cache/hits")
+            .and_then(Value::as_u64)
+            .is_some_and(|hits| hits >= files),
+        "the warm re-scan hit every file: {routed_warm}"
+    );
+
+    // The `stats` op exposes the accumulated counters (the deltas above
+    // are its increments): hits nonzero after the routed scans, misses
+    // still just the cold pass's.
+    let stats = client::request(&sock, &Request::stats(), REQUEST_TIMEOUT)
+        .expect("stats answers")
+        .pointer("/data/cache")
+        .cloned()
+        .expect("stats carries cache");
+    assert!(
+        stats["hits"].as_u64().unwrap_or(0) >= files,
+        "nonzero hits after a routed scan: {stats}"
+    );
+    assert_eq!(
+        stats["misses"].as_u64(),
+        Some(files),
+        "the warm scan added no misses: {stats}"
     );
 
     stop(daemon);

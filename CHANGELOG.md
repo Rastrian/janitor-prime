@@ -1,5 +1,18 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (v0.3 — product truth, roadmap #2)
+- **Daemon provenance + cache telemetry (B4):** every scan/duplicates
+  response the daemon serves carries `served_by: "daemon" | "process"`
+  (routed vs the CLI's in-process fallback) and `stats.cache =
+  {hits, misses}` — that one request's warm-cache hit/miss delta, or
+  `{0, 0}` on the fallback. The silent-fallback honesty hole is closed:
+  a `--daemon` scan after the daemon died now visibly says
+  `"process"`. The `stats` op already carried the cumulative
+  `cache.{entries, hits, misses, evictions, bytes, bound_bytes}`
+  counters; the e2e fence now pins nonzero `cache.hits` after a routed
+  scan and zero added misses on the warm re-scan
+  (`tests/daemon_e2e.rs::scan_daemon_responses_say_who_served_them`).
+
 ### Added (v0.3 — product truth, roadmap #1)
 - **`wake` environment notes (B2):** every wake payload now carries
   `data.environment` — `{janitor, servers: [{name, available}…],

@@ -669,7 +669,9 @@ janitor daemon [--workspace DIR] [--sock PATH] [--interval SECS]
 - The CLI never spawns the daemon in v0.2. `janitor scan --daemon`
   (opt-in) routes through the socket iff it answers `ping` AND its
   workspace covers the scan root; anything else falls back to the
-  in-process path silently (a stderr note, never a stdout side effect).
+  in-process path (a stderr note, never a stdout side effect). The
+  fallback is no longer silent (v0.3 B4): every `--daemon` response
+  says who served it — see **Provenance** below.
 
 ### Request/response
 
@@ -691,6 +693,25 @@ agent-facing protocol fails loudly on typos):
   the workspace). Responses carry the exact CLI report shapes as `data`.
 - `ping`/`stats` answer liveness + identity + the numbers below.
 - `shutdown` answers its ack envelope, then the daemon exits.
+
+**Provenance (v0.3 B4):** every scan/duplicates response the daemon
+serves — over the socket or through `scan --daemon` — carries two keys a
+plain in-process report omits:
+
+```json
+{ "served_by": "daemon", "stats": { "cache": { "hits": 52, "misses": 0 }, … } }
+```
+
+`served_by` is `"daemon"` when the warm-cache daemon produced the report
+and `"process"` when the CLI fell back in-process (dead socket, no
+daemon, or a daemon serving another workspace) — agents can SEE when the
+daemon is not serving instead of guessing. `stats.cache` is that one
+request's hit/miss delta against the daemon's warm cache (a cold routed
+scan shows `misses == files, hits == 0`; a warm re-scan `hits >= files,
+misses == 0`); the in-process fallback always reports
+`{"hits": 0, "misses": 0}` because nothing was warm. The cumulative
+counters (plus entries/bytes/evictions/bound) ride `ping`/`stats` — see
+the payload below.
 
 `ping`/`stats` `data` (abridged; every field always present):
 

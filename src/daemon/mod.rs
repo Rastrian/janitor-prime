@@ -42,11 +42,12 @@ pub mod client;
 pub mod protocol;
 pub mod watch;
 
+use crate::ast::cache::CacheStats;
 use crate::envelope::Envelope;
 use crate::error::{DaemonError, JanitorError, OutputError, VfsError};
 use crate::orchestrator::Session;
 use crate::scan::{
-    DEFAULT_MAX_FILE_SIZE, DEFAULT_MIN_DUPLICATE_SIZE, DuplicatesParams, ScanParams,
+    CacheTelemetry, DEFAULT_MAX_FILE_SIZE, DEFAULT_MIN_DUPLICATE_SIZE, DuplicatesParams, ScanParams,
 };
 use crate::vfs::{Os, Overlay};
 
@@ -509,7 +510,10 @@ fn execute(shared: &Shared, request: &protocol::Request) -> Result<Envelope<Valu
                 // (ADR-0007's streaming discipline is the CLI's shape).
                 retain_cache: true,
             };
-            let report = shared.session.scan(&params)?;
+            let before = shared.session.cache().stats();
+            let mut report = shared.session.scan(&params)?;
+            report.served_by = Some("daemon");
+            report.stats.cache = Some(cache_delta(&before, &shared.session.cache().stats()));
             ok_envelope(&report)
         }
         "duplicates" => {
@@ -522,7 +526,10 @@ fn execute(shared: &Shared, request: &protocol::Request) -> Result<Envelope<Valu
                 min_size: request.min_size.unwrap_or(DEFAULT_MIN_DUPLICATE_SIZE),
                 retain_cache: true,
             };
-            let report = shared.session.duplicates(&params)?;
+            let before = shared.session.cache().stats();
+            let mut report = shared.session.duplicates(&params)?;
+            report.served_by = Some("daemon");
+            report.stats.cache = Some(cache_delta(&before, &shared.session.cache().stats()));
             ok_envelope(&report)
         }
         "shutdown" => ok_envelope(&serde_json::json!({
@@ -534,6 +541,17 @@ fn execute(shared: &Shared, request: &protocol::Request) -> Result<Envelope<Valu
             detail: format!("unknown cmd {:?}", request.cmd),
         }
         .into()),
+    }
+}
+
+/// The per-request warm-cache delta (v0.3 B4): how many lookups THIS
+/// request hit the cache vs re-parsed. The counters are monotonic
+/// atomics, so the saturating subtraction is a formality — it must never
+/// panic on a concurrent watcher tick between the snapshots.
+fn cache_delta(before: &CacheStats, after: &CacheStats) -> CacheTelemetry {
+    CacheTelemetry {
+        hits: after.hits.saturating_sub(before.hits),
+        misses: after.misses.saturating_sub(before.misses),
     }
 }
 

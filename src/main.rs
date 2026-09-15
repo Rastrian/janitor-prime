@@ -93,7 +93,15 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 retain_cache: false,
             };
             match session.duplicates(&params) {
-                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Ok(mut report) => {
+                    if args.daemon {
+                        // v0.3 B4: the fallback is honest — the report says
+                        // who served it and that nothing was warm.
+                        report.served_by = Some("process");
+                        report.stats.cache = Some(janitor_prime::scan::CacheTelemetry::default());
+                    }
+                    cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS)
+                }
                 Err(err) => emit_error(err, pretty),
             }
         }
@@ -108,7 +116,13 @@ fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
                 retain_cache: false,
             };
             match session.scan(&params) {
-                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Ok(mut report) => {
+                    if args.daemon {
+                        report.served_by = Some("process");
+                        report.stats.cache = Some(janitor_prime::scan::CacheTelemetry::default());
+                    }
+                    cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS)
+                }
                 Err(err) => {
                     let envelope: Envelope<serde_json::Value> = err.into();
                     cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)

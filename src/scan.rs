@@ -163,6 +163,19 @@ pub struct ScanStats {
     pub matches: u64,
     /// Scanned files per language.
     pub langs: BTreeMap<String, u64>,
+    /// Warm-cache telemetry for THIS scan's serving (v0.3 B4): the
+    /// daemon's hit/miss delta over the request. Absent on plain scans;
+    /// `{0, 0}` on the in-process `--daemon` fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheTelemetry>,
+}
+
+/// Per-scan warm-cache counters (v0.3 B4): how many file lookups this
+/// one scan's serving hit the daemon's cache vs re-parsed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheTelemetry {
+    pub hits: u64,
+    pub misses: u64,
 }
 
 /// The `janitor scan` report payload (the `data` of the janitor.v1
@@ -172,6 +185,12 @@ pub struct ScanReport {
     pub rule: String,
     /// `"skip"` (ADR-0010 default) or `"strict"`.
     pub trivia: &'static str,
+    /// Who served this scan (v0.3 B4): `"daemon"` when routed through the
+    /// warm-cache daemon, `"process"` when the CLI fell back in-process.
+    /// Absent on plain scans — stdout is unchanged for every invocation
+    /// without `--daemon`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<&'static str>,
     /// Path-sorted, per-file canonically ordered matches.
     pub matches: Vec<ScanMatch>,
     /// language → files skipped because the rule names a kind that language
@@ -398,6 +417,7 @@ pub fn scan(
         } else {
             "skip"
         },
+        served_by: None,
         matches,
         skipped_for_language,
         skipped,
@@ -500,6 +520,11 @@ pub struct DuplicatesStats {
     pub langs: BTreeMap<String, u64>,
     /// Wall-clock time — the only non-deterministic field.
     pub wall_ms: u64,
+    /// Warm-cache telemetry for THIS scan's serving (v0.3 B4): the
+    /// daemon's hit/miss delta over the request. Absent on plain scans;
+    /// `{0, 0}` on the in-process `--daemon` fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheTelemetry>,
 }
 
 /// The `janitor scan --duplicates` payload (the `data` of the janitor.v1
@@ -509,6 +534,11 @@ pub struct DuplicatesReport {
     pub kind: &'static str,
     /// The participating-node floor that gated grouping.
     pub min_size: u32,
+    /// Who served this scan (v0.3 B4): `"daemon"` when routed through the
+    /// warm-cache daemon, `"process"` when the CLI fell back in-process.
+    /// Absent on plain scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_by: Option<&'static str>,
     /// Groups ordered canonically: by first member's (path, start, end),
     /// then size descending; ids assigned in this order.
     pub groups: Vec<DuplicateGroup>,
@@ -779,6 +809,7 @@ pub fn duplicates(
     Ok(DuplicatesReport {
         kind: "duplicates",
         min_size: params.min_size,
+        served_by: None,
         groups,
         skipped,
         stats,
