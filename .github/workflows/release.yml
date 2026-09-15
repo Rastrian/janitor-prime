@@ -125,7 +125,7 @@ jobs:
           tar -czf "janitor-$TARGET.tar.gz" -C "$stage" \
             janitor LICENSE-MIT LICENSE-APACHE NOTICE README.md
           ls -l "janitor-$TARGET.tar.gz"
-      - name: "Smoke: envelope lists all seven grammars"
+      - name: "Smoke: envelope lists all eight grammars"
         if: ${{ matrix.smoke == 'run' }}
         # Executable legs: x86_64 musl is fully static, x86_64 gnu matches
         # the ubuntu runner's ABI, aarch64-apple matches the arm64 mac
@@ -134,7 +134,7 @@ jobs:
           "target/$TARGET/release/janitor" --version | jq -e '
             .schema == "janitor.v1"
             and .ok == true
-            and (.data.grammars | length == 7)
+            and (.data.grammars | length == 8)
           '
       - name: "Smoke: cross artifact (not executable on this runner)"
         if: ${{ matrix.smoke == 'file' }}
@@ -158,7 +158,7 @@ jobs:
           file "target/$TARGET/release/janitor"
           file "target/$TARGET/release/janitor" | grep -q x86_64
           if arch -x86_64 "target/$TARGET/release/janitor" --version > "$RUNNER_TEMP/version.json" 2>/dev/null; then
-            jq -e '.schema == "janitor.v1" and .ok == true and (.data.grammars | length == 7)' "$RUNNER_TEMP/version.json"
+            jq -e '.schema == "janitor.v1" and .ok == true and (.data.grammars | length == 8)' "$RUNNER_TEMP/version.json"
           else
             echo "Rosetta unavailable — the file(1) arch check above is the gate"
           fi
