@@ -18,7 +18,7 @@ use crate::memory::context::{AnchorMeta, ContextManager, InitReport, NoteReport,
 use crate::memory::nap::NapPlan;
 use crate::memory::pointer::{self, CliPointer, SyntaxPointer};
 use crate::memory::tree_store::SettleOutcome;
-use crate::scan::{self, ScanParams, ScanReport};
+use crate::scan::{self, DuplicatesParams, DuplicatesReport, ScanParams, ScanReport};
 use crate::vfs::{Os, Overlay};
 
 /// One composition root per invocation (PLAN §1.6 sketch).
@@ -107,6 +107,19 @@ impl Session {
             report.stats.files,
             report.stats.matches,
             report.skipped.len() as u64 + report.skipped_for_language.values().sum::<u64>(),
+        );
+        Ok(report)
+    }
+
+    /// Run a duplicates scan (F8): every capturable subtree above the
+    /// minimum size, grouped by Merkle fingerprint — no rule. Records its
+    /// status like a scan (members are the "matches").
+    pub fn duplicates(&self, params: &DuplicatesParams) -> Result<DuplicatesReport, JanitorError> {
+        let report = scan::duplicates(&self.overlay, &self.cache, &self.langs, params)?;
+        self.mem.record_scan(
+            report.stats.files,
+            report.stats.members,
+            report.skipped.len() as u64,
         );
         Ok(report)
     }

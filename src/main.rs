@@ -53,23 +53,54 @@ fn main() -> ExitCode {
 }
 
 /// `janitor scan`: one session, one scan, one envelope — success carries
-/// the report `data`; every typed failure maps through the envelope.
+/// the report `data`; every typed failure maps through the envelope. F8
+/// adds the second mode: `--duplicates` (fingerprint-grouped duplicate
+/// detection, docs/SCHEMA.md) instead of `--rule`.
 fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
     let root = args.path.unwrap_or_else(|| std::path::PathBuf::from("."));
-    let params = ScanParams {
-        rule: args.rule,
-        root,
-        lang_filter: args.lang,
-        include_virtual: args.include_virtual,
-        strict_trivia: args.strict_trivia,
-        max_file_size: args.max_file_size,
-    };
     let session = Session::new();
-    match session.scan(&params) {
-        Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
-        Err(err) => {
-            let envelope: Envelope<serde_json::Value> = err.into();
-            cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)
+    // clap's scan-mode group guarantees exactly one of --rule/--duplicates;
+    // the total match keeps future callers honest instead of inventing a
+    // precedence.
+    match (args.duplicates, args.rule) {
+        (true, _) => {
+            let params = janitor_prime::scan::DuplicatesParams {
+                root,
+                lang_filter: args.lang,
+                include_virtual: args.include_virtual,
+                max_file_size: args.max_file_size,
+                min_size: args.min_size,
+            };
+            match session.duplicates(&params) {
+                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Err(err) => emit_error(err, pretty),
+            }
+        }
+        (false, Some(rule)) => {
+            let params = ScanParams {
+                rule,
+                root,
+                lang_filter: args.lang,
+                include_virtual: args.include_virtual,
+                strict_trivia: args.strict_trivia,
+                max_file_size: args.max_file_size,
+            };
+            match session.scan(&params) {
+                Ok(report) => cli::emit(&Envelope::ok(report), pretty, EXIT_SUCCESS),
+                Err(err) => {
+                    let envelope: Envelope<serde_json::Value> = err.into();
+                    cli::emit(&envelope, pretty, janitor_prime::envelope::EXIT_OPERATIONAL)
+                }
+            }
+        }
+        (false, None) => {
+            let usage = Envelope::error(
+                "E_USAGE",
+                "scan needs exactly one mode: --rule \"<rule>\" (docs/DSL.md) or --duplicates \
+                 (docs/SCHEMA.md)",
+                None,
+            );
+            cli::emit(&usage, pretty, EXIT_USAGE)
         }
     }
 }

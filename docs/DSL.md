@@ -338,7 +338,15 @@ Exit codes: `0` success (zero matches is success), `1` operational error,
 ```
 janitor scan --rule "<rule>" [PATH] [--lang rust] [--strict-trivia]
              [--include-virtual] [--max-file-size BYTES] [--pretty]
+janitor scan --duplicates [PATH] [--min-size N] [--lang rust]
+             [--include-virtual] [--max-file-size BYTES] [--pretty]
 ```
+
+Exactly one mode per invocation: `--rule` (structural search, this page)
+or `--duplicates` (F8: fingerprint-grouped duplicate detection — the
+report shape lives in docs/SCHEMA.md; `--strict-trivia` is rule-mode only,
+equivalence is fixed by ADR-0010, and `--min-size` is the participating-
+node floor, default 8).
 
 * `PATH` (default `.`) is the scan root; it is walked recursively.
 * Files whose extension has no enabled grammar are ignored (not reported).

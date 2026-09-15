@@ -276,6 +276,10 @@ pub struct SpanDigest {
     pub end: u32,
     pub kind_id: u16,
     pub size: u32,
+    /// Byte-column points (KP-3 units), carried so duplicate members can
+    /// ship the full match-report shape without a second walk.
+    pub start_point: crate::ast::eval::PointData,
+    pub end_point: crate::ast::eval::PointData,
 }
 
 impl SpanDigest {
@@ -414,6 +418,8 @@ impl FingerprintTable {
                         end,
                         kind_id,
                         size,
+                        start_point: node.start_position().into(),
+                        end_point: node.end_position().into(),
                     });
                     // Captures address nodes by (span, kind); zero-width
                     // same-kind nodes are degenerate and intentionally
