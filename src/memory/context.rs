@@ -24,6 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{JanitorError, MemoryError, VfsError};
+use crate::memory::environment::{self, EnvironmentNotes};
 use crate::memory::log::{self, FactLog, FactRecord, LogWarning, MemoryFlag};
 use crate::memory::nap::{self, NapPlan};
 use crate::memory::pointer::SyntaxPointer;
@@ -84,6 +85,10 @@ pub struct WakePayload {
     /// scan / apply status the orchestrator tracks.
     pub state: Value,
     pub hints: Vec<&'static str>,
+    /// The environment notes (v0.3 B2): PATH probes for the language
+    /// servers and git around the repo — the evidence the standing
+    /// guidance's semantic-layer advice keys on.
+    pub environment: EnvironmentNotes,
 }
 
 /// How a pointer anchored at note time (echoed in the report).
@@ -197,16 +202,18 @@ impl ContextManager {
     }
 
     /// `janitor wake --budget N`: the budgeted recall plus the global
-    /// layer, STATE.json status, and hints.
+    /// layer, STATE.json status, hints, and the environment notes.
     pub fn wake(&self, budget: u64) -> Result<WakePayload, JanitorError> {
         self.ensure_initialized()?;
         let state = self.log().load()?;
         let report = wake::wake(&state.facts, &self.store(), budget, state.warnings)?;
+        let repo = self.root.parent().unwrap_or_else(|| Path::new("."));
         Ok(WakePayload {
             report,
             global: Self::global_layer(),
             state: self.read_state(),
             hints: HINTS.to_vec(),
+            environment: environment::probe(repo),
         })
     }
 
@@ -427,7 +434,8 @@ mod tests {
     }
 
     /// The wake payload composes the core report with the global layer,
-    /// state, and hints — and STATE.json tracks the engine's last runs.
+    /// state, hints, and the environment notes — and STATE.json tracks the
+    /// engine's last runs.
     #[test]
     fn wake_payload_carries_layers_state_and_hints() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -460,6 +468,20 @@ mod tests {
         assert_eq!(json["estimator"], "chars4");
         assert_eq!(json["state"]["last_scan"]["matches"], 3);
         assert!(json["global"]["text"].as_str().is_some());
+
+        // The environment block (v0.3 B2): the documented shape, always
+        // present, with one row per probed server.
+        let servers = json["environment"]["servers"]
+            .as_array()
+            .expect("environment.servers is an array");
+        assert_eq!(servers.len(), environment::PROBED_SERVERS.len());
+        for (row, name) in servers.iter().zip(environment::PROBED_SERVERS) {
+            assert_eq!(row["name"], *name);
+            assert!(row["available"].is_boolean());
+        }
+        assert!(json["environment"]["git"]["available"].is_boolean());
+        assert!(json["environment"]["git"]["dirty"].is_boolean());
+        assert_eq!(json["environment"]["janitor"], env!("CARGO_PKG_VERSION"));
     }
 
     /// The note report: position-derived ids, lock flagging, and the

@@ -1,5 +1,19 @@
 ## [Unreleased] — v0.2.0 candidates
 
+### Added (v0.3 — product truth, roadmap #1)
+- **`wake` environment notes (B2):** every wake payload now carries
+  `data.environment` — `{janitor, servers: [{name, available}…],
+  git: {available, dirty}}`. The servers are pure PATH lookups (no
+  process spawn) over the eight known language-server binaries
+  (rust-analyzer, pyright, basedpyright, gopls, ruby-lsp, elixir-ls,
+  ocamllsp, typescript-language-server); git presence is the same lookup
+  and `dirty` is one `git status --porcelain` run (staged, unstaged, or
+  untracked; false when git is missing or the directory is not a
+  repository). This is the field GLOBAL.md's semantic-layer guidance
+  always referenced — the promise is now true, and GLOBAL.md/SCHEMA.md
+  describe the actual shape. ADR-0017 unchanged: guidance with evidence,
+  never a runtime.
+
 ### Added (F10a)
 - **Warm-cache daemon + watch mode** (ADR-0018,
   `docs/planning/ADR-0018-daemon.md`): `janitor daemon [--workspace

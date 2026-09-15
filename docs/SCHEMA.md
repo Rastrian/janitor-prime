@@ -252,7 +252,13 @@ Payload (flattened: the recall core plus the standing context):
     "warnings": [],
     "global": { "source": "embedded", "text": "…", "estimate": 600 },
     "state": { "updated": "…", "last_scan": { … }, "last_apply": { … } },
-    "hints": [ "…" ] } }
+    "hints": [ "…" ],
+    "environment": {
+      "janitor": "0.3.0",
+      "servers": [
+        { "name": "rust-analyzer", "available": true },
+        { "name": "pyright", "available": false } ],
+      "git": { "available": true, "dirty": false } } } }
 ```
 
 `global.estimate` is informational — the budget governs the memory
@@ -260,6 +266,18 @@ payload, not the standing instructions. `state` is STATE.json's contents
 (or `null`): `{ "last_scan": {"ts","files","matches","skipped"},
 "last_apply": {"ts","files","edits","dry_run"} }`, written atomically by
 every successful `scan`/`apply` **only when `.janitor/` exists**.
+
+`environment` (v0.3) is the guidance surface ADR-0017 promised, as
+evidence rather than a promise: `servers` carries one `{name, available}`
+row per probed language server (`rust-analyzer`, `pyright`,
+`basedpyright`, `gopls`, `ruby-lsp`, `elixir-ls`, `ocamllsp`,
+`typescript-language-server` — a pure PATH lookup, no process spawn);
+`git.available` is git on the PATH and `git.dirty` is whether one
+`git status --porcelain` run over the repo listed anything (staged,
+unstaged, or untracked; false when git is missing or the directory is
+not a repository); `janitor` is the answering binary's version. Janitor
+never starts or embeds a server — the block says what the PATH offers so
+the semantic-layer advice in GLOBAL.md can key on it.
 
 **Completeness gate:** when compression is needed and a block the layout
 needs has no stored summary, `wake` refuses with `E_NAP_PENDING` — never
