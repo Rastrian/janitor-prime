@@ -1,0 +1,53 @@
+# cargo-deny configuration (PLAN §10 supply chain, F7 brief task 2).
+#
+# licenses   — the allow list is the F7 brief's exact set. It covers the
+#              whole current graph: dual-licensed crates (e.g. memchr's
+#              "Unlicense OR MIT", rustix's "Apache-2.0 WITH LLVM-exception
+#              OR Apache-2.0 OR MIT") are satisfied through their MIT /
+#              Apache-2.0 disjuncts, and unicode-ident needs Unicode-3.0
+#              alongside MIT. Zlib / BSD-2-Clause / BSD-3-Clause / ISC are
+#              pre-cleared for future deps (the grammar crates are MIT).
+# advisories — the gate: RustSec vulnerabilities and yanked versions are
+#              denials, not warnings. `cargo audit` runs the same database
+#              as a second, independent check in CI.
+# bans       — duplicate versions warn (the dev-graph has benign dupes:
+#              two syn/getrandom/hashbrown via criterion vs proptest);
+#              wildcard dependencies ("*") are denied.
+# sources    — crates.io is the only allowed registry; git dependencies
+#              and unknown registries are denied (there are none today,
+#              and it must stay that way for a static, offline binary).
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-musl" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
