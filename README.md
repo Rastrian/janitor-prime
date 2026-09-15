@@ -22,18 +22,26 @@ with 100% JSON output and zero network calls:
 
 [tree-sitter]: https://tree-sitter.github.io/
 
-## Status: v0.1.0
+## Status: v0.1.0 + python (F9a)
 
 Shipped: `init` · `wake` · `scan` · `apply` · `note` · `nap` — the full agent
-loop, end-to-end tested through the real binary. ~170 tests + no-panic fuzz
+loop, end-to-end tested through the real binary. ~180 tests + no-panic fuzz
 targets + determinism/determinism-of-output fences in CI; musl/gnu × x86_64/
 aarch64 + macOS release matrix.
 
-Known limits (honest): only the **rust** grammar is CI-tested end-to-end
-(python/go/js/ts/java/c compile and register, runtime support lands with
-multi-language in v0.2); `Unify` (duplicate detection) is v0.2; no LSP, no
-watch mode, no daemon; linux + macOS only. The measured-numbers changelog is
-in [CHANGELOG.md](CHANGELOG.md); the authoritative plan with every decision
+Languages: **rust** and **python** are fully supported — both CI-tested
+end-to-end on every PR (`cargo test` and `cargo test --features lang-python`):
+registry/kind resolution, the KP-6 trivia corpus (ADR-0010's comment-skipping
+default measured per language), normalized-vocabulary norm tables
+(`lang/*.norm.toml`), the full agent-loop acceptance test, and the
+thread-count determinism fence all run for both. The other five grammars
+(go/js/ts/java/c) compile and register; their enablement follows the same
+recipe.
+
+Known limits (honest): `Unify` (duplicate detection) is v0.2; the five
+remaining grammars are compile-and-register only until their F9 wave; no LSP,
+no watch mode, no daemon; linux + macOS only. The measured-numbers changelog
+is in [CHANGELOG.md](CHANGELOG.md); the authoritative plan with every decision
 and kill-point result is [docs/planning/PLAN.md](docs/planning/PLAN.md).
 
 ## Install
@@ -211,8 +219,9 @@ Grammars are cargo features: `lang-rust` (default), `lang-python`,
 ## Roadmap
 
 - **v0.2** — `Unify` (cross-match unification / duplicate detection via
-  Merkle fingerprints, ADR-0010 equivalence), multi-language runtime support
-  starting with python (F9).
+  Merkle fingerprints, ADR-0010 equivalence); multi-language runtime support
+  **started with python (F9a, shipped)** — go/typescript next, following the
+  same enablement recipe (registry tests, trivia corpus, norm table, e2e).
 - **v0.2+** — LSP surface, watch mode, warm parse cache/daemon (F10).
 - **KP-11 (the project's own kill-point)** — a one-week dogfood: an agent
   running `wake → scan → apply → note` on a real repo vs a git-worktree +

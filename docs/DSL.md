@@ -414,3 +414,82 @@ Two more shapes worth internalizing:
 5. No `unify` in v0.1 — it fails with `E_UNSUPPORTED_VERSION`.
 6. Read the report's `skipped`/`skipped_for_language` before concluding a
    rule matches nothing — exclusions are always listed.
+
+---
+
+## 11. Python (v0.2, F9a) — kinds, trivia, and worked examples
+
+Python is fully supported and CI-tested alongside rust (this section
+supersedes the v0.1 header note that named rust the only supported
+language). Everything in §1–§10 applies verbatim; this section gives
+the python-specific kind names and two worked examples with measured
+counts. Build with `--features lang-python` (release artifacts embed
+all grammars).
+
+**Common python kinds** (tree-sitter-python 0.25.0): `module` (the
+root), `function_definition`, `decorated_definition` (wraps a decorated
+def: its children are the `decorator`s then the def), `class_definition`,
+`identifier`, `parameters`, `block` (any indented suite), `if_statement`
+(with `elif_clause` and `else_clause` as named siblings),
+`expression_statement` (docstrings are `block > expression_statement >
+string`), `import_statement` / `import_from_statement`, `comment`,
+`string`, `integer`, `call`, `argument_list`, `attribute`.
+
+**Trivia** (§5): python's table is `comment` only. Newlines and the
+scanner's INDENT/DEDENT tokens are anonymous, so they never appear in
+the named-sibling list — python's indentation discipline lives inside
+the grammar and adjacency ports unchanged. Measured (KP-6-python):
+comment-skipping is load-bearing — byte-strict loses 28.6% of
+method-adjacency pairs and 10.5% of docstring-then-return pairs on real
+comment-bearing code.
+
+### Example 1 — decorator pattern (attribute decoration above a def)
+
+A decorator and its def are siblings inside `decorated_definition`, so
+the decoration rule scopes to that container:
+
+```scheme
+(under decorated_definition
+  (seq (kind decorator) (kind function_definition)))
+```
+
+Match counts on the KP-6-python curated snippet
+(`tests/fixtures/kp6_python/decorated_def.py`): **strict 1, skip 2** —
+a comment between the decorator and the def (legal python) hides the
+pair from byte-strict, which is exactly why skip is the default.
+
+To capture the decorated function's name:
+
+```scheme
+(under function_definition
+  (seq (capture @fn identifier) parameters))
+```
+
+(the def inside the wrapper is an ordinary `function_definition`).
+
+### Example 2 — refactor rule (find every class method pair to review)
+
+The "methods that are adjacent in a class body" idiom — the shape a
+split-class refactor starts from:
+
+```scheme
+(under block
+  (seq (kind function_definition) (kind function_definition)))
+```
+
+Measured on the bundled python corpus (`tests/fixtures/python/`):
+**strict 5, skip 7**. The two lost pairs sit behind section-banner
+comments between methods — real code, really unmatchable byte-strict.
+
+### Python authoring notes
+
+- Decorated defs are *wrapped*: to match them at module level use
+  `decorated_definition` as the pivot; to match the def itself
+  (name/parameters/body) use `function_definition` — it works inside
+  the wrapper.
+- `lambda` is not `function_definition` (it is an expression node);
+  the norm table (`lang/python.norm.toml`) maps FUNCTION to
+  def-shaped functions only.
+- Import groups: `import x` and `from x import y` are *different kinds*
+  (`import_statement` vs `import_from_statement`) — a rule over an
+  import group that mixes both needs `any-of`.
