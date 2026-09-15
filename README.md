@@ -1,38 +1,80 @@
 # janitor-prime
 
-A single statically-linked Rust binary (`janitor`) that gives autonomous LLM
-agents three fused capabilities over a target codebase:
+**A deterministic refactoring engine, transactional edit layer, and persistent
+memory for autonomous coding agents — in one statically-linked Rust binary.**
+
+`janitor` gives an LLM agent three fused capabilities over a target codebase,
+with 100% JSON output and zero network calls:
 
 1. **`src/vfs`** — a transactional virtual filesystem: an `Overlay` over `Os`
-   that simulates edits in memory, with a strict anti-phantom invariant and
-   commit/rollback boundaries around multi-file changes.
-2. **`src/ast`** — a structural search/rewrite engine over
-   [tree-sitter](https://tree-sitter.github.io/), driven by a small
-   s-expression DSL with explicit scope semantics and a proven linearity
-   bound.
-3. **`src/memory`** — a persistent, append-only memory with anti-hallucination
-   syntax pointers and a synchronous `nap` compression protocol. No LLM call
-   ever happens inside the binary.
+   that stages edits in memory with a strict anti-phantom invariant
+   (`read_dir` never lists staged files) and all-or-nothing commit/rollback
+   around multi-file changes.
+2. **`src/ast`** — structural search over [tree-sitter] with a small
+   s-expression DSL compiled to a scoped NFA: memoized failures make
+   catastrophic backtracking structurally impossible, and the match output is
+   byte-identical under any rayon thread count.
+3. **`src/memory`** — an append-only fact log anchored to real code
+   (`SyntaxPointer`: span + kind + content hash), a token-budgeted `wake`
+   recall that coarsens the oldest facts first, and `ArchitecturalLock` facts
+   that are never compressed. Summaries are written by the consuming agent —
+   **no LLM runs inside the binary**.
 
-**Status:** v0.1.0 (release candidate). All v0.1 phases (F0–F7) are
-complete: the full agent loop — `init → wake → scan → apply → note → nap` —
-ships with the transactional overlay, the scoped-NFA DSL matcher, and the
-persistent memory layer. Measured outcomes per phase live in
-[`docs/planning/PLAN.md`](docs/planning/PLAN.md) §5 and
-[`CHANGELOG.md`](CHANGELOG.md); known limitations (one CI-tested language,
-no LSP, nap is an agent-driven protocol, linux/macOS only) are listed there
-too. The v0.1 definition of done is `tests/v01_acceptance.rs` — one scripted
-session through the real binary.
+[tree-sitter]: https://tree-sitter.github.io/
 
-## Agent topology
+## Status: v0.1.0
 
-`janitor` is designed as a **tool**, not a service: one process per
-invocation, `stdin`/`stdout` only, zero network. The consuming agent drives
-it as a state machine across a coding session — `wake → scan → apply → note`
-— and compression is closed by the same agent via the synchronous `nap`
-protocol.
+Shipped: `init` · `wake` · `scan` · `apply` · `note` · `nap` — the full agent
+loop, end-to-end tested through the real binary. ~170 tests + no-panic fuzz
+targets + determinism/determinism-of-output fences in CI; musl/gnu × x86_64/
+aarch64 + macOS release matrix.
 
-### Session lifecycle
+Known limits (honest): only the **rust** grammar is CI-tested end-to-end
+(python/go/js/ts/java/c compile and register, runtime support lands with
+multi-language in v0.2); `Unify` (duplicate detection) is v0.2; no LSP, no
+watch mode, no daemon; linux + macOS only. The measured-numbers changelog is
+in [CHANGELOG.md](CHANGELOG.md); the authoritative plan with every decision
+and kill-point result is [docs/planning/PLAN.md](docs/planning/PLAN.md).
+
+## Install
+
+Download the static binary from [releases](https://github.com/Rastrian/janitor-prime/releases)
+(5 targets + SHA256SUMS), or build:
+
+```sh
+cargo build --release          # rust grammar (default)
+cargo build --release --features lang-all   # all 7 grammars
+```
+
+Every release artifact answers `--version` with the embedded grammar list:
+
+```json
+{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","java","c"]}}
+```
+
+## Use cases
+
+**Agent refactoring that cannot break the build.** `scan` finds the sites
+structurally, `apply` validates the resulting syntax before anything touches
+the disk: a diff that would introduce an `ERROR` node is rejected with the
+offending node's kind and coordinates, the working tree byte-identical to
+before. Agents retry from facts, not from corrupted state.
+
+**Anti-hallucination for coding agents.** Notes are anchored to code that
+must exist: `note` accepts a pointer only if the span + content hash resolve
+against the real tree (it re-anchors across edits, refuses dangling ones).
+Edits carry `expect_sha`/`old_text` — an agent acting on a stale view gets
+`E_STALE_VIEW`, not silent corruption.
+
+**Project memory across sessions.** `wake --budget N` loads the durable
+decisions ("no `unwrap` in this crate", "the parser is the bottleneck") inside
+a token budget: newest raw, oldest coarsened, `ArchitecturalLock` decisions
+always verbatim. Multiple agents coordinate through the same `.janitor/` board.
+
+**A deterministic CI gate.** Structural rules as checks — same input,
+byte-identical output, no thread-count flakiness.
+
+## The agent loop
 
 ```mermaid
 sequenceDiagram
@@ -43,46 +85,39 @@ sequenceDiagram
     participant E as Engine (src/ast)
     participant M as Memory (src/memory)
 
+    A->>J: janitor init
     A->>J: janitor wake --budget 8000
     J->>M: block-tiling recall (newest raw, oldest coarsened)
     J-->>A: facts + summaries within budget, linter status
 
-    A->>J: janitor scan --rule "(under function_item (seq (capture @n (kind identifier)) (kind block)))"
+    A->>J: janitor scan --rule "(under function_item (seq (capture @n (kind identifier)) (kind parameters) (kind block)))"
     J->>O: read_dir (disk truth only) + virtual_paths() if opted in
     O->>E: per-file Arc byte snapshot (rayon, owned)
-    E->>E: parse + scoped NFA match, memoized failures
-    E-->>J: MatchReport list (byte spans, captures)
-    J-->>A: canonical matches, deterministic under any thread count
+    E->>E: compile + scoped NFA, memoized failures
+    E-->>J: canonical MatchReports (byte spans, captures)
+    J-->>A: deterministic matches, byte-identical at any thread count
 
-    A->>J: janitor apply --diff (edits + expect_sha)
-    J->>O: stage spliced bytes, bump generation
-    J->>E: exclusive Tree edit + incremental re-parse
-    alt error_count = 0 in edited ranges
-        J->>O: commit, atomic flush to Os
-        J-->>A: ok, flushed paths
-    else syntax errors introduced
-        J->>O: rollback
-        J-->>A: E_PARSE_INVALID + offending node coordinates
-        Note over A: agent fixes the diff and retries — disk was never touched
+    A->>J: janitor apply --diff (edits + old_text/expect_sha)
+    J->>O: validate against current bytes, stage (generation bump)
+    J->>E: take cache entry, exclusivity-guarded edit, incremental re-parse
+    alt error_count = 0 (whole-file gate)
+        J->>O: flush all (tmp+rename) — the diff is all-or-nothing
+        J-->>A: per-file flushed + sha_before/sha_after
+    else any file fails
+        J->>O: nothing was ever flushed; rollback staged state
+        J-->>A: E_STALE_VIEW / E_EDIT_MISMATCH / E_PARSE_INVALID + node coordinates
+        Note over A: agent rebuilds the diff — disk untouched throughout
     end
 
-    A->>J: janitor note --ptr span+content-sha "Overlay read_dir never consults buffer"
-    J->>E: resolve pointer against current tree (re-anchor if moved)
+    A->>J: janitor note --ptr lib.rs:27-89:function_item "alpha's anchor moved here"
+    J->>E: resolve against the current tree (exact / re-anchor / E_POINTER_DANGLING)
     J->>M: append JSONL fact (position = identity)
-    J-->>A: ok, id 42
-
-    A->>J: janitor nap
-    J-->>A: next pending compression (block, source material)
-    A->>J: janitor nap --slot "0-1" --text "one-line summary"
-    J->>M: append fixed-width TREE record
+    A->>J: janitor nap (loop) — the agent writes each summary, the tool sequences
+    J-->>A: "Nothing left to compress." when settled
 ```
 
-The two anti-hallucination gates are visible in the sequence: an agent
-**cannot apply** a diff computed against a stale view (`expect_sha` mismatch
-→ `E_STALE_VIEW`), and it **cannot note** a fact anchored to code that does
-not exist (`SyntaxPointer` fails to resolve → `E_POINTER_DANGLING`).
-
-### Module topology
+Module topology — dependencies are acyclic and enforced
+(`cli → orchestrator → {vfs, ast, memory}`, `ast → vfs`, `memory → ast`):
 
 ```mermaid
 flowchart LR
@@ -104,58 +139,85 @@ flowchart LR
     MEM --> TREE[(.janitor/TREE - fixed-width summary records)]
 ```
 
-Module dependency direction is acyclic and enforced:
-`cli → orchestrator → {vfs, ast, memory}`, with `ast → vfs` (the parser reads
-Overlay bytes, never disk) and `memory → ast` (pointer validation needs a
-live tree). The `orchestrator::Session` is the only place the three domains
-meet.
-
-### The edit transaction
+The edit transaction (`apply` is two-phase: **validate-all, then flush-all** —
+a failure in one file of fifty flushes nothing):
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Staged: apply --diff (payload validated against current bytes + expect_sha)
-    Staged --> Validating: splice descending by offset, generation bumped
-    Validating --> Flushed: whole-file error_count == 0
-    Validating --> RolledBack: E_PARSE_INVALID + coordinates
-    Flushed --> [*]: tmp+rename per file, partial failure reported honestly
-    RolledBack --> [*]: prior bytes restored, disk never saw the bad state
+    [*] --> Validating: apply --diff (payload + old_text/expect_sha checked)
+    Validating --> Validating: every file: splice, guarded edit, whole-file re-parse gate
+    Validating --> Flushed: all files error_count == 0
+    Validating --> RolledBack: first typed refusal (E_STALE_VIEW / E_PARSE_INVALID / ...)
+    Flushed --> [*]: ordered tmp+rename, per-file outcomes in the report
+    RolledBack --> [*]: disk byte-identical to before; coordinates returned for the retry
 ```
 
-### The agent loop, in commands
+## Command reference
 
-| Step | Command | Consumer contract |
+| Command | Purpose | Contract highlights |
 |---|---|---|
-| Recall context | `janitor wake --budget N` | facts + summaries within a token budget; `E_NAP_PENDING` if a compression is owed first |
-| Find refactor sites | `janitor scan --rule "..."` | canonical, thread-count-deterministic match coordinates |
-| Stage + validate + flush | `janitor apply --diff '...'` | typed errors (`E_STALE_VIEW`, `E_EDIT_OVERLAP`, `E_PARSE_INVALID`) or flushed paths |
-| Persist a fact | `janitor note --ptr ... "..."` | anchored note id, or `E_POINTER_DANGLING` |
-| Compress | `janitor nap` / `nap --slot ... --text ...` | the agent writes the summary; the tool sequences and stores it |
+| `janitor init` | create `.janitor/` in the target repo | memory skeleton + STATE.json |
+| `janitor wake --budget N` | load context within a token budget | `estimator:"chars4"`; `E_NAP_PENDING` if a compression is owed; locks always raw |
+| `janitor scan --rule "..."` | structural search | ADR-0016 semantics: local maxima, overlap flags, canonical order; `--include-virtual` default OFF; binary/oversized files reported as skipped |
+| `janitor apply --diff '...'` | staged, validated, all-or-nothing edits | `--dry-run` available; typed refusals carry retryable coordinates |
+| `janitor note --ptr ... "text"` | persist an anchored fact | ≤ 280 bytes; re-anchors across edits; `E_POINTER_DANGLING` for invented code |
+| `janitor nap` / `nap --slot lo-hi --text "..."` | compression protocol | the agent writes the summary; out-of-order and over-length slots refused; idempotent resubmission |
+
+The rule language, every error code, and the payload schemas are documented
+for rule-authoring agents in [docs/DSL.md](docs/DSL.md) and
+[docs/SCHEMA.md](docs/SCHEMA.md).
+
+## Engineering notes (measured, not promised)
+
+- **No catastrophic backtracking** — the scoped NFA settles each
+  `(child_index, pc)` state once; the KP-7 bench holds ~linear scaling under
+  alternation-heavy adversarial patterns (naive baseline explodes 2^k), and a
+  counting allocator asserts the matcher is allocation-free per visited node.
+- **Incremental re-parse wins everywhere** — 6.0–7.4× p50 vs full re-parse at
+  every edit size, byte-identical trees (KP-1).
+- **Whole-repo cold parse is cheap** — rust-analyzer (1,484 files, 16.7 MB)
+  parses in 2.21 s serial, peak RSS 15.3 MiB with streaming retention (KP-10).
+- **Trivia semantics chosen by data** — comment-skipping adjacency (ADR-0010)
+  confirmed on a real corpus: byte-strict loses 8.1% of `let`-pairs and misses
+  attribute→item pairs entirely (KP-6).
+- **No panics, by gate** — `deny(clippy::unwrap_used, expect_used, panic)` in
+  production code; no-panic fuzz properties over every untrusted-input parser.
 
 ## The stdout contract
 
-`stdout` is 100% JSON, from day one. Every user-facing message flows through
-a versioned envelope:
+`stdout` is 100% JSON through a versioned envelope; failures carry a stable
+`E_*` code:
 
 ```json
-{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust"]}}
+{"schema":"janitor.v1","ok":false,"error":{"code":"E_PARSE_INVALID","message":"...","details":{"nodes":[...]}}}
 ```
 
-Failures use the same envelope with an `error` body carrying a stable `E_*`
-code. Diagnostics go to `stderr` via `tracing` (env-gated, `RUST_LOG`).
-Exit codes: `0` success, `1` operational error, `2` usage error.
+Diagnostics go to `stderr` via `tracing` (`RUST_LOG`). Exit codes: `0`
+success, `1` operational error, `2` usage error.
 
 ## Building
 
 ```sh
-cargo build                  # default: rust grammar only (ADR-0015)
-cargo build --features lang-all
+cargo build                                  # default: rust grammar only
+cargo build --features lang-all              # all 7 grammars
 cargo build --no-default-features
+cargo test --all-features                    # full matrix
 ```
 
-Language grammars are cargo features: `lang-rust` (default), `lang-python`,
+Grammars are cargo features: `lang-rust` (default), `lang-python`,
 `lang-go`, `lang-javascript`, `lang-typescript`, `lang-java`, `lang-c`,
 `lang-all`.
+
+## Roadmap
+
+- **v0.2** — `Unify` (cross-match unification / duplicate detection via
+  Merkle fingerprints, ADR-0010 equivalence), multi-language runtime support
+  starting with python (F9).
+- **v0.2+** — LSP surface, watch mode, warm parse cache/daemon (F10).
+- **KP-11 (the project's own kill-point)** — a one-week dogfood: an agent
+  running `wake → scan → apply → note` on a real repo vs a git-worktree +
+  ast-grep baseline. If the loop does not measurably reduce broken edits or
+  context loss, the project stops at v0.1.
 
 ## License
 
