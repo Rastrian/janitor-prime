@@ -132,7 +132,9 @@ fn unknown_lang_flag_is_typed_not_silent() {
     let bin = env!("CARGO_BIN_EXE_janitor");
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = Command::new(bin)
-        .args(["scan", "--rule", "_", "--lang", "ruby"])
+        // A name no grammar will ever claim (ruby joined the registry at
+        // F9c, so it stopped being an honest "unknown" probe).
+        .args(["scan", "--rule", "_", "--lang", "kotlin"])
         .arg(tmp.path())
         .output()
         .expect("binary runs");
