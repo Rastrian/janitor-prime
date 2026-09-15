@@ -95,6 +95,10 @@ pub enum EditError {
     StaleView { path: String, expected_sha: String },
     #[error("edit out of range on {path}: offset {offset} beyond length {len}")]
     OutOfRange { path: String, offset: u64, len: u64 },
+    /// F5: the `--diff` JSON payload itself is malformed (bad JSON, wrong
+    /// types, duplicate paths). Append-only addition to the F0 skeleton.
+    #[error("malformed edit payload: {detail}")]
+    Payload { detail: String },
 }
 
 /// Post-edit validation errors (PLAN §1.2.1 step 7, F5).
@@ -191,6 +195,7 @@ impl JanitorError {
             Self::Edit(EditError::Overlap { .. }) => "E_EDIT_OVERLAP",
             Self::Edit(EditError::StaleView { .. }) => "E_STALE_VIEW",
             Self::Edit(EditError::OutOfRange { .. }) => "E_EDIT_OUT_OF_RANGE",
+            Self::Edit(EditError::Payload { .. }) => "E_EDIT_PAYLOAD",
             Self::Validate(ValidateError::ParseInvalid { .. }) => "E_PARSE_INVALID",
             Self::Validate(ValidateError::FlushPartial { .. }) => "E_FLUSH_PARTIAL",
             Self::Memory(MemoryError::PointerDangling { .. }) => "E_POINTER_DANGLING",
@@ -250,6 +255,13 @@ impl JanitorError {
             }
             Self::Edit(EditError::OutOfRange { path, offset, len }) => {
                 Some(serde_json::json!({ "path": path, "offset": offset, "len": len }))
+            }
+            Self::Edit(EditError::Mismatch { path, detail })
+            | Self::Edit(EditError::Overlap { path, detail }) => {
+                Some(serde_json::json!({ "path": path, "detail": detail }))
+            }
+            Self::Edit(EditError::Payload { detail }) => {
+                Some(serde_json::json!({ "detail": detail }))
             }
             Self::Validate(ValidateError::ParseInvalid { nodes, .. }) => {
                 Some(serde_json::json!({ "nodes": nodes }))
@@ -337,6 +349,22 @@ mod tests {
                 }
                 .into(),
                 "E_STALE_VIEW",
+            ),
+            (
+                EditError::OutOfRange {
+                    path: "p".into(),
+                    offset: 99,
+                    len: 10,
+                }
+                .into(),
+                "E_EDIT_OUT_OF_RANGE",
+            ),
+            (
+                EditError::Payload {
+                    detail: "EOF".into(),
+                }
+                .into(),
+                "E_EDIT_PAYLOAD",
             ),
             (
                 ValidateError::ParseInvalid {
