@@ -14,12 +14,15 @@ agents three fused capabilities over a target codebase:
    syntax pointers and a synchronous `nap` compression protocol. No LLM call
    ever happens inside the binary.
 
-**Status:** pre-alpha. Phase F0 (scaffold + CI + grammar pin-check) and F1
-(kill-point spikes: incremental re-parse, validity-gate honesty, trivia
-semantics, parse throughput) are complete — measured outcomes in
-[`docs/planning/PLAN.md`](docs/planning/PLAN.md) §5. The VFS module (F2) is
-next. The `janitor --version` envelope below is the only implemented command
-so far.
+**Status:** v0.1.0 (release candidate). All v0.1 phases (F0–F7) are
+complete: the full agent loop — `init → wake → scan → apply → note → nap` —
+ships with the transactional overlay, the scoped-NFA DSL matcher, and the
+persistent memory layer. Measured outcomes per phase live in
+[`docs/planning/PLAN.md`](docs/planning/PLAN.md) §5 and
+[`CHANGELOG.md`](CHANGELOG.md); known limitations (one CI-tested language,
+no LSP, nap is an agent-driven protocol, linux/macOS only) are listed there
+too. The v0.1 definition of done is `tests/v01_acceptance.rs` — one scripted
+session through the real binary.
 
 ## Agent topology
 
