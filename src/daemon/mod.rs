@@ -67,10 +67,6 @@ pub const MAX_CONNECTIONS: usize = 64;
 /// How long the accept loop sleeps between polls (non-blocking accept).
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 
-/// Per-connection read/write timeout: a request must arrive (and be
-/// answered) within this, or the connection is dropped.
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// On exit, how long the accept loop waits for in-flight handlers before
 /// leaving them to the process teardown (bounded wait, F2.8's pattern).
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -431,8 +427,8 @@ fn watch_loop(shared: Arc<Shared>) {
 fn handle_connection(shared: &Shared, stream: UnixStream) {
     let mut stream = stream;
     if let Err(err) = stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
+        .set_read_timeout(Some(protocol::IO_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(protocol::IO_TIMEOUT)))
     {
         tracing::debug!(%err, "connection timeouts unavailable");
     }

@@ -17,8 +17,9 @@
 //!
 //! Response: the standard envelope (see `crate::envelope`), one line.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +30,23 @@ use crate::error::{DaemonError, JanitorError, OutputError};
 /// The request-line cap (ADR-0018 D6): a rule plus flags fits comfortably;
 /// anything bigger is refused with the typed error, never buffered.
 pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// The response-line read cap for CLIENTS: a scan of a large tree routinely
+/// produces multi-megabyte envelopes (issue #21 saw ~2 MiB for a 7378-match
+/// repo), so the client's bound must sit well above the request cap the
+/// daemon enforces — 64 MiB is far past any honest envelope while still a
+/// real fence against a runaway peer.
+pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Per-connection read/write timeout (both sides): a request must arrive
+/// (and be answered) within this, or the connection is dropped. Also the
+/// global drain deadline of [`write_line`]'s honest write loop.
+pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the honest write loop yields between `WouldBlock` retries —
+/// each blocked `write` already waited the socket's send timeout, so this
+/// only keeps a non-timeout (nonblocking) caller from hot-spinning.
+const WRITE_RETRY_PAUSE: Duration = Duration::from_millis(1);
 
 /// The request envelope's `cmd` set.
 pub const CMDS: &[&str] = &["ping", "scan", "duplicates", "stats", "shutdown"];
@@ -217,7 +235,11 @@ fn current_uid() -> Option<u32> {
 
 /// Read one newline-terminated line, bounded by `max` bytes. Tolerant of
 /// EOF-terminated final lines (no trailing newline); the newline itself is
-/// stripped. Raw I/O errors are the caller's to type.
+/// stripped. The bound is checked between chunk reads (4 KiB each), so a
+/// line may overshoot `max` by less than one chunk before this returns —
+/// the caller decides what an over-cap line means (the daemon types it
+/// `E_DAEMON_REQUEST_TOO_LARGE`; clients see truncated JSON as a protocol
+/// break). Raw I/O errors are the caller's to type.
 pub fn read_line(stream: &mut impl Read, max: usize) -> Result<Vec<u8>, std::io::Error> {
     let mut line = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -240,7 +262,11 @@ pub fn read_line(stream: &mut impl Read, max: usize) -> Result<Vec<u8>, std::io:
     }
 }
 
-/// Write one line (JSON value + newline) and flush.
+/// Write one line (JSON value + newline) and flush. The write is honest:
+/// every byte leaves the process or the call fails (issue #21 — the old
+/// `write_all` aborted the whole response on the first `WouldBlock` a send
+/// timeout produced once the send buffer filled, truncating every response
+/// over the socket's `SO_SNDBUF` at exactly that boundary).
 pub fn write_line(
     stream: &mut impl Write,
     value: &serde_json::Value,
@@ -248,8 +274,45 @@ pub fn write_line(
     let mut text =
         serde_json::to_string(value).map_err(|err| std::io::Error::other(err.to_string()))?;
     text.push('\n');
-    stream.write_all(text.as_bytes())?;
+    write_all_with_deadline(stream, text.as_bytes(), Instant::now() + IO_TIMEOUT)?;
     stream.flush()
+}
+
+/// `write_all`'s all-or-nothing contract, honest under a send timeout: a
+/// `write` on a socket with `SO_SNDTIMEO` returns `ErrorKind::WouldBlock`
+/// when the send buffer is full (a slow peer, not a dead one), so those are
+/// RETRIED — as are `Interrupted`s — until `deadline`. A deadline overrun
+/// becomes a typed `TimedOut` carrying the partial-progress count; any
+/// other error aborts the write as before.
+pub fn write_all_with_deadline(
+    stream: &mut impl Write,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), std::io::Error> {
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        match stream.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::from(ErrorKind::WriteZero));
+            }
+            Ok(n) => written += n,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "send buffer never drained: {written}/{} bytes written before the deadline",
+                            bytes.len()
+                        ),
+                    ));
+                }
+                std::thread::sleep(WRITE_RETRY_PAUSE);
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -322,6 +385,83 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"schema":"janitor.v1","cmd":"ping","nope":1}"#)
                 .is_err()
         );
+    }
+
+    /// Issue #21's regression fence: with a send timeout armed and the send
+    /// buffer full, `write` returns `ErrorKind::WouldBlock` — and the OLD
+    /// `write_all` read that as a dead peer, truncating every response over
+    /// the buffer size (8 KiB `SO_SNDBUF` for AF_UNIX on macOS; ~208 KiB on
+    /// Linux). The honest write loop must retry until a slow-but-alive peer
+    /// drains, preserving `write_all`'s all-or-nothing contract.
+    #[test]
+    fn write_line_drains_a_slow_peer_past_the_send_buffer() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let (mut writer, mut reader) = UnixStream::pair().expect("socketpair");
+        // A 1 ms send timeout: the buffer fills and WouldBlock fires almost
+        // immediately — the macOS condition compressed into test time.
+        writer
+            .set_write_timeout(Some(Duration::from_millis(1)))
+            .expect("write timeout");
+
+        // A response line well past any AF_UNIX SO_SNDBUF.
+        let payload = serde_json::json!({ "pad": "x".repeat(512 * 1024) });
+        let expected = serde_json::to_string(&payload).expect("serializes").len() + 1;
+
+        // The peer stalls first (the buffer fills, WouldBlock fires), then
+        // drains everything down to EOF.
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let mut drained = 0_usize;
+            let mut chunk = [0_u8; 64 * 1024];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => drained += n,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => return Err(format!("drain failed: {err}")),
+                }
+            }
+            Ok(drained)
+        });
+
+        write_line(&mut writer, &payload).expect("every byte reaches the slow peer");
+        drop(writer); // EOF for the drainer.
+        let drained = drainer.join().expect("drainer exits");
+        let drained = drained.expect("the drain completes");
+        assert_eq!(drained, expected, "the whole line crossed the socket");
+    }
+
+    /// The honest loop's fence the other way: a peer that NEVER drains must
+    /// fail with a typed `TimedOut` at the deadline — the drain guarantee
+    /// the socket write timeout used to carry alone (issue #21 kept the
+    /// timeout; the loop must not outlive it).
+    #[test]
+    fn write_all_with_deadline_times_out_when_the_peer_never_drains() {
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let (mut writer, reader) = UnixStream::pair().expect("socketpair");
+        writer
+            .set_write_timeout(Some(Duration::from_millis(1)))
+            .expect("write timeout");
+
+        let started = Instant::now();
+        let err = write_all_with_deadline(
+            &mut writer,
+            &vec![b'x'; 512 * 1024],
+            Instant::now() + Duration::from_millis(50),
+        )
+        .expect_err("a stalling peer exhausts the deadline");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline fires, it does not hang: {:?}",
+            started.elapsed()
+        );
+        drop(reader); // release the peer side cleanly.
     }
 
     /// The default socket path honors `$JANITOR_SOCK` first and carries the
