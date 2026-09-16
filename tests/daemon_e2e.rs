@@ -26,7 +26,7 @@
 
 use std::io::BufRead;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -1033,4 +1033,179 @@ fn scan_daemon_responses_say_who_served_them() {
     );
 
     stop(daemon);
+}
+
+// --- issue #21: large/torn responses over the socket -----------------------
+
+/// Issue #21's e2e fence (the reporter's exact scenario — a response line
+/// over 8192 bytes, macOS's AF_UNIX `SO_SNDBUF`): the daemon serves the
+/// WHOLE line. On Linux the ~208 KiB send buffer hides the truncation this
+/// exercised on macOS, so the `WouldBlock`-retry behavior itself is pinned
+/// by the unit fence in `protocol::tests`; this test pins the end-to-end
+/// contract that retry protects — a big envelope crosses the socket
+/// intact, complete, and parseable, with every match accounted for.
+#[test]
+fn responses_over_8192_bytes_arrive_complete() {
+    let ws = tempfile::tempdir().expect("workspace");
+    // 720 functions: a response line well past 8192 bytes (the reporter's
+    // bisected boundary — 8041 served fine, 8192+ truncated).
+    seed_corpus(ws.path(), 60, 12);
+    let sock = ws.path().join("big.sock");
+    let daemon = start(ws.path(), &sock);
+
+    // Raw socket view (bypassing the CLI's fallback): measure the exact
+    // line the wire carries, the way the issue's reproduction did.
+    let mut stream = UnixStream::connect(&sock).expect("connect");
+    use std::io::Write;
+    let request = Request::scan("(kind function_item)", None);
+    let mut line = request.to_line().expect("request serializes");
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|()| stream.flush())
+        .expect("request sent");
+
+    let response = janitor_prime::daemon::protocol::read_line(
+        &mut stream,
+        janitor_prime::daemon::protocol::MAX_RESPONSE_BYTES,
+    )
+    .expect("the response line arrives");
+    assert!(
+        response.len() > 8192,
+        "the scenario needs a response past macOS's SO_SNDBUF, got {} bytes",
+        response.len()
+    );
+    let value: Value =
+        serde_json::from_slice(&response).expect("the whole line is one intact JSON envelope");
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(
+        value.pointer("/data/served_by").and_then(Value::as_str),
+        Some("daemon"),
+        "the warm path served it: {value}"
+    );
+    assert_eq!(
+        value.pointer("/data/stats/matches").and_then(Value::as_u64),
+        Some(60 * 12),
+        "every match made it across: {} bytes",
+        response.len()
+    );
+
+    stop(daemon);
+}
+
+/// Issue #21's visibility fence: a daemon that answers `ping` for this
+/// workspace but delivers a torn frame (truncated JSON, EOF mid-line) must
+/// make `scan --daemon` fall back LOUDLY — one stderr warning BEFORE the
+/// in-process scan serves, stdout still exactly one clean envelope naming
+/// `served_by: "process"`. The silent fallback stays reserved for "no
+/// daemon at all", which the contrast leg asserts.
+#[test]
+fn torn_daemon_frame_falls_back_with_a_stderr_warning() {
+    use std::io::Write;
+
+    let ws = tempfile::tempdir().expect("workspace");
+    seed_corpus(ws.path(), 2, 2);
+    let ws_canonical = std::fs::canonicalize(ws.path()).expect("canonical workspace");
+    let sock = ws.path().join("torn.sock");
+
+    // A fake daemon: an honest `ping` for this workspace, then a scan
+    // response cut off mid-frame. Non-blocking accept + bounded wait so a
+    // client-side failure fails the test instead of hanging the fake.
+    let listener = UnixListener::bind(&sock).expect("fake daemon binds");
+    listener
+        .set_nonblocking(true)
+        .expect("fake daemon polls accepts");
+    let fake = std::thread::spawn(move || {
+        let mut served = 0_u32;
+        let deadline = Instant::now() + WAIT_DEADLINE;
+        while served < 2 && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(err) => panic!("fake accept: {err}"),
+            };
+            let request = janitor_prime::daemon::protocol::read_line(&mut stream, 1024 * 1024)
+                .expect("request line");
+            let cmd = serde_json::from_slice::<Value>(&request)
+                .expect("request is json")
+                .get("cmd")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            assert_eq!(
+                cmd,
+                if served == 0 { "ping" } else { "scan" },
+                "routing probes ping first, then the scan"
+            );
+            served += 1;
+            if cmd == "ping" {
+                let pong = serde_json::json!({
+                    "schema": "janitor.v1",
+                    "ok": true,
+                    "data": { "workspace": ws_canonical.display().to_string() }
+                });
+                let mut pong_line = serde_json::to_string(&pong).expect("pong serializes");
+                pong_line.push('\n');
+                stream
+                    .write_all(pong_line.as_bytes())
+                    .and_then(|()| stream.flush())
+                    .expect("pong sent");
+            } else {
+                // The truncation under test: half an envelope, then EOF.
+                stream
+                    .write_all(br#"{"schema":"janitor.v1","ok":true,"data":{"report":"trunc"#)
+                    .and_then(|()| stream.flush())
+                    .expect("torn frame sent");
+                drop(stream);
+            }
+        }
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_janitor"))
+        .args(["scan", "--rule", "(kind function_item)", "--daemon"])
+        .current_dir(ws.path())
+        .env("JANITOR_SOCK", sock.display().to_string())
+        .output()
+        .expect("cli scan runs");
+    fake.join().expect("fake daemon exits");
+
+    assert_eq!(output.status.code(), Some(0), "the fallback still succeeds");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("falling back to in-process scan"),
+        "the torn frame must be visible on stderr, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("invalid/torn"),
+        "the warning names the condition, got: {stderr:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: Value = stdout.trim().parse().expect("stdout is one envelope");
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(
+        value.pointer("/data/served_by").and_then(Value::as_str),
+        Some("process"),
+        "the in-process path served the fallback: {value}"
+    );
+
+    // The contrast leg: no daemon at all stays SILENT — the designed
+    // fallback (ADR-0018 D7), unchanged by this fix.
+    let silent = Command::new(env!("CARGO_BIN_EXE_janitor"))
+        .args(["scan", "--rule", "(kind function_item)", "--daemon"])
+        .current_dir(ws.path())
+        .env(
+            "JANITOR_SOCK",
+            ws.path().join("missing.sock").display().to_string(),
+        )
+        .output()
+        .expect("cli scan runs");
+    assert_eq!(silent.status.code(), Some(0), "silent fallback exits 0");
+    let silent_err = String::from_utf8_lossy(&silent.stderr);
+    assert!(
+        !silent_err.contains("falling back"),
+        "no daemon = the documented silent fallback, got: {silent_err:?}"
+    );
 }
