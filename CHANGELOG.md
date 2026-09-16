@@ -25,6 +25,16 @@
   running `scan --duplicates` on the repo itself.
 - **Docs truth pass (B7)**: rustdoc 0 warnings; doc-lint gate in CI.
 
+### Fixed
+- **Daemon large responses (issue #21)**: `write_all` under a send timeout
+  aborted on the first `WouldBlock` once the AF_UNIX send buffer filled
+  (8 KiB on macOS), truncating every daemon response past that boundary;
+  the response write is now an honest loop that retries until a global
+  drain deadline. A torn frame no longer looks like "no daemon":
+  `scan --daemon` warns on stderr before falling back in-process (stdout
+  stays 100% JSON). The client's response read cap rose to 64 MiB (was
+  4 MiB) — real-tree envelopes run multi-megabyte.
+
 ## [Unreleased] — v0.2.0 candidates
 
 ### Added (v0.3 — product truth, roadmap #6)
