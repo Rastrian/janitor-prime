@@ -59,24 +59,38 @@ fn main() -> ExitCode {
 /// adds the second mode: `--duplicates` (fingerprint-grouped duplicate
 /// detection, docs/SCHEMA.md) instead of `--rule`. F10a adds `--daemon`:
 /// opt-in routing through the warm-cache daemon when its socket answers
-/// `ping` for this workspace, silent in-process fallback otherwise
-/// (ADR-0018 D7).
+/// `ping` for this workspace; the in-process fallback is silent for a
+/// missing/mismatched daemon, but a daemon that was serving this workspace
+/// yet delivered a torn frame warns on stderr first (issue #21 — the fall
+/// must be visible, never a stdout side effect; ADR-0018 D7).
 fn run_scan(args: cli::ScanArgs, pretty: bool) -> ExitCode {
     let root = args
         .path
         .clone()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     if args.daemon {
-        if let Some(response) = daemon_route(&args, &root) {
-            let ok = response.get("ok").and_then(serde_json::Value::as_bool);
-            let code = if ok == Some(true) {
-                EXIT_SUCCESS
-            } else {
-                janitor_prime::envelope::EXIT_OPERATIONAL
-            };
-            return emit_json(&response, pretty, code);
+        match daemon_route(&args, &root) {
+            janitor_prime::daemon::client::Routed::Served(response) => {
+                let ok = response.get("ok").and_then(serde_json::Value::as_bool);
+                let code = if ok == Some(true) {
+                    EXIT_SUCCESS
+                } else {
+                    janitor_prime::envelope::EXIT_OPERATIONAL
+                };
+                return emit_json(&response, pretty, code);
+            }
+            // One line on stderr BEFORE the slow path serves — stdout stays
+            // 100% JSON (ADR-0018 D7), and the warm-cache miss is visible.
+            janitor_prime::daemon::client::Routed::Torn(reason) => {
+                eprintln!(
+                    "janitor: daemon response invalid/torn ({reason}) \
+                     — falling back to in-process scan"
+                );
+            }
+            janitor_prime::daemon::client::Routed::NoDaemon => {
+                tracing::debug!("daemon unreachable; running in-process");
+            }
         }
-        tracing::debug!("daemon unreachable; running in-process");
     }
     let session = Session::new();
     // clap's scan-mode group guarantees exactly one of --rule/--duplicates;
@@ -220,9 +234,13 @@ fn emit_error(err: JanitorError, pretty: bool) -> ExitCode {
 }
 
 /// The `--daemon` routing decision (ADR-0018 D7): build the socket request
-/// from the CLI flags and hand it to the client's router — `None` means
-/// "no daemon for this workspace", the caller falls back in-process.
-fn daemon_route(args: &cli::ScanArgs, root: &std::path::Path) -> Option<serde_json::Value> {
+/// from the CLI flags and hand it to the client's router — the `Routed`
+/// verdict says whether the daemon served, was absent, or tore its frame
+/// (the caller decides how loud each fall is).
+fn daemon_route(
+    args: &cli::ScanArgs,
+    root: &std::path::Path,
+) -> janitor_prime::daemon::client::Routed {
     let sock = janitor_prime::daemon::protocol::default_sock_path();
     let mut request = if args.duplicates {
         let mut request =
