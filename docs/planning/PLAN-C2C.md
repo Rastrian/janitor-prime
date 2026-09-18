@@ -283,3 +283,50 @@ recipe in `share/GLOBAL.md`, no tier work in CHANGELOG)
   numbers on its benchmarks with KV-cache. Janitor's analogues are the
   acceptance criteria above — retrieval-fixture counts and wall-clock
   targets — and those, not the paper's, are the claims v0.4 would make.
+
+## 5. Appendix — provenance
+
+Method, per the house pattern (PLAN-v0.3 §6): this plan was produced by
+dogfooding v0.3.1 (`./target/debug/janitor`, built this session) on
+itself and on two live stores, reading the paper's principles as
+commissioned (arXiv 2510.03215; its numbers quoted, not re-verified).
+The file was written incrementally, one commit per section.
+
+**janitor notes written this session** (this worktree's `.janitor/`,
+append-only): ids **0–3**. Ids 0 and 1 are pointer-anchored with spans
+taken from `scan` reports (`src/memory/wake.rs:5169-8512:function_item`
+and `src/memory/tree_store.rs:9293-9781:function_item`) — the
+anti-hallucination loop held: first `--text` attempt taught the CLI
+shape (positional), first scan taught the report shape (`start_byte`/
+`end_byte`, not `span`).
+
+**wake runs** (read-only against live stores):
+
+| run | result |
+|---|---|
+| fresh worktree store, `--budget 2000` | 0 items, estimate 0 — B10's empty-memory observation reproduced on this clone |
+| real store (hermes-memory, 439 facts), `--budget 400` | 18 items: 17 summaries + 1 raw fact (id 438); **12 of the 17 are ≤ 15-byte placeholders**; estimate 384/400, `awake: true` |
+| real store, default `--budget 8192` | 225 items: 214 summaries + **11 raw facts (2.5% of the log)**, estimate 8116 |
+| synthetic settled stores, budget 8192 | 439 facts → 139 ms; 5,000 → 977 ms; 20,000 → 2.89 s (startup `--version` 4 ms) |
+| `strace -e openat` on the 5k wake | **1,241 TREE opens**: 620× TREE/8, 312× TREE/16, 156× TREE/32, 78× TREE/64, 38× TREE/128, 19× TREE/256, 9× TREE/512, 4× TREE/1024, + TREE/2 and TREE/4 in the tail |
+
+**scan runs** (structural claims): `--rule function_item --lang rust
+src/memory/tree_store.rs` (anchor spans; `summary()` at row 242),
+`--rule function_item --lang rust src/memory/wake.rs` (`wake()` at row
+127, span 5169-8512), `--rule function_item --lang rust src/memory`
+(135 functions / 8 files).
+
+**Real-store forensics** (read-only; last LOG line verified valid JSON
+before any wake — wake writes only in the torn-tail case): 439 lines;
+432 with `[optmem #`; **131 with `…` truncation**; TREE levels 2/4/8/16
+carry real but mechanically concatenated content (mean 138–200 bytes,
+cut mid-word at the ceiling), levels 32/64/128/256 are placeholders
+(13–15 bytes). This store is the evidence base for C2 and C4.
+
+**Gap list — what janitor could NOT answer, and the real tool used:**
+fixed-width NUL-padded TREE record contents → python decoder (the
+binary can dump neither TREE nor per-record density — the C2 gap is
+itself a gap); file-open counts → `strace`; wall times → shell `time`;
+summary *quality* → no signal exists in the binary (C2's reason to
+exist); cross-language (PT/EN) relevance → no tool, recorded as a C1
+risk; the paper → read outside the repo.
