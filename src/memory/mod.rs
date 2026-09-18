@@ -21,6 +21,9 @@
 //! - [`nap`] — the synchronous compression protocol (ADR-0013): the tool
 //!   sequences and stores, the consuming agent writes every summary;
 //!   nothing ever runs in the background and no LLM lives in the binary;
+//! - [`rank`] — the `--task` scorer (C1, PLAN-C2C §2): store-local
+//!   TF-IDF over lowercase alphanumeric tokens, std-only and
+//!   deterministic, declared in-band as `"tfidf-store"`;
 //! - [`environment`] — the `wake` payload's environment notes (v0.3):
 //!   PATH probes for the language servers and git around the repo —
 //!   guidance with evidence (ADR-0017's delivery), never a runtime.
@@ -38,6 +41,7 @@ pub mod environment;
 pub mod log;
 pub mod nap;
 pub mod pointer;
+pub mod rank;
 pub mod tree_store;
 pub mod wake;
 
