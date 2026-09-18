@@ -141,10 +141,11 @@ fn janitor_wake(dir: &Path, budget: u64) -> (Option<i32>, serde_json::Value, std
 }
 
 /// The wake core over the generated store, in-process (what C3 owns: no
-/// binary startup, no environment probes ride on this clock).
-fn lib_wake(dir: &Path, n: u64, budget: u64) -> WakeReport {
+/// binary startup, no environment probes ride on this clock). `task`
+/// switches to the C1 ranked pass; `None` is the positional pass.
+fn lib_wake(dir: &Path, n: u64, budget: u64, task: Option<&str>) -> WakeReport {
     let (facts, store) = settled_store(dir, n);
-    wake::wake(&facts, &store, budget, Vec::new()).expect("settled store wakes")
+    wake::wake(&facts, &store, task, budget, Vec::new()).expect("settled store wakes")
 }
 
 /// C3 acceptance (3): wall times on the settled synthetic generator.
@@ -190,7 +191,7 @@ fn settled_wake_wall_times_at_439_5k_20k() {
 fn wake_payload_is_byte_identical_to_the_goldens() {
     for budget in GOLDEN_BUDGETS {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let report = lib_wake(tmp.path(), 439, budget);
+        let report = lib_wake(tmp.path(), 439, budget, None);
         let golden = std::fs::read_to_string(format!(
             "{}/tests/fixtures/wake/wake_golden_439_b{budget}.json",
             env!("CARGO_MANIFEST_DIR")
@@ -227,7 +228,7 @@ fn write_stores_for_strace() {
 fn print_golden_payloads() {
     for budget in GOLDEN_BUDGETS {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let report = lib_wake(tmp.path(), 439, budget);
+        let report = lib_wake(tmp.path(), 439, budget, None);
         println!(
             "--- budget {budget} ---\n{}",
             serde_json::to_string(&report).expect("report json")

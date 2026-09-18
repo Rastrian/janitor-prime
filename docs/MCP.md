@@ -53,7 +53,7 @@ through it is future work, deliberately out of this surface.
 
 | Tool | Arguments | Writes | Purpose |
 |---|---|---|---|
-| `janitor_wake` | `budget?: int` | no | budgeted memory recall (facts, summaries, hints, state); `E_NAP_PENDING` carries the pending request |
+| `janitor_wake` | `budget?: int`, `task?: string` | no | budgeted memory recall (facts, summaries, hints, state); `task` ranks it (TF-IDF, scorer `tfidf-store`); `E_NAP_PENDING` carries the pending request |
 | `janitor_scan` | `rule?`, `duplicates?`, `path?`, `lang?`, `include_virtual?`, `strict_trivia?`, `max_file_size?`, `min_size?` | no | structural search (DSL.md) or duplicate grouping (SCHEMA.md) |
 | `janitor_apply` | `diff: object`, `dry_run?: bool` | **yes** | transactional rewrite: whole-diff staged → re-parse-gated → flushed; any failure rolls everything back |
 | `janitor_note` | `text: string`, `ptr?`, `commit?`, `lock?` | yes (.janitor/) | append one validated fact, optionally anchored |
