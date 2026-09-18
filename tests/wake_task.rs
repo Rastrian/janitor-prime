@@ -43,7 +43,7 @@ fn fact(id: u64, text: &str, locked: bool) -> FactRecord {
 /// facts, filler vocabulary everywhere, lengths in the real store's spread
 /// so the log needs compression at budget 1500 (raw total ≈ 2.1k tokens).
 fn cluster_text(id: u64) -> String {
-    let filler = if id % 2 == 0 {
+    let filler = if id.is_multiple_of(2) {
         "the overlay txn flush atomic rename fsync budget tiling summary lock span anchor \
          drift gate keeps the invariant honest across runs"
     } else {

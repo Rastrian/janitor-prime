@@ -256,7 +256,7 @@ mod tests {
     /// The serve order: score desc, ties to the newer id.
     #[test]
     fn scored_first_orders_by_score_desc_then_newer_id() {
-        let mut ranked = vec![
+        let mut ranked = [
             Scored { id: 0, score: 2.0 },
             Scored { id: 5, score: 9.0 },
             Scored { id: 3, score: 2.0 },
