@@ -154,19 +154,25 @@ impl Query {
 pub struct Scored {
     pub id: u64,
     pub score: f64,
+    /// C4: the fact is agent-tagged low confidence — equal scores break
+    /// against it (down-weighted, never re-ranked on merit).
+    pub low: bool,
 }
 
-/// The serve order: score desc, ties to the newer id (present-bias
-/// preserved under ranking). A named comparator — not a derived `Ord` —
-/// so a later tie-break (C4's agent-asserted confidence) can slot
-/// between the two keys without touching any caller. Scores are finite
-/// sums of finite terms, so `partial_cmp` never sees NaN; should one
-/// ever appear it reads as `Equal` and the id tie decides, keeping the
-/// order total and deterministic either way.
+/// The serve order: score desc, ties to the higher-confidence fact (a
+/// `low` tag demotes, it never promotes — C4), then to the newer id
+/// (present-bias preserved under ranking). A named comparator — not a
+/// derived `Ord` — so a later tie-break can slot between the keys without
+/// touching any caller. Scores are finite sums of finite terms, so
+/// `partial_cmp` never sees NaN; should one ever appear it reads as
+/// `Equal` and the next key decides, keeping the order total and
+/// deterministic either way.
 pub fn scored_first(a: &Scored, b: &Scored) -> std::cmp::Ordering {
     b.score
         .partial_cmp(&a.score)
         .unwrap_or(std::cmp::Ordering::Equal)
+        // false < true: the untagged fact sorts first at equal score.
+        .then(a.low.cmp(&b.low))
         .then(b.id.cmp(&a.id))
 }
 
@@ -258,14 +264,85 @@ mod tests {
     #[test]
     fn scored_first_orders_by_score_desc_then_newer_id() {
         let mut ranked = [
-            Scored { id: 0, score: 2.0 },
-            Scored { id: 5, score: 9.0 },
-            Scored { id: 3, score: 2.0 },
-            Scored { id: 9, score: 2.0 },
-            Scored { id: 7, score: 0.5 },
+            Scored {
+                id: 0,
+                score: 2.0,
+                low: false,
+            },
+            Scored {
+                id: 5,
+                score: 9.0,
+                low: false,
+            },
+            Scored {
+                id: 3,
+                score: 2.0,
+                low: false,
+            },
+            Scored {
+                id: 9,
+                score: 2.0,
+                low: false,
+            },
+            Scored {
+                id: 7,
+                score: 0.5,
+                low: false,
+            },
         ];
         ranked.sort_by(scored_first);
         let ids: Vec<u64> = ranked.iter().map(|s| s.id).collect();
         assert_eq!(ids, [5, 9, 3, 0, 7]);
+    }
+
+    /// C4: equal scores break to the higher confidence — the untagged
+    /// fact first, the `low` fact after, newest id still deciding within
+    /// each confidence class. Unequal scores stay score-ordered: a low
+    /// tag down-weights, it never re-ranks on merit (a low fact that
+    /// scored higher still leads).
+    #[test]
+    fn scored_first_breaks_score_ties_against_low_confidence() {
+        let mut ranked = [
+            Scored {
+                id: 4,
+                score: 2.0,
+                low: true,
+            }, // low, older
+            Scored {
+                id: 9,
+                score: 2.0,
+                low: true,
+            }, // low, newer
+            Scored {
+                id: 1,
+                score: 2.0,
+                low: false,
+            }, // normal, older
+            Scored {
+                id: 6,
+                score: 2.0,
+                low: false,
+            }, // normal, newer
+        ];
+        ranked.sort_by(scored_first);
+        let ids: Vec<u64> = ranked.iter().map(|s| s.id).collect();
+        assert_eq!(ids, [6, 1, 9, 4], "normals win the tie, newer id inside");
+
+        // Merit is untouched: a higher-scoring low fact still outranks a
+        // lower-scoring normal one — the demotion is weight, not rank.
+        let mut ranked = [
+            Scored {
+                id: 0,
+                score: 5.0,
+                low: true,
+            },
+            Scored {
+                id: 1,
+                score: 1.0,
+                low: false,
+            },
+        ];
+        ranked.sort_by(scored_first);
+        assert_eq!(ranked[0].id, 0, "score still dominates");
     }
 }
