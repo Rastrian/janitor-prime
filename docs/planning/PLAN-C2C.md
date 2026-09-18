@@ -85,8 +85,9 @@ mechanism, with testable acceptance per item.
 
 ### C2. Deterministic novelty score + nap density floor *(code)*
 - **Problem (P2):** the system's only quality metric is bytes. `nap`
-  accepts any non-empty one-liner, so a fatigued agent (the real one,
-  2026-09-15) settled every level-32+ slot with the placeholder
+  accepts any non-empty one-liner, so a fatigued agent (the real
+  migration's, 2026-09-15 by the store's own records) settled every
+  level-32+ slot with the placeholder
   `"Fatos 0-32: "` — 14 bytes, zero information. `wake` then served 12
   such summaries at budget 400: `awake: true`, estimate 384/400, budget
   fully spent on nothing. The paper's oracle experiment is the same
@@ -131,8 +132,8 @@ mechanism, with testable acceptance per item.
   write-time so the read path is cheap. Janitor's nap half already does
   this (summaries are precomputed — ADR-0013); the wake half re-pays on
   every session. `TreeStore::summary()` calls `self.load(size)` — a
-  full-file read + decode — **per lookup** (`src/memory/tree_store.rs:
-  243-257` → `load` at `202-239`), and the tiler looks up per block
+  full-file read + decode — **per lookup** (`tree_store.rs:243-257` →
+  `load` at `202-239`), and the tiler looks up per block
   (`wake.rs:271`, `290`, `345`, `390`). `BlockPlan::rank` likewise
   rescans the level's slots per call (`tree_store.rs:161-171`).
 - **Evidence (measured this session, settled synthetic stores):** one
