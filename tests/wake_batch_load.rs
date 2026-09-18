@@ -4,7 +4,7 @@
 //! The generator is deterministic and seeded (xorshift64*, std-only): the
 //! same seed and fact count always produce byte-identical `LOG.txt` and
 //! `TREE/*` files, so the wall-time numbers and the golden payload
-//! fixtures (`tests/fixtures/wake_golden_*.json`) are reproducible. Stores
+//! fixtures (`tests/fixtures/wake/`) are reproducible. Stores
 //! are written directly — LOG lines plus every level's fixed-width records
 //! in rank order (the dense prefix complete) — because settling 20k facts
 //! through the nap protocol would be the measurement, not the fixture.
@@ -183,14 +183,16 @@ fn settled_wake_wall_times_at_439_5k_20k() {
 /// C3 acceptance (1): the payload is byte-identical pre/post — the goldens
 /// were captured from the pre-change binary over this exact generator
 /// (seed 0xC3, 439 facts), and every future run must reproduce them, field
-/// for field, at both the tight and the default budget.
+/// for field, at both the tight and the default budget. They live under
+/// `tests/fixtures/wake/` (not the DSL corpus root — fixtures.rs walks
+/// every top-level `*.json` as a scan fixture).
 #[test]
 fn wake_payload_is_byte_identical_to_the_goldens() {
     for budget in GOLDEN_BUDGETS {
         let tmp = tempfile::tempdir().expect("tempdir");
         let report = lib_wake(tmp.path(), 439, budget);
         let golden = std::fs::read_to_string(format!(
-            "{}/tests/fixtures/wake_golden_439_b{budget}.json",
+            "{}/tests/fixtures/wake/wake_golden_439_b{budget}.json",
             env!("CARGO_MANIFEST_DIR")
         ))
         .expect("golden fixture");
