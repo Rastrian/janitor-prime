@@ -125,3 +125,79 @@ mechanism, with testable acceptance per item.
 - **Risk flagged here, argued in §4:** boilerplate (`[optmem #N]`
   prefixes, dates) inflates overlap — mitigation is a deterministic
   bracket-prefix strip before tokenization, not regex.
+
+### C3. Wake read-path hygiene — each TREE level loaded once *(code)*
+- **Problem (P3):** the paper's 2.5× comes from paying cost at
+  write-time so the read path is cheap. Janitor's nap half already does
+  this (summaries are precomputed — ADR-0013); the wake half re-pays on
+  every session. `TreeStore::summary()` calls `self.load(size)` — a
+  full-file read + decode — **per lookup** (`src/memory/tree_store.rs:
+  243-257` → `load` at `202-239`), and the tiler looks up per block
+  (`wake.rs:271`, `290`, `345`, `390`). `BlockPlan::rank` likewise
+  rescans the level's slots per call (`tree_store.rs:161-171`).
+- **Evidence (measured this session, settled synthetic stores):** one
+  `wake --budget 8192` at 5,000 facts opens TREE files **1,241×**
+  (strace: 620× `TREE/8`, 312× `TREE/16`, 156× `TREE/32`, …) — the
+  160 KB level-8 file is re-read ~620 times, ≈ 99 MB of redundant reads.
+  Wall time: 439 facts → 139 ms; 5k → 977 ms; 20k → 2.89 s. Startup is
+  4 ms; the cost is pure wake.
+- **Proposal:** batch-load. `wake()` reads each existing level file
+  exactly once into a `HashMap<level, Vec<String>>` (a `load_levels`
+  batch on `TreeStore`), precomputes ranks per level in the same pass,
+  and every `summary()`/`rank()` hit resolves in memory. Output
+  semantics unchanged — this is pure I/O shape. No new files, no disk
+  cache, no contract growth beyond internals.
+- **Sizing:** S (≤1 agent-day).
+- **Acceptance (testable):** (1) payload byte-identical pre/post on the
+  property-suite corpora (the existing wake tests are the fence);
+  (2) structural: a unit test over `load_levels` asserts one wake loads
+  each present level exactly once (count == distinct levels in the
+  layout, ≤ ⌈log₂ n⌉); (3) wall-time targets at 20k facts: < 700 ms
+  (from 2.89 s), measured on the same synthetic generator this session
+  used (kept as a `tests/` fixture generator, not a bench).
+- **Explicitly declined inside P3:** the write-time *materialized index*
+  (term frequencies / retrieval keys persisted at `note` time) — after
+  C3 the read path is one O(n) LOG parse + ≤ log₂ n file reads, and C1's
+  scoring is O(total bytes); a persisted index would add an
+  invalidation surface (every append) to save < 100 ms. ADR-0018's
+  disk-parse-cache rejection is the standing precedent (§3 anti-backlog).
+
+### C4. `note --confidence low` — agent-asserted provenance, down-ranked at wake *(code)*
+- **Problem (P4):** in the paper, a bad sharer *misleads* the receiver —
+  provenance is not neutral, it is load-bearing weight. Janitor's real
+  store is 432/439 `[optmem #N]` migration imports (131 truncated
+  mid-thought with `…`), and every one recalls at the same weight as a
+  hand-verified, pointer-anchored fact. `wake` cannot express "trust
+  this less".
+- **Evidence:** `MemoryFlag` has exactly one variant, `ArchitecturalLock`
+  (`src/memory/log.rs:54-58`); `FactRecord` carries no other metadata
+  (`log.rs:61-76`); `NoteArgs` offers `--lock` only (`src/cli.rs:153-177`).
+- **Proposal:** an optional agent-supplied field, never binary-invented
+  (the B10 anti-hallucination stance — the *agent* vouches or demotes):
+  - Storage: `note --confidence low` appends `"confidence": "low"` as a
+    new **optional field** on the fact record (`#[serde(default)]`),
+    *not* a new `MemoryFlag` variant — serde ignores unknown fields by
+    default, so a v0.3.1 binary reading a tagged log still parses every
+    line, whereas an unknown *enum variant* in `flags` would read as
+    corruption and hit `LogUnrecoverable` (`log.rs:210-213`). This
+    asymmetry is why the field is the right shape.
+  - Wake: in C1's ranked pass, ties break to higher confidence; under
+    budget pressure, `low` facts are dropped before normal ones (after
+    score ordering). In the no-task path, `low` facts are demoted one
+    split level earlier — same tiling, cheaper seat. Never deleted;
+    append-only stands.
+  - Metadata-only: no semantic judgment, no expiry, no auto-detection
+    of migration prefixes (that would be the binary inventing facts).
+- **Sizing:** S (≤1 agent-day; the wake half rides C1's ordering code).
+- **Acceptance (testable):** (1) `note --confidence low` round-trips
+  through LOG and the report; (2) a pre-field v0.3.1-format LOG parses
+  identically with and without the C4 change (golden, synthetic fixture);
+  (3) tie-break: two equal-score facts under a budget that fits one →
+  the normal-confidence fact survives, `truncated: true` reports the
+  drop; (4) `low` facts still serve when budget allows — down-weight,
+  not filter (property test).
+- **B10 collision:** B10 (session-zero bootstrap ritual, unexecuted)
+  stays B10 — but its recipe grows one step if C4 lands: tag migration
+  imports with `--confidence low` while seeding. C4 without B10 is still
+  useful (any session can tag going forward); B10 without C4 cannot
+  express the tag. No part of B9 is touched by any C-item.
