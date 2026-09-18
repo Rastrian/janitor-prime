@@ -193,7 +193,12 @@ pub fn wake(
         if replacement.is_empty() {
             break; // children unavailable (rebuilt tree); refinement is optional
         }
-        let added = total_cost(&replacement, facts) - tokens(text.len());
+        // Saturating: the children may be *cheaper* than the parent's own
+        // summary (two short raw facts under one long line), making the
+        // delta negative — the split still fits by definition, so clamp at
+        // zero and proceed (found by the C3 synthetic corpus; the raw
+        // subtraction panicked debug builds on exactly that shape).
+        let added = total_cost(&replacement, facts).saturating_sub(tokens(text.len()));
         if total + added > budget {
             break;
         }
@@ -643,6 +648,40 @@ mod tests {
             loose.estimate >= tight.estimate,
             "a bigger budget never spends less"
         );
+    }
+
+    /// The C3 synthetic corpus found the split pass's cost delta
+    /// underflowing: a block whose two children are *cheaper* than its own
+    /// stored summary (two very short facts under one standard-length
+    /// line) made `children - parent` negative and panicked debug builds.
+    /// The shape needs a long-fact head (raw total over budget, so the
+    /// tiling and split passes run) and a short-fact tail (pairs cheaper
+    /// than a summary): uniform lengths never reach a child-cheaper
+    /// size-2 split before the everything-fits return.
+    #[test]
+    fn split_survives_children_cheaper_than_the_parent_summary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let facts: Vec<FactRecord> = (0..64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-14T00:00:00Z".to_owned(),
+                ptr: None,
+                text: if id < 32 {
+                    format!("fact {id}: the overlay invariants hold and every long head fact costs a real slice of the token budget")
+                } else {
+                    format!("f{id}")
+                },
+                flags: Vec::new(),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        settle_all(&facts, &store);
+
+        let report = wake(&facts, &store, 800, Vec::new()).expect("wake");
+        assert!(report.estimate <= 800, "estimate {}", report.estimate);
     }
 
     // --- property suite (brief F6.8: tiling math) ------------------------------
