@@ -1,6 +1,27 @@
 ## [Unreleased] — v0.3.1 candidates
 
 ### Added
+- **`note --confidence low` — agent-asserted provenance, down-ranked at
+  wake (C4, PLAN-C2C §2)**: an optional `"confidence": "low"` field on
+  the fact record — a serde field with default, deliberately *not* a
+  `MemoryFlag` variant: serde ignores unknown fields, so a v0.3.1
+  binary parses a tagged log line for line where an unknown flag
+  variant would read as `LogUnrecoverable` corruption (pinned by test
+  in both directions). The tag is the agent's assertion and nothing
+  else — the binary never detects or infers one. At recall it
+  down-weights, never filters: the ranked pass (`--task`) tie-breaks
+  equal scores to the higher confidence and seats in two tiers so
+  `low` facts are the first dropped under budget pressure (after the
+  score ordering; `truncated`/`dropped_scored` report it); the
+  positional pass seats a tagged fact one split level coarser (the one
+  documented exception to the present-bias rule, firing only when the
+  coarser slot is already settled — the completeness gate never
+  widens); fact items carry the tag as an append-only payload key.
+  Untagged stores recall byte-identically (C1/C3 goldens pin both
+  passes). Wire-up: CLI `--confidence low`, MCP `janitor_note
+  {confidence: "low"}` (schema enum-pinned), note report echo, and
+  GLOBAL.md guidance on when to tag (migration imports, unverified
+  claims — the step B10's seeding recipe inherits).
 - **`wake --task "<query>"` — ranked recall (C1, PLAN-C2C §2)**: the
   optional flag switches wake's recall from position to relevance. Every
   fact is scored by store-local TF-IDF (tokens = lowercase alphanumeric

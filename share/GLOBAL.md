@@ -20,6 +20,15 @@ what its own commands verify.
   project's own vocabulary ("daemon socket", not "why does networking
   stall").
 - Record durable decisions with `janitor note` — one line, at most 280 bytes.
+- Tag a note `--confidence low` when YOU cannot vouch for it: facts
+  imported from a migration or another tool (especially ones truncated
+  mid-thought), claims you read but did not verify against the code, or
+  secondhand summaries whose source you never saw. The tag is yours to
+  assert and janitor's to honor — it never invents one. A tagged fact is
+  demoted at recall (served last among equals, dropped first under
+  budget, seated coarser) but never deleted: when you later verify the
+  claim, append a fresh untagged note rather than trusting the old one —
+  the log is append-only and the correction is a new note.
 - Anchor notes to real code with pointers taken from janitor's own `scan`
   output; never invent spans, offsets, or node ids.
 - When `wake` refuses with E_NAP_PENDING, run `janitor nap`, write the
