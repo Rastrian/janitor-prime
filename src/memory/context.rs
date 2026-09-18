@@ -245,6 +245,7 @@ impl ContextManager {
             ptr: ptr.clone(),
             text: text.to_owned(),
             flags: flags.clone(),
+            confidence: None,
         };
         self.log().append(&record)?;
         Ok(NoteReport {

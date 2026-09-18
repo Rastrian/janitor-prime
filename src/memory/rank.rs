@@ -182,6 +182,7 @@ mod tests {
             ptr: None,
             text: text.to_owned(),
             flags: Vec::new(),
+            confidence: None,
         }
     }
 

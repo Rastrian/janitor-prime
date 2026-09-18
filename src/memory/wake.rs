@@ -691,6 +691,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                confidence: None,
             })
             .collect();
         (facts, TreeStore::new(&root))
@@ -946,6 +947,7 @@ mod tests {
                     format!("f{id}")
                 },
                 flags: Vec::new(),
+                confidence: None,
             })
             .collect();
         let store = TreeStore::new(&root);
@@ -1033,6 +1035,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                confidence: None,
             })
             .collect();
         (facts, TreeStore::new(&root))
