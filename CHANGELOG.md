@@ -1,5 +1,19 @@
 ## [Unreleased] — v0.3.1 candidates
 
+### Changed
+- **wake reads each TREE level once per run (C3, PLAN-C2C §2)**:
+  `TreeStore::summary` re-read the whole level file on every lookup, so
+  one `wake` opened TREE files once per consulted slot — 713 opens for a
+  5k-fact wake on the lane's seeded generator (the plan's session:
+  1,241). `wake` now pays one `TreeStore::load_levels` up front (ranks
+  precomputed from the log in the same pass) and every lookup — tiling,
+  merging, splitting, the gate's `E_NAP_PENDING` request — resolves in
+  memory. Pure I/O reshaping: payload byte-identical (golden fixtures,
+  budgets 300/8192), a failing level defers its error to the first
+  consult, nothing persisted (ADR-0018 stands). Binary wall time at
+  budget 8192: 439 facts 135→18 ms, 5k 411→63 ms, 20k 709→213 ms;
+  strace TREE opens at 5k: 713→12 (one per layout level).
+
 ### Fixed
 - **Daemon large responses (issue #21)**: `write_all` under a send timeout
   aborted on the first `WouldBlock` once the AF_UNIX send buffer filled
@@ -9,6 +23,12 @@
   `scan --daemon` warns on stderr before falling back in-process (stdout
   stays 100% JSON). The client's response read cap rose to 64 MiB (was
   4 MiB) — real-tree envelopes run multi-megabyte.
+- **wake split-pass underflow (found by the C3 generator)**: the
+  leftover-budget split computed its cost delta with a raw subtraction;
+  a block whose two children are cheaper than its own summary (two short
+  facts under one long line) made the delta negative — debug builds
+  panicked, release wrapped and proceeded. The delta now saturates at
+  zero; the split fits by definition.
 
 ## [Unreleased] — v0.3.0 candidates
 

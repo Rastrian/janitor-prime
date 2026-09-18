@@ -24,6 +24,7 @@
 //! the width) are trimmed with a warning — the tree is a pure cache; the
 //! log is the source of truth. A `forget`-style truncate command is F10.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -200,6 +201,8 @@ impl TreeStore {
     /// cache, the log is the truth. Structurally invalid records are the
     /// typed [`MemoryError::TreeCorrupt`].
     pub fn load(&self, size: u64) -> Result<Option<LevelRecords>, JanitorError> {
+        #[cfg(test)]
+        LEVEL_READS.with(|reads| reads.set(reads.get() + 1));
         let path = self.file(size);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -254,6 +257,37 @@ impl TreeStore {
             None => Ok(None),
             Some((records, _)) => Ok(records.get(rank as usize).cloned()),
         }
+    }
+
+    /// Batch-load every level of the layout, each level file read
+    /// **exactly once** (C3, PLAN-C2C §2 — wake read-path hygiene): the
+    /// read shape `wake` and nap's planner resolve every summary/rank
+    /// lookup against, replacing the per-lookup full-file read (measured
+    /// 1,241 TREE opens for one 5k-fact wake; the plan's §5 strace).
+    /// Ranks are precomputed from the log in the same pass. Load
+    /// warnings ride the same discard the per-lookup path had (the
+    /// payloads that surface warnings load the log, not TREE); a torn
+    /// tail still trims inside `load`, exactly as before. Nothing is
+    /// persisted — ADR-0018's no-disk-cache stand is untouched.
+    pub fn load_levels(&self, facts: &[FactRecord]) -> Result<LevelSnapshot, JanitorError> {
+        let plan = BlockPlan::new(facts);
+        let sizes = plan.levels();
+        let mut levels = HashMap::with_capacity(sizes.len());
+        for size in sizes {
+            let slots = plan.compressible_slots(facts, size);
+            // A failed read is recorded, not raised: it surfaces at the
+            // first lookup that consults this level (see [`LevelFile`]).
+            let file = match self.load(size) {
+                Ok(None) => LevelFile::Absent,
+                Ok(Some((records, _))) => LevelFile::Records(records),
+                Err(_) => LevelFile::Unreadable,
+            };
+            levels.insert(size, Level { slots, file });
+        }
+        Ok(LevelSnapshot {
+            store: self.clone(),
+            levels,
+        })
     }
 
     /// Store one summary record (the `nap --slot --text` half of the
@@ -375,6 +409,78 @@ impl TreeStore {
             idempotent: false,
         })
     }
+}
+
+/// One read pass over the layout's levels (C3): every level file loaded
+/// once by [`TreeStore::load_levels`], ranks precomputed — the in-memory
+/// view a whole `wake` (and nap's planner) resolves lookups against.
+/// Pure I/O reshaping: same records, same gate semantics, nothing
+/// persisted, no contract growth.
+#[derive(Clone, Debug)]
+pub struct LevelSnapshot {
+    /// The store the levels were read from — consulted again only when a
+    /// level's read failed at batch time (see [`LevelFile::Unreadable`]).
+    store: TreeStore,
+    levels: HashMap<u64, Level>,
+}
+
+/// One level of the snapshot.
+#[derive(Clone, Debug)]
+struct Level {
+    /// The level's compressible slots, ascending — a slot's rank is its
+    /// index here (binary search), precomputed in the load pass instead
+    /// of rescanned per lookup.
+    slots: Vec<u64>,
+    /// The level file's read outcome.
+    file: LevelFile,
+}
+
+#[derive(Clone, Debug)]
+enum LevelFile {
+    /// No file: nothing at this level is settled.
+    Absent,
+    /// The settled records, ascending by rank.
+    Records(Vec<String>),
+    /// The read failed at batch time. The failure is **deferred**: it
+    /// surfaces at the first lookup that consults this level, so batch
+    /// loading never widens an error surface to levels the layout never
+    /// names — the per-lookup path only ever failed on consulted levels
+    /// too.
+    Unreadable,
+}
+
+impl LevelSnapshot {
+    /// The summary stored for slot `(size, lo)`, if settled — the exact
+    /// semantics of [`TreeStore::summary`] over the batch-loaded levels:
+    /// rank first (an incompressible slot consults nothing, not even a
+    /// failing level file), then the records.
+    pub fn summary(&self, size: u64, lo: u64) -> Result<Option<String>, JanitorError> {
+        let Some(level) = self.levels.get(&size) else {
+            return Ok(None); // level outside the layout: no compressible slot
+        };
+        let Ok(rank) = level.slots.binary_search(&lo) else {
+            return Ok(None); // not a compressible slot: nothing can be there
+        };
+        match &level.file {
+            LevelFile::Absent => Ok(None),
+            LevelFile::Records(records) => Ok(records.get(rank).cloned()),
+            // Re-read (and re-raise) on the first consult; a failing file
+            // fails again — this is the only path that touches disk.
+            LevelFile::Unreadable => match self.store.load(size)? {
+                None => Ok(None),
+                Some((records, _)) => Ok(records.get(rank).cloned()),
+            },
+        }
+    }
+}
+
+// Level-file reads issued through `TreeStore::load` on this thread
+// (test-only): the C3 unit tests assert one wake reads each present level
+// exactly once — the in-process twin of the audit's strace count.
+// Thread-local so parallel tests never count each other's reads.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LEVEL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The `nap --slot --text` result.
@@ -676,5 +782,160 @@ mod tests {
             store.summary(&log, 2, 2).expect("restored"),
             Some("second again".to_owned())
         );
+    }
+
+    // --- C3: the batch load (load_levels / LevelSnapshot) ---------------------
+
+    /// Two answers agree: value-for-value, or error-for-error by code and
+    /// message (JanitorError carries no PartialEq).
+    fn same_answer(
+        snapshot: Result<Option<String>, JanitorError>,
+        per_lookup: Result<Option<String>, JanitorError>,
+    ) -> bool {
+        match (snapshot, per_lookup) {
+            (Ok(a), Ok(b)) => a == b,
+            (Err(a), Err(b)) => a.code() == b.code() && a.to_string() == b.to_string(),
+            _ => false,
+        }
+    }
+
+    /// Settle the first `stop` canonical slots (levels ascending, slots
+    /// ascending — the protocol's order, so every settle is legal).
+    fn settle_prefix(store: &TreeStore, log: &[FactRecord], stop: u64) {
+        let plan = BlockPlan::new(log);
+        let mut settled = 0u64;
+        'outer: for size in plan.levels() {
+            for lo in plan.compressible_slots(log, size) {
+                if settled >= stop {
+                    break 'outer;
+                }
+                let text = format!("line {lo}-{}: the durable decisions", lo + size);
+                store
+                    .settle(log, size, lo, &text)
+                    .expect("canonical settle");
+                settled += 1;
+            }
+        }
+    }
+
+    /// The batch load reads each layout level exactly once (the C3 shape),
+    /// and every lookup afterwards resolves in memory — no second read
+    /// even when the level file is missing (Absent is a read too).
+    #[test]
+    fn load_levels_reads_each_layout_level_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = store_in(tmp.path());
+        let log = facts(70, &[]); // levels 2..64: six of them
+        settle_prefix(&store, &log, u64::MAX);
+        let layout = BlockPlan::new(&log).levels();
+        let on_disk = std::fs::read_dir(store.dir()).expect("TREE dir").count();
+        assert_eq!(on_disk, layout.len(), "settled: one file per level");
+        assert!(layout.len() <= 70u64.next_power_of_two().trailing_zeros() as usize);
+
+        let before = LEVEL_READS.with(|reads| reads.get());
+        let snapshot = store.load_levels(&log).expect("batch load");
+        let batch_reads = LEVEL_READS.with(|reads| reads.get()) - before;
+        assert_eq!(batch_reads, layout.len(), "one read per level, no more");
+
+        // Every slot of every level answers from memory — zero further
+        // reads (the per-lookup equivalents are compared outside the
+        // counted window: they are the reads C3 removes).
+        let before = LEVEL_READS.with(|reads| reads.get());
+        for size in layout.iter().copied() {
+            for lo in (0..70).step_by(size.max(1) as usize) {
+                let snap = snapshot.summary(size, lo).expect("snapshot summary");
+                let look = store.summary(&log, size, lo).expect("store summary");
+                assert_eq!(snap, look, "level {size} slot {lo}");
+            }
+        }
+        let lookup_reads = LEVEL_READS.with(|reads| reads.get()) - before;
+        assert!(
+            lookup_reads > layout.len() * 4,
+            "the per-lookup path re-reads per slot (measured {lookup_reads})"
+        );
+        let before = LEVEL_READS.with(|reads| reads.get());
+        for size in layout.iter().copied() {
+            for lo in (0..70).step_by(size.max(1) as usize) {
+                snapshot.summary(size, lo).expect("snapshot summary");
+            }
+        }
+        let snapshot_reads = LEVEL_READS.with(|reads| reads.get()) - before;
+        assert_eq!(snapshot_reads, 0, "snapshot lookups resolve in memory");
+    }
+
+    /// A level whose read fails at batch time defers the failure to the
+    /// first lookup that consults it — batch loading never widens the
+    /// error surface to levels the layout never names, and an
+    /// incompressible slot on a failing level still answers `None`
+    /// without touching the file (rank first, exactly like the
+    /// per-lookup path).
+    #[test]
+    fn batch_load_defers_a_failed_level_to_its_first_consult() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = store_in(tmp.path());
+        let log = facts(16, &[9]); // slot [8,16) incompressible at level 8
+        settle_prefix(&store, &log, u64::MAX);
+
+        // Corrupt TREE/8 (its one record, [0,8)): garbage after the NUL.
+        let path = store.file(8);
+        let mut corrupt = vec![b'a'; RECORD_WIDTH];
+        corrupt[4] = 0;
+        corrupt[200] = b'!';
+        std::fs::write(&path, &corrupt).expect("write corrupt");
+
+        let snapshot = store
+            .load_levels(&log)
+            .expect("batch load succeeds — the failure is deferred");
+        assert_eq!(
+            snapshot.summary(2, 0).expect("other levels unaffected"),
+            Some("line 0-2: the durable decisions".to_owned())
+        );
+        // Incompressible slot on the failing level: rank first, Ok(None).
+        assert_eq!(snapshot.summary(8, 8).expect("rank checked first"), None);
+        assert_eq!(store.summary(&log, 8, 8).expect("parity"), None);
+        // The compressible slot surfaces the typed corruption — and so
+        // does the per-lookup path, identically.
+        for _ in 0..2 {
+            let err = snapshot
+                .summary(8, 0)
+                .expect_err("deferred failure surfaces");
+            assert_eq!(err.code(), "E_TREE_CORRUPT");
+            let parity = store.summary(&log, 8, 0).expect_err("parity");
+            assert_eq!(parity.code(), "E_TREE_CORRUPT");
+        }
+    }
+
+    /// C3 equivalence, over randomized logs and random canonical-prefix
+    /// settlements: for every slot of every level (and a few impossible
+    /// sizes), the snapshot answers exactly what the per-lookup path
+    /// answers — the batch load is a pure I/O reshaping.
+    #[test]
+    fn snapshot_matches_per_lookup_summary_over_random_partial_stores() {
+        use proptest::prelude::*;
+
+        proptest!(
+            ProptestConfig::with_cases(16),
+            |(n in 2u64..48, lock_bits in prop::collection::vec(any::<bool>(), 0..48), stop in 0u64..48)|
+        {
+            let locked: Vec<u64> = (0..n)
+                .filter(|id| lock_bits.get(*id as usize).copied().unwrap_or(false))
+                .collect();
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let store = store_in(tmp.path());
+            let log = facts(n, &locked);
+            settle_prefix(&store, &log, stop);
+
+            let snapshot = store.load_levels(&log).expect("batch load");
+            let plan = BlockPlan::new(&log);
+            let mut sizes = plan.levels();
+            sizes.extend([1, 3, 2 * n.next_power_of_two()]); // impossible sizes too
+            for size in sizes {
+                for lo in 0..=n {
+                    let snap = snapshot.summary(size, lo);
+                    let look = store.summary(&log, size, lo);
+                    prop_assert!(same_answer(snap, look), "size {size} lo {lo}");
+                }
+            }
+        });
     }
 }

@@ -44,7 +44,7 @@ use crate::error::{JanitorError, MemoryError};
 use crate::memory::log::{FactRecord, LogWarning, MemoryFlag};
 use crate::memory::nap;
 use crate::memory::pointer::SyntaxPointer;
-use crate::memory::tree_store::{BlockPlan, BlockSlot, TreeStore};
+use crate::memory::tree_store::{BlockPlan, BlockSlot, LevelSnapshot, TreeStore};
 
 /// The default budget (`--budget` overrides): OptMem budgets ~96 lines ≈
 /// 8k tokens; we budget tokens directly (§1.5.2).
@@ -125,6 +125,11 @@ impl Tile {
 
 /// Run `wake`: the budgeted tiling recall over one log + tree pair. The
 /// warnings collected at log load ride along unchanged.
+///
+/// The whole run reads each TREE level file exactly once (the C3 batch
+/// load): `store.load_levels` pays the I/O up front and every
+/// summary/rank lookup below — tiling, merging, splitting, the gate's
+/// pending request — resolves in memory.
 pub fn wake(
     facts: &[FactRecord],
     store: &TreeStore,
@@ -153,13 +158,15 @@ pub fn wake(
     }
 
     // 2. Biased tiling — every block it names is validated (the gate).
-    let mut tiles = tile(facts, store)?;
+    //    One batch load pays for every lookup the passes below make.
+    let levels = store.load_levels(facts)?;
+    let mut tiles = tile(facts, &levels)?;
     let mut truncated = false;
 
     // 3. Over budget: merge the oldest mergeable sibling pair into its
     //    parent while the payload still does not fit.
     while total_cost(&tiles, facts) > budget {
-        match merge_oldest(facts, store, &tiles)? {
+        match merge_oldest(facts, &levels, &tiles)? {
             Some((range, parent)) => {
                 tiles.splice(range..range + 2, std::iter::once(parent));
             }
@@ -189,11 +196,16 @@ pub fn wake(
         let Tile::Block { slot, text } = &tiles[at] else {
             unreachable!("pick_split only names blocks");
         };
-        let replacement = split_children(facts, store, slot)?;
+        let replacement = split_children(facts, &levels, slot)?;
         if replacement.is_empty() {
             break; // children unavailable (rebuilt tree); refinement is optional
         }
-        let added = total_cost(&replacement, facts) - tokens(text.len());
+        // Saturating: the children may be *cheaper* than the parent's own
+        // summary (two short raw facts under one long line), making the
+        // delta negative — the split still fits by definition, so clamp at
+        // zero and proceed (found by the C3 synthetic corpus; the raw
+        // subtraction panicked debug builds on exactly that shape).
+        let added = total_cost(&replacement, facts).saturating_sub(tokens(text.len()));
         if total + added > budget {
             break;
         }
@@ -241,7 +253,7 @@ fn total_cost(tiles: &[Tile], facts: &[FactRecord]) -> u64 {
 /// each position the largest aligned power-of-two block that fits the
 /// remaining range, demoted past locked ranges, then demoted until the
 /// bias rule (`size ≤ α × age`) holds or the tile is a single raw fact.
-fn tile(facts: &[FactRecord], store: &TreeStore) -> Result<Vec<Tile>, JanitorError> {
+fn tile(facts: &[FactRecord], levels: &LevelSnapshot) -> Result<Vec<Tile>, JanitorError> {
     let plan = BlockPlan::new(facts);
     let n = plan.fact_count();
     let mut tiles = Vec::new();
@@ -268,7 +280,7 @@ fn tile(facts: &[FactRecord], store: &TreeStore) -> Result<Vec<Tile>, JanitorErr
             });
         } else {
             let slot = BlockSlot { size, lo: p };
-            let text = read_or_gate(facts, store, &slot)?;
+            let text = read_or_gate(facts, levels, &slot)?;
             tiles.push(Tile::Block { slot, text });
         }
         p += size;
@@ -281,12 +293,12 @@ fn tile(facts: &[FactRecord], store: &TreeStore) -> Result<Vec<Tile>, JanitorErr
 /// compression request, never a silently served hole.
 fn read_or_gate(
     facts: &[FactRecord],
-    store: &TreeStore,
+    levels: &LevelSnapshot,
     slot: &BlockSlot,
 ) -> Result<String, JanitorError> {
-    match store.summary(facts, slot.size, slot.lo)? {
+    match levels.summary(slot.size, slot.lo)? {
         Some(text) => Ok(text),
-        None => Err(pending_error(facts, store, slot)),
+        None => Err(pending_error(facts, levels, slot)),
     }
 }
 
@@ -296,9 +308,10 @@ fn read_or_gate(
 /// children-before-parents respected), which may be a descendant of
 /// `slot` when the tree has not been built that deep yet. An agent that
 /// follows `request` slot by slot converges: every settle is permanent
-/// and the tree is finite.
-fn pending_error(facts: &[FactRecord], store: &TreeStore, slot: &BlockSlot) -> JanitorError {
-    let request = nap::next_pending(facts, store)
+/// and the tree is finite. The request is planned over the same batch
+/// load the layout used — the refusal costs no extra reads either.
+fn pending_error(facts: &[FactRecord], levels: &LevelSnapshot, slot: &BlockSlot) -> JanitorError {
+    let request = nap::next_pending_over(facts, levels)
         .ok()
         .and_then(|plan| plan.request)
         .and_then(|request| serde_json::to_value(&request).ok())
@@ -317,7 +330,7 @@ fn pending_error(facts: &[FactRecord], store: &TreeStore, slot: &BlockSlot) -> J
 /// no pair is mergeable.
 fn merge_oldest(
     facts: &[FactRecord],
-    store: &TreeStore,
+    levels: &LevelSnapshot,
     tiles: &[Tile],
 ) -> Result<Option<(usize, Tile)>, JanitorError> {
     let total = facts.len() as u64;
@@ -342,7 +355,7 @@ fn merge_oldest(
             if parent.size > PRESENT_BIAS_ALPHA * age {
                 continue;
             }
-            let text = read_or_gate(facts, store, &parent)?;
+            let text = read_or_gate(facts, levels, &parent)?;
             return Ok(Some((index, Tile::Block { slot: parent, text })));
         }
     }
@@ -372,7 +385,7 @@ fn pick_split(tiles: &[Tile]) -> Option<usize> {
 /// refinement, so the caller simply stops — the gate never fires here.
 fn split_children(
     facts: &[FactRecord],
-    store: &TreeStore,
+    levels: &LevelSnapshot,
     slot: &BlockSlot,
 ) -> Result<Vec<Tile>, JanitorError> {
     if slot.size == 2 {
@@ -387,7 +400,7 @@ fn split_children(
     }
     let mut out = Vec::with_capacity(2);
     for child in slot.children() {
-        let Some(text) = store.summary(facts, child.size, child.lo)? else {
+        let Some(text) = levels.summary(child.size, child.lo)? else {
             return Ok(Vec::new());
         };
         out.push(Tile::Block { slot: child, text });
@@ -642,6 +655,83 @@ mod tests {
         assert!(
             loose.estimate >= tight.estimate,
             "a bigger budget never spends less"
+        );
+    }
+
+    /// The C3 synthetic corpus found the split pass's cost delta
+    /// underflowing: a block whose two children are *cheaper* than its own
+    /// stored summary (two very short facts under one standard-length
+    /// line) made `children - parent` negative and panicked debug builds.
+    /// The shape needs a long-fact head (raw total over budget, so the
+    /// tiling and split passes run) and a short-fact tail (pairs cheaper
+    /// than a summary): uniform lengths never reach a child-cheaper
+    /// size-2 split before the everything-fits return.
+    #[test]
+    fn split_survives_children_cheaper_than_the_parent_summary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let facts: Vec<FactRecord> = (0..64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-14T00:00:00Z".to_owned(),
+                ptr: None,
+                text: if id < 32 {
+                    format!("fact {id}: the overlay invariants hold and every long head fact costs a real slice of the token budget")
+                } else {
+                    format!("f{id}")
+                },
+                flags: Vec::new(),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        settle_all(&facts, &store);
+
+        let report = wake(&facts, &store, 800, Vec::new()).expect("wake");
+        assert!(report.estimate <= 800, "estimate {}", report.estimate);
+    }
+
+    // --- C3: the read-path batch load -----------------------------------------
+
+    /// One wake reads each layout level exactly once — the batch load
+    /// replaces the per-lookup full-file read. This is the in-process
+    /// twin of the audit's strace count (713 TREE opens for one 5k-fact
+    /// wake on the lane's synthetic generator, pre-C3).
+    #[test]
+    fn one_wake_reads_each_present_level_exactly_once() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = setup(tmp.path(), 300, &[]);
+        settle_all(&facts, &store);
+
+        let layout = BlockPlan::new(&facts).levels().len(); // 2..256: eight
+        let on_disk = std::fs::read_dir(store.dir()).expect("TREE dir").count();
+        assert_eq!(on_disk, layout, "settled: one file per level");
+        assert!(layout <= 300u64.next_power_of_two().trailing_zeros() as usize);
+
+        let before = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get());
+        let report = wake(&facts, &store, 1024, Vec::new()).expect("wake");
+        let reads = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get()) - before;
+        assert_eq!(reads, layout, "one read per level — no per-lookup reloads");
+        assert!(!report.items.is_empty());
+    }
+
+    /// The gate refusal (unsettled tree) reads each level once too — the
+    /// E_NAP_PENDING request is planned over the same batch load, so the
+    /// refusal costs no second pass over the level files.
+    #[test]
+    fn gate_refusal_reuses_the_batch_load() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = setup(tmp.path(), 300, &[]); // nothing settled
+
+        let before = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get());
+        let err = wake(&facts, &store, 1024, Vec::new()).expect_err("gate fires");
+        let reads = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get()) - before;
+        assert_eq!(err.code(), "E_NAP_PENDING");
+        assert_eq!(
+            reads,
+            BlockPlan::new(&facts).levels().len(),
+            "the refusal plans over the snapshot it already loaded"
         );
     }
 

@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use crate::error::JanitorError;
 use crate::memory::log::FactRecord;
-use crate::memory::tree_store::{BlockPlan, BlockSlot, SettleOutcome, TreeStore};
+use crate::memory::tree_store::{BlockPlan, BlockSlot, LevelSnapshot, SettleOutcome, TreeStore};
 
 /// Blocks up to this size are summarized from their raw facts; larger
 /// blocks are summarized from their two child summaries (PLAN §1.5.4).
@@ -86,13 +86,24 @@ pub struct NapPlan {
 /// The next pending compression request, or the settled message. The scan
 /// is levels ascending, slots ascending — the canonical build order the
 /// tree store's dense prefix expects (see the module docs for why every
-/// proposed slot's children are guaranteed settled).
+/// proposed slot's children are guaranteed settled). One batch load pays
+/// for every settlement probe the scan makes (C3).
 pub fn next_pending(facts: &[FactRecord], store: &TreeStore) -> Result<NapPlan, JanitorError> {
+    let levels = store.load_levels(facts)?;
+    next_pending_over(facts, &levels)
+}
+
+/// [`next_pending`] over levels already batch-loaded — wake's gate path
+/// reuses the snapshot it read, so a gate refusal costs no extra reads.
+pub fn next_pending_over(
+    facts: &[FactRecord],
+    levels: &LevelSnapshot,
+) -> Result<NapPlan, JanitorError> {
     let plan = BlockPlan::new(facts);
     for size in plan.levels() {
         for lo in plan.compressible_slots(facts, size) {
             let slot = BlockSlot { size, lo };
-            if let Some(request) = build_request(facts, store, slot)? {
+            if let Some(request) = build_request(facts, levels, slot)? {
                 return Ok(NapPlan {
                     pending: true,
                     request: Some(request),
@@ -109,20 +120,19 @@ pub fn next_pending(facts: &[FactRecord], store: &TreeStore) -> Result<NapPlan, 
 }
 
 /// Build the request for one specific slot, if it is pending (`None` when
-/// already settled — the idempotency probe `wake` and tests also use).
-/// The slot must be compressible (alignment/range/locks) — an
-/// incompressible slot is never a compression request, so it is `None`
-/// too.
+/// already settled — the idempotency probe tests also use). The slot must
+/// be compressible (alignment/range/locks) — an incompressible slot is
+/// never a compression request, so it is `None` too.
 pub fn build_request(
     facts: &[FactRecord],
-    store: &TreeStore,
+    levels: &LevelSnapshot,
     slot: BlockSlot,
 ) -> Result<Option<NapRequest>, JanitorError> {
     let plan = BlockPlan::new(facts);
     if !plan.is_compressible(facts, slot.size, slot.lo) {
         return Ok(None);
     }
-    if store.summary(facts, slot.size, slot.lo)?.is_some() {
+    if levels.summary(slot.size, slot.lo)?.is_some() {
         return Ok(None); // settled — not pending
     }
 
@@ -133,7 +143,7 @@ pub fn build_request(
     } else {
         let mut children = Vec::with_capacity(2);
         for child in slot.children() {
-            let text = store.summary(facts, child.size, child.lo)?.ok_or_else(|| {
+            let text = levels.summary(child.size, child.lo)?.ok_or_else(|| {
                 JanitorError::from(crate::error::MemoryError::SlotInvalid {
                     slot: slot.notation(),
                     detail: format!(
