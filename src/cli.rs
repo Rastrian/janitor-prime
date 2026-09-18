@@ -74,7 +74,8 @@ pub enum Command {
     /// STATE.json); refuses when it exists unless --force resets it.
     Init(InitArgs),
     /// Recall memory under a token budget: raw facts and summaries,
-    /// oldest-first, plus the standing global layer and state (F6).
+    /// oldest-first, plus the standing global layer and state (F6);
+    /// --task ranks the recall against a query (C1).
     Wake(WakeArgs),
     /// Append one validated fact (one line, ≤ 280 bytes — as an argument
     /// or piped via --stdin); --ptr anchors it with the notation
@@ -132,13 +133,20 @@ pub struct InitArgs {
     pub force: bool,
 }
 
-/// `janitor wake` (PLAN §1.5.2, F6.7).
+/// `janitor wake` (PLAN §1.5.2, F6.7; C1 adds `--task`).
 #[derive(Debug, Parser)]
 pub struct WakeArgs {
     /// Token budget for the memory payload (chars4 estimator; the default
     /// mirrors OptMem's ~96 lines ≈ 8k tokens).
     #[arg(long, default_value_t = crate::memory::wake::DEFAULT_BUDGET)]
     pub budget: u64,
+
+    /// Rank the recall against this query (store-local TF-IDF, scorer
+    /// "tfidf-store"): the best-scoring facts are served raw while the
+    /// budget allows, the rest fills with stored summaries. Absent: the
+    /// position-only tiling, byte-identical to previous versions.
+    #[arg(long)]
+    pub task: Option<String>,
 }
 
 /// `janitor note` (PLAN §1.5.3, F6.7): exactly one anchor flavor — the
@@ -590,17 +598,32 @@ mod tests {
         };
         assert!(!args.force);
 
-        // wake: default budget, override
+        // wake: default budget, override, and the C1 ranked mode
         let cli = Cli::try_parse_from(["janitor", "wake"]).expect("wake");
         let Some(Command::Wake(args)) = cli.command else {
             unreachable!("wake subcommand");
         };
         assert_eq!(args.budget, crate::memory::wake::DEFAULT_BUDGET);
+        assert_eq!(args.task, None, "the positional pass is the default");
         let cli = Cli::try_parse_from(["janitor", "wake", "--budget", "128"]).expect("wake budget");
         let Some(Command::Wake(args)) = cli.command else {
             unreachable!("wake subcommand");
         };
         assert_eq!(args.budget, 128);
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "wake",
+            "--task",
+            "daemon socket errors",
+            "--budget",
+            "1500",
+        ])
+        .expect("ranked wake");
+        let Some(Command::Wake(args)) = cli.command else {
+            unreachable!("wake subcommand");
+        };
+        assert_eq!(args.task.as_deref(), Some("daemon socket errors"));
+        assert_eq!(args.budget, 1500);
 
         // note: free fact, anchored fact, locked fact
         let cli =

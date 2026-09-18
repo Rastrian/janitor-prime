@@ -158,9 +158,10 @@ impl Session {
         self.mem.init(force)
     }
 
-    /// `janitor wake --budget N`.
-    pub fn wake(&self, budget: u64) -> Result<WakePayload, JanitorError> {
-        self.mem.wake(budget)
+    /// `janitor wake --budget N [--task QUERY]` (the ranked pass when
+    /// `task` is given, C1).
+    pub fn wake(&self, budget: u64, task: Option<&str>) -> Result<WakePayload, JanitorError> {
+        self.mem.wake(budget, task)
     }
 
     /// `janitor note`: resolve the anchor (the anti-hallucination gate —

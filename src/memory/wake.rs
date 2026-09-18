@@ -37,6 +37,26 @@
 //!
 //! The budget governs the *memory* payload only; the global layer's
 //! standing text is reported with its own estimate alongside it.
+//!
+//! **The ranked pass (C1, PLAN-C2C §2).** `--task "<query>"` switches
+//! recall from position to relevance while keeping every rule above:
+//!
+//! 1. **score** — every fact by store-local TF-IDF
+//!    ([`crate::memory::rank`], declared `"scorer": "tfidf-store"`);
+//! 2. **serve** — score-positive facts get raw seats in serve order
+//!    (score desc, ties to the newer id) while their cost fits; a fact
+//!    that does not fit is dropped from raw service and counted
+//!    (`dropped_scored`). Locked facts stay **pinned** — always raw,
+//!    never dropped, honestly over budget if it comes to that (the
+//!    §1.5.2 invariant survives ranking);
+//! 3. **fill** — the leftover budget buys stored summaries over the
+//!    unserved ranges through the same biased tiling, with served facts
+//!    pinned exactly like locks (blocks force-split around them) and the
+//!    `E_NAP_PENDING` gate untouched;
+//! 4. **report** — an append-only `task` block in the payload, and
+//!    `truncated: true` now means "score-positive facts were dropped
+//!    for budget". Without `--task` the payload is byte-identical to
+//!    the positional pass (golden regression).
 
 use serde::Serialize;
 
@@ -44,6 +64,7 @@ use crate::error::{JanitorError, MemoryError};
 use crate::memory::log::{FactRecord, LogWarning, MemoryFlag};
 use crate::memory::nap;
 use crate::memory::pointer::SyntaxPointer;
+use crate::memory::rank;
 use crate::memory::tree_store::{BlockPlan, BlockSlot, LevelSnapshot, TreeStore};
 
 /// The default budget (`--budget` overrides): OptMem budgets ~96 lines ≈
@@ -94,19 +115,44 @@ pub struct WakeReport {
     pub estimator: &'static str,
     /// Sum of the served items' costs (the number the budget governs).
     pub estimate: u64,
-    /// True when tiles were dropped from the oldest end to fit the budget.
+    /// True when tiles were dropped from the oldest end to fit the budget
+    /// (under `--task`: when score-positive facts were dropped for
+    /// budget — the fill's shaping of score-zero material is not a
+    /// truncation the agent needs to act on).
     pub truncated: bool,
+    /// The ranked pass's declaration — present only under `--task`
+    /// (append-only: the positional payload never carries the key).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskReport>,
     pub items: Vec<WakeItem>,
     pub warnings: Vec<LogWarning>,
+}
+
+/// The `task` block of a ranked wake payload: what was asked, what scored
+/// it, and the serve accounting.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TaskReport {
+    /// The query exactly as given.
+    pub query: String,
+    /// The scorer identity (the `"estimator": "chars4"` precedent,
+    /// ADR-0011 — the limitation is auditable in-band).
+    pub scorer: &'static str,
+    /// Score-positive facts served raw.
+    pub served_scored: u64,
+    /// Score-positive facts not served raw (budget); a summary may still
+    /// cover them — compressed beats absent.
+    pub dropped_scored: u64,
 }
 
 /// One tile of the layout during construction.
 #[derive(Clone, Debug)]
 enum Tile {
-    /// A raw fact (pinned when the fact is locked).
+    /// A raw fact. `pinned` marks the facts the layout may neither
+    /// compress nor drop: locked facts always, and — under `--task` —
+    /// the facts the ranked serve pass bought raw.
     Fact {
         id: u64,
-        locked: bool,
+        pinned: bool,
     },
     Block {
         slot: BlockSlot,
@@ -124,7 +170,9 @@ impl Tile {
 }
 
 /// Run `wake`: the budgeted tiling recall over one log + tree pair. The
-/// warnings collected at log load ride along unchanged.
+/// warnings collected at log load ride along unchanged. `task`, when
+/// given, switches recall to the ranked pass (see the module doc);
+/// `None` is the positional pass, byte-identical to pre-C1 payloads.
 ///
 /// The whole run reads each TREE level file exactly once (the C3 batch
 /// load): `store.load_levels` pays the I/O up front and every
@@ -133,6 +181,7 @@ impl Tile {
 pub fn wake(
     facts: &[FactRecord],
     store: &TreeStore,
+    task: Option<&str>,
     budget: u64,
     warnings: Vec<LogWarning>,
 ) -> Result<WakeReport, JanitorError> {
@@ -142,7 +191,20 @@ pub fn wake(
         }
         .into());
     }
+    match task {
+        Some(query) => wake_ranked(facts, store, query, budget, warnings),
+        None => wake_positional(facts, store, budget, warnings),
+    }
+}
 
+/// The positional pass — steps 1–4 of the module doc, unchanged by C1
+/// (the golden fixtures pin it byte for byte).
+fn wake_positional(
+    facts: &[FactRecord],
+    store: &TreeStore,
+    budget: u64,
+    warnings: Vec<LogWarning>,
+) -> Result<WakeReport, JanitorError> {
     // 1. Everything fits raw ⇒ nothing is compressed, TREE untouched.
     let raw_total: u64 = facts.iter().map(|fact| tokens(fact.text.len())).sum();
     if raw_total <= budget {
@@ -152,6 +214,7 @@ pub fn wake(
             estimator: ESTIMATOR,
             estimate: raw_total,
             truncated: false,
+            task: None,
             items: facts.iter().map(raw_item).collect(),
             warnings,
         });
@@ -160,57 +223,13 @@ pub fn wake(
     // 2. Biased tiling — every block it names is validated (the gate).
     //    One batch load pays for every lookup the passes below make.
     let levels = store.load_levels(facts)?;
-    let mut tiles = tile(facts, &levels)?;
-    let mut truncated = false;
+    let pinned = lock_mask(facts);
+    let tiles = tile(facts, &levels, &pinned)?;
 
-    // 3. Over budget: merge the oldest mergeable sibling pair into its
-    //    parent while the payload still does not fit.
-    while total_cost(&tiles, facts) > budget {
-        match merge_oldest(facts, &levels, &tiles)? {
-            Some((range, parent)) => {
-                tiles.splice(range..range + 2, std::iter::once(parent));
-            }
-            None => break,
-        }
-    }
-
-    // Still over budget: drop whole tiles from the oldest end, pinned
-    // locks excepted — the newest material survives longest.
-    while total_cost(&tiles, facts) > budget {
-        let Some(drop_at) = tiles.iter().position(|tile| match tile {
-            Tile::Fact { locked, .. } => !*locked,
-            Tile::Block { .. } => true,
-        }) else {
-            break; // only pinned locks remain: keep them, honestly over
-        };
-        tiles.remove(drop_at);
-        truncated = true;
-    }
-
-    // 4. Leftover budget: split the rightmost of the largest blocks into
-    //    its two halves while affordable ("spend what is left on the
-    //    present"). Splits strictly shrink tile sizes, so this terminates.
-    loop {
-        let total = total_cost(&tiles, facts);
-        let Some(at) = pick_split(&tiles) else { break };
-        let Tile::Block { slot, text } = &tiles[at] else {
-            unreachable!("pick_split only names blocks");
-        };
-        let replacement = split_children(facts, &levels, slot)?;
-        if replacement.is_empty() {
-            break; // children unavailable (rebuilt tree); refinement is optional
-        }
-        // Saturating: the children may be *cheaper* than the parent's own
-        // summary (two short raw facts under one long line), making the
-        // delta negative — the split still fits by definition, so clamp at
-        // zero and proceed (found by the C3 synthetic corpus; the raw
-        // subtraction panicked debug builds on exactly that shape).
-        let added = total_cost(&replacement, facts).saturating_sub(tokens(text.len()));
-        if total + added > budget {
-            break;
-        }
-        tiles.splice(at..at + 1, replacement.into_iter().collect::<Vec<_>>());
-    }
+    // 3+4. Merge, drop, split — the same shaping the ranked pass fills
+    // with. Here, tiles dropped from the oldest end are the reported
+    // truncation.
+    let (tiles, dropped) = shape_to_budget(facts, &levels, &pinned, tiles, budget)?;
 
     let estimate: u64 = tiles.iter().map(|tile| tile.cost(facts)).sum();
     let items = tiles
@@ -229,10 +248,239 @@ pub fn wake(
         budget_tokens: budget,
         estimator: ESTIMATOR,
         estimate,
-        truncated,
+        truncated: dropped,
+        task: None,
         items,
         warnings,
     })
+}
+
+/// The ranked pass (`--task`): score → serve → fill → report ([`rank`]
+/// owns the arithmetic, the module doc the contract).
+fn wake_ranked(
+    facts: &[FactRecord],
+    store: &TreeStore,
+    query: &str,
+    budget: u64,
+    warnings: Vec<LogWarning>,
+) -> Result<WakeReport, JanitorError> {
+    // Score: one tokenization per fact feeds both the document
+    // statistics and the scoring — O(total bytes), the fence the C1
+    // timing test pins.
+    let tokenized: Vec<Vec<String>> = facts
+        .iter()
+        .map(|fact| rank::tokenize(&fact.text))
+        .collect();
+    let scored = rank::Query::over_token_lists(query, &tokenized);
+    let scores: Vec<f64> = tokenized
+        .iter()
+        .map(|tokens| scored.score_tokens(tokens))
+        .collect();
+
+    // 1. Everything fits raw ⇒ nothing is compressed, TREE untouched —
+    //    the same first rule as the positional pass (an unsettled
+    //    summary can never block a wake that needs none). Serve order
+    //    still leads: the raw evidence, best first.
+    let raw_total: u64 = facts.iter().map(|fact| tokens(fact.text.len())).sum();
+    if raw_total <= budget {
+        return Ok(WakeReport {
+            awake: true,
+            budget_tokens: budget,
+            estimator: ESTIMATOR,
+            estimate: raw_total,
+            truncated: false,
+            task: Some(task_report(query, positive_count(&scores), 0)),
+            items: serve_order(&scores)
+                .into_iter()
+                .map(|id| raw_item(&facts[id as usize]))
+                .collect(),
+            warnings,
+        });
+    }
+
+    // 2. Serve: score-positive facts take raw seats in serve order while
+    //    their cost fits; a fact that does not fit is dropped from raw
+    //    service and counted. Locked facts are pre-seated (their cost
+    //    spent up front) and stay pinned — never dropped, honestly over
+    //    budget if it comes to that.
+    let mut served = lock_mask(facts);
+    let mut spent: u64 = facts
+        .iter()
+        .filter(|fact| fact.is_locked())
+        .map(|fact| tokens(fact.text.len()))
+        .sum();
+    let mut served_scored = 0u64;
+    for id in serve_order(&scores) {
+        if scores[id as usize] <= 0.0 {
+            break; // serve order is score desc: the rest cannot be positive
+        }
+        if served[id as usize] {
+            served_scored += 1; // a pinned lock with a positive score: seated
+            continue;
+        }
+        let cost = tokens(facts[id as usize].text.len());
+        if spent + cost <= budget {
+            served[id as usize] = true;
+            spent += cost;
+            served_scored += 1;
+        }
+    }
+    let dropped_scored = positive_count(&scores) - served_scored;
+
+    // 3. Fill: the same biased tiling over everything the serve pass did
+    //    not buy raw, with served facts pinned exactly like locks (blocks
+    //    force-split around them) — the completeness gate untouched.
+    let levels = store.load_levels(facts)?;
+    let tiles = tile(facts, &levels, &served)?;
+    let (mut tiles, _fill_dropped) = shape_to_budget(facts, &levels, &served, tiles, budget)?;
+
+    // A score-positive fact the budget dropped from raw service must not
+    // sneak back as a raw tail tile or a split product: it was counted
+    // dropped. A stored summary may still cover it — compressed beats
+    // absent. (Score-zero facts the bias keeps raw at the tail ride
+    // along: the layout covers every fact, no silent holes.)
+    tiles.retain(|tile| match tile {
+        Tile::Fact { id, .. } => served[*id as usize] || scores[*id as usize] <= 0.0,
+        Tile::Block { .. } => true,
+    });
+
+    // 4. Report: the raw evidence leads (serve order), then the layout's
+    //    chronological backdrop — the score-zero tail raws the bias kept,
+    //    and the summary blocks.
+    let mut items: Vec<WakeItem> = serve_order(&scores)
+        .into_iter()
+        .filter(|id| served[*id as usize])
+        .map(|id| raw_item(&facts[id as usize]))
+        .collect();
+    for tile in &tiles {
+        match tile {
+            Tile::Fact { id, .. } if !served[*id as usize] => {
+                items.push(raw_item(&facts[*id as usize]));
+            }
+            Tile::Block { slot, text } => items.push(WakeItem::Summary {
+                slot: slot.notation(),
+                covers: (slot.lo, slot.lo + slot.size),
+                text: text.clone(),
+            }),
+            Tile::Fact { .. } => {} // already rendered in serve order
+        }
+    }
+    let estimate: u64 = items
+        .iter()
+        .map(|item| match item {
+            WakeItem::Fact { text, .. } | WakeItem::Summary { text, .. } => tokens(text.len()),
+        })
+        .sum();
+    Ok(WakeReport {
+        awake: true,
+        budget_tokens: budget,
+        estimator: ESTIMATOR,
+        estimate,
+        truncated: dropped_scored > 0,
+        task: Some(task_report(query, served_scored, dropped_scored)),
+        items,
+        warnings,
+    })
+}
+
+/// The pin mask of the positional pass: locked facts, and nothing else.
+fn lock_mask(facts: &[FactRecord]) -> Vec<bool> {
+    facts.iter().map(|fact| fact.is_locked()).collect()
+}
+
+/// Fact ids in serve order: score desc, ties to the newer id
+/// ([`rank::scored_first`]).
+fn serve_order(scores: &[f64]) -> Vec<u64> {
+    let mut ranked: Vec<rank::Scored> = scores
+        .iter()
+        .enumerate()
+        .map(|(id, score)| rank::Scored {
+            id: id as u64,
+            score: *score,
+        })
+        .collect();
+    ranked.sort_by(rank::scored_first);
+    ranked.into_iter().map(|entry| entry.id).collect()
+}
+
+/// How many facts carry a strictly positive score.
+fn positive_count(scores: &[f64]) -> u64 {
+    scores.iter().filter(|&&score| score > 0.0).count() as u64
+}
+
+fn task_report(query: &str, served_scored: u64, dropped_scored: u64) -> TaskReport {
+    TaskReport {
+        query: query.to_owned(),
+        scorer: rank::SCORER,
+        served_scored,
+        dropped_scored,
+    }
+}
+
+/// Steps 3–4 over an initial layout: while over budget, merge the oldest
+/// mergeable sibling pair into its parent; still over, drop whole tiles
+/// from the oldest end (pinned tiles survive — keep them, honestly
+/// over); with leftover budget, split the rightmost of the largest
+/// blocks into its halves while affordable. Returns the shaped tiles and
+/// whether the drop pass fired.
+fn shape_to_budget(
+    facts: &[FactRecord],
+    levels: &LevelSnapshot,
+    pinned: &[bool],
+    mut tiles: Vec<Tile>,
+    budget: u64,
+) -> Result<(Vec<Tile>, bool), JanitorError> {
+    // Over budget: merge the oldest mergeable sibling pair into its
+    // parent while the payload still does not fit.
+    while total_cost(&tiles, facts) > budget {
+        match merge_oldest(facts, levels, &tiles)? {
+            Some((range, parent)) => {
+                tiles.splice(range..range + 2, std::iter::once(parent));
+            }
+            None => break,
+        }
+    }
+
+    // Still over budget: drop whole tiles from the oldest end, pinned
+    // tiles excepted — the newest material survives longest.
+    let mut dropped = false;
+    while total_cost(&tiles, facts) > budget {
+        let Some(drop_at) = tiles.iter().position(|tile| match tile {
+            Tile::Fact { pinned, .. } => !*pinned,
+            Tile::Block { .. } => true,
+        }) else {
+            break; // only pinned tiles remain: keep them, honestly over
+        };
+        tiles.remove(drop_at);
+        dropped = true;
+    }
+
+    // Leftover budget: split the rightmost of the largest blocks into
+    // its two halves while affordable ("spend what is left on the
+    // present"). Splits strictly shrink tile sizes, so this terminates.
+    loop {
+        let total = total_cost(&tiles, facts);
+        let Some(at) = pick_split(&tiles) else { break };
+        let Tile::Block { slot, text } = &tiles[at] else {
+            unreachable!("pick_split only names blocks");
+        };
+        let replacement = split_children(pinned, levels, slot)?;
+        if replacement.is_empty() {
+            break; // children unavailable (rebuilt tree); refinement is optional
+        }
+        // Saturating: the children may be *cheaper* than the parent's own
+        // summary (two short raw facts under one long line), making the
+        // delta negative — the split still fits by definition, so clamp at
+        // zero and proceed (found by the C3 synthetic corpus; the raw
+        // subtraction panicked debug builds on exactly that shape).
+        let added = total_cost(&replacement, facts).saturating_sub(tokens(text.len()));
+        if total + added > budget {
+            break;
+        }
+        tiles.splice(at..at + 1, replacement.into_iter().collect::<Vec<_>>());
+    }
+
+    Ok((tiles, dropped))
 }
 
 /// The raw-fact payload item for one record.
@@ -251,9 +499,16 @@ fn total_cost(tiles: &[Tile], facts: &[FactRecord]) -> u64 {
 
 /// The biased tiling of `[0, n)` (step 2): greedy from the oldest end; at
 /// each position the largest aligned power-of-two block that fits the
-/// remaining range, demoted past locked ranges, then demoted until the
-/// bias rule (`size ≤ α × age`) holds or the tile is a single raw fact.
-fn tile(facts: &[FactRecord], levels: &LevelSnapshot) -> Result<Vec<Tile>, JanitorError> {
+/// remaining range, demoted past unpinnable ranges, then demoted until
+/// the bias rule (`size ≤ α × age`) holds or the tile is a single raw
+/// fact. `pinned` marks the facts no block may swallow — locked facts
+/// always (the positional pass), plus the facts the ranked serve pass
+/// bought raw (they must surface raw, exactly like locks).
+fn tile(
+    facts: &[FactRecord],
+    levels: &LevelSnapshot,
+    pinned: &[bool],
+) -> Result<Vec<Tile>, JanitorError> {
     let plan = BlockPlan::new(facts);
     let n = plan.fact_count();
     let mut tiles = Vec::new();
@@ -265,9 +520,10 @@ fn tile(facts: &[FactRecord], levels: &LevelSnapshot) -> Result<Vec<Tile>, Janit
         while size > fit {
             size /= 2;
         }
-        // Lock-freedom first, then present-bias — demotion only shrinks,
-        // and both invariants are preserved by subranges of a valid block.
-        while size > 1 && !plan.is_compressible(facts, size, p) {
+        // Store compressibility (locks) and the pin mask first, then
+        // present-bias — demotion only shrinks, and every invariant is
+        // preserved by subranges of a valid block.
+        while size > 1 && (!plan.is_compressible(facts, size, p) || range_pinned(pinned, p, size)) {
             size /= 2;
         }
         while size > 1 && size > PRESENT_BIAS_ALPHA * (n - (p + size)) {
@@ -276,7 +532,7 @@ fn tile(facts: &[FactRecord], levels: &LevelSnapshot) -> Result<Vec<Tile>, Janit
         if size == 1 {
             tiles.push(Tile::Fact {
                 id: p,
-                locked: facts[p as usize].is_locked(),
+                pinned: pinned[p as usize],
             });
         } else {
             let slot = BlockSlot { size, lo: p };
@@ -286,6 +542,13 @@ fn tile(facts: &[FactRecord], levels: &LevelSnapshot) -> Result<Vec<Tile>, Janit
         p += size;
     }
     Ok(tiles)
+}
+
+/// Whether any fact in `[lo, lo + size)` carries the pin mask.
+fn range_pinned(pinned: &[bool], lo: u64, size: u64) -> bool {
+    pinned[lo as usize..(lo + size) as usize]
+        .iter()
+        .any(|&pin| pin)
 }
 
 /// A block the layout needs: its stored summary, or — the completeness
@@ -384,7 +647,7 @@ fn pick_split(tiles: &[Tile]) -> Option<usize> {
 /// splittable" (a rebuilt tree lost the children); splitting is optional
 /// refinement, so the caller simply stops — the gate never fires here.
 fn split_children(
-    facts: &[FactRecord],
+    pinned: &[bool],
     levels: &LevelSnapshot,
     slot: &BlockSlot,
 ) -> Result<Vec<Tile>, JanitorError> {
@@ -394,7 +657,7 @@ fn split_children(
             .iter()
             .map(|child| Tile::Fact {
                 id: child.lo,
-                locked: facts[child.lo as usize].is_locked(),
+                pinned: pinned[child.lo as usize],
             })
             .collect());
     }
@@ -451,7 +714,7 @@ mod tests {
     fn zero_budget_is_typed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = setup(tmp.path(), 2, &[]);
-        let err = wake(&facts, &store, 0, Vec::new()).expect_err("zero");
+        let err = wake(&facts, &store, None, 0, Vec::new()).expect_err("zero");
         assert_eq!(err.code(), "E_BUDGET_INVALID");
     }
 
@@ -462,7 +725,7 @@ mod tests {
     fn everything_fits_serves_everything_raw() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = setup(tmp.path(), 6, &[2]);
-        let report = wake(&facts, &store, 100_000, Vec::new()).expect("wake");
+        let report = wake(&facts, &store, None, 100_000, Vec::new()).expect("wake");
         assert!(!report.truncated);
         assert_eq!(report.items.len(), 6);
         assert!(
@@ -488,7 +751,7 @@ mod tests {
         let (facts, store) = setup(tmp.path(), 8, &[]);
         let tiny = 12u64;
 
-        let err = wake(&facts, &store, tiny, Vec::new()).expect_err("gate fires");
+        let err = wake(&facts, &store, None, tiny, Vec::new()).expect_err("gate fires");
         assert_eq!(err.code(), "E_NAP_PENDING");
         let details = err.details().expect("request payload");
         // The biased tiling's first block over 8 facts is [0,4) (size 4
@@ -509,7 +772,7 @@ mod tests {
         loop {
             guard += 1;
             assert!(guard < 64, "the loop must converge");
-            match wake(&facts, &store, tiny, Vec::new()) {
+            match wake(&facts, &store, None, tiny, Vec::new()) {
                 Ok(report) => {
                     assert!(report.awake);
                     assert!(report.estimate <= tiny, "budget respected after settling");
@@ -541,7 +804,7 @@ mod tests {
 
         // The whole biased layout (one summary over [0,8) plus the tail)
         // costs ~84 tokens; a budget just above keeps it intact.
-        let roomy = wake(&facts, &store, 85, Vec::new()).expect("wake");
+        let roomy = wake(&facts, &store, None, 85, Vec::new()).expect("wake");
         assert!(roomy.estimate <= 85, "estimate {}", roomy.estimate);
         assert!(
             matches!(roomy.items.first(), Some(WakeItem::Summary { slot, .. }) if slot == "0-8"),
@@ -555,7 +818,7 @@ mod tests {
         );
 
         // Starvation: everything droppable goes, pinned locks survive.
-        let starved = wake(&facts, &store, 40, Vec::new()).expect("wake");
+        let starved = wake(&facts, &store, None, 40, Vec::new()).expect("wake");
         assert!(starved.truncated);
         assert!(starved.estimate <= 40, "estimate {}", starved.estimate);
         assert!(
@@ -591,8 +854,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = setup(tmp.path(), 12, &[5]);
         settle_all(&facts, &store);
-        let a = wake(&facts, &store, 30, Vec::new()).expect("wake a");
-        let b = wake(&facts, &store, 30, Vec::new()).expect("wake b");
+        let a = wake(&facts, &store, None, 30, Vec::new()).expect("wake a");
+        let b = wake(&facts, &store, None, 30, Vec::new()).expect("wake b");
         assert_eq!(a, b);
     }
 
@@ -604,7 +867,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = setup(tmp.path(), 20, &[3]);
         settle_all(&facts, &store);
-        let report = wake(&facts, &store, 60, Vec::new()).expect("wake");
+        let report = wake(&facts, &store, None, 60, Vec::new()).expect("wake");
         let n = facts.len() as u64;
         let mut prev_end = None;
         for item in &report.items {
@@ -642,9 +905,9 @@ mod tests {
         let (facts, store) = setup(tmp.path(), 16, &[]);
         settle_all(&facts, &store);
 
-        let tight = wake(&facts, &store, 20, Vec::new()).expect("tight");
-        let loose = wake(&facts, &store, 300, Vec::new()).expect("loose");
-        let raw = wake(&facts, &store, 100_000, Vec::new()).expect("raw fits");
+        let tight = wake(&facts, &store, None, 20, Vec::new()).expect("tight");
+        let loose = wake(&facts, &store, None, 300, Vec::new()).expect("loose");
+        let raw = wake(&facts, &store, None, 100_000, Vec::new()).expect("raw fits");
 
         assert!(tight.estimate <= 20 && loose.estimate <= 300);
         assert_eq!(raw.items.len(), 16, "loosest serves everything raw");
@@ -688,7 +951,7 @@ mod tests {
         let store = TreeStore::new(&root);
         settle_all(&facts, &store);
 
-        let report = wake(&facts, &store, 800, Vec::new()).expect("wake");
+        let report = wake(&facts, &store, None, 800, Vec::new()).expect("wake");
         assert!(report.estimate <= 800, "estimate {}", report.estimate);
     }
 
@@ -710,7 +973,7 @@ mod tests {
         assert!(layout <= 300u64.next_power_of_two().trailing_zeros() as usize);
 
         let before = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get());
-        let report = wake(&facts, &store, 1024, Vec::new()).expect("wake");
+        let report = wake(&facts, &store, None, 1024, Vec::new()).expect("wake");
         let reads = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get()) - before;
         assert_eq!(reads, layout, "one read per level — no per-lookup reloads");
         assert!(!report.items.is_empty());
@@ -725,7 +988,7 @@ mod tests {
         let (facts, store) = setup(tmp.path(), 300, &[]); // nothing settled
 
         let before = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get());
-        let err = wake(&facts, &store, 1024, Vec::new()).expect_err("gate fires");
+        let err = wake(&facts, &store, None, 1024, Vec::new()).expect_err("gate fires");
         let reads = crate::memory::tree_store::LEVEL_READS.with(|reads| reads.get()) - before;
         assert_eq!(err.code(), "E_NAP_PENDING");
         assert_eq!(
@@ -733,6 +996,246 @@ mod tests {
             BlockPlan::new(&facts).levels().len(),
             "the refusal plans over the snapshot it already loaded"
         );
+    }
+
+    // --- C1: the ranked pass ---------------------------------------------------
+
+    /// The retrieval fixture at unit scale: `n` facts of realistic length
+    /// where the `cluster` ids (callers put them in the oldest half)
+    /// carry the "daemon socket errors" vocabulary and everything else
+    /// is filler that shares none of it — the query terms are
+    /// discriminative by construction, and the filler keeps one id-word
+    /// per fact so no two texts tokenize identically.
+    fn cluster_setup(
+        tmp: &std::path::Path,
+        n: u64,
+        cluster: &[u64],
+        locked: &[u64],
+    ) -> (Vec<FactRecord>, TreeStore) {
+        let root = tmp.join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let filler = "the overlay txn flush atomic rename fsync budget tiling summary lock span \
+                      anchor drift gate nap wake log tree cache probe token bytes level rank slot \
+                      record keeps the invariant honest and the payload small";
+        let facts = (0..n)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-18T00:00:00Z".to_owned(),
+                ptr: None,
+                text: if cluster.contains(&id) {
+                    format!("fact {id}: daemon socket errors under load with backoff; {filler}")
+                } else {
+                    format!("fact {id}: {filler} — run note {id}")
+                },
+                flags: if locked.contains(&id) {
+                    vec![MemoryFlag::ArchitecturalLock]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect();
+        (facts, TreeStore::new(&root))
+    }
+
+    /// The ids arriving as raw fact items.
+    fn raw_ids(report: &WakeReport) -> Vec<u64> {
+        report
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                WakeItem::Fact { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The retrieval claim (C1 acceptance, unit scale): at equal budget
+    /// the ranked pass serves the cluster raw while the positional pass
+    /// buys summaries of the old blocks — and says so in-band.
+    #[test]
+    fn ranked_pass_serves_the_cluster_that_positional_compresses() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect(); // 0..18: oldest half
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
+        settle_all(&facts, &store);
+
+        let ranked = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("ranked");
+        let positional = wake(&facts, &store, None, 600, Vec::new()).expect("positional");
+
+        let served = cluster
+            .iter()
+            .filter(|id| raw_ids(&ranked).contains(id))
+            .count();
+        let bought = cluster
+            .iter()
+            .filter(|id| raw_ids(&positional).contains(id))
+            .count();
+        assert!(served >= 9, "ranked served {served}/10 of the cluster");
+        assert!(bought <= 3, "positional served {bought}/10 of the cluster");
+
+        // Only cluster facts are score-positive here, so the counts say
+        // exactly what the items say.
+        let task = ranked.task.as_ref().expect("task block");
+        assert_eq!(task.query, "daemon socket errors");
+        assert_eq!(task.scorer, "tfidf-store");
+        assert_eq!(task.served_scored, served as u64);
+        assert_eq!(task.dropped_scored, 10 - served as u64);
+        assert_eq!(ranked.truncated, task.dropped_scored > 0);
+
+        // Append-only: the positional payload carries no task key at all.
+        assert!(positional.task.is_none());
+        let json = serde_json::to_value(&positional).expect("positional json");
+        assert!(json.get("task").is_none(), "the key must not appear");
+    }
+
+    /// Deterministic: identical inputs, byte-identical ranked payloads.
+    #[test]
+    fn ranked_wake_is_deterministic() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[5]);
+        settle_all(&facts, &store);
+        let a = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("a");
+        let b = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("b");
+        assert_eq!(a, b);
+        assert_eq!(
+            serde_json::to_string(&a).expect("json a"),
+            serde_json::to_string(&b).expect("json b")
+        );
+    }
+
+    /// Locks survive ranking: always raw, exactly once, never under a
+    /// summary, even at a starved budget that fits nothing else — and a
+    /// starved ranked pass reports the score-positive drops.
+    #[test]
+    fn ranked_pass_pins_locks_raw_exactly_once() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let locked = [3u64, 37]; // one old filler, one recent filler
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &locked);
+        settle_all(&facts, &store);
+
+        let starved = wake(&facts, &store, Some("daemon socket errors"), 1, Vec::new())
+            .expect("starved ranked wake");
+        let raw = raw_ids(&starved);
+        for id in locked {
+            assert_eq!(
+                raw.iter().filter(|&&served| served == id).count(),
+                1,
+                "lock {id} exactly once, raw"
+            );
+            for item in &starved.items {
+                if let WakeItem::Summary { covers, .. } = item {
+                    assert!(
+                        !(covers.0..covers.1).contains(&id),
+                        "summary {covers:?} covers lock {id}"
+                    );
+                }
+            }
+        }
+        let task = starved.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 0, "nothing fits budget 1");
+        assert_eq!(task.dropped_scored, 10);
+        assert!(starved.truncated);
+    }
+
+    /// A score-positive fact the budget dropped from raw service never
+    /// rides raw through the layout's tail or a split — it was counted
+    /// dropped; a stored summary may cover it, or budget took it too.
+    #[test]
+    fn ranked_pass_never_serves_dropped_scored_facts_raw() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
+        settle_all(&facts, &store);
+
+        // ~3 cluster facts fit: the rest must be absent from the raw set.
+        let report = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            200,
+            Vec::new(),
+        )
+        .expect("ranked");
+        let task = report.task.as_ref().expect("task block");
+        let raw = raw_ids(&report);
+        let served_cluster = cluster.iter().filter(|id| raw.contains(id)).count() as u64;
+        assert_eq!(served_cluster, task.served_scored, "counts match items");
+        assert!(task.dropped_scored >= 1);
+        assert!(report.estimate <= 200, "estimate {}", report.estimate);
+    }
+
+    /// The completeness gate is unchanged under ranking: compression
+    /// needed, tiling needs an unwritten summary ⇒ the typed refusal.
+    #[test]
+    fn ranked_pass_keeps_the_completeness_gate() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]); // nothing settled
+        let err = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect_err("gate fires under --task");
+        assert_eq!(err.code(), "E_NAP_PENDING");
+    }
+
+    /// Everything fits ⇒ everything raw, in serve order (the cluster
+    /// leads), no summaries, no drops — TREE is never consulted, so an
+    /// unsettled store is fine.
+    #[test]
+    fn ranked_pass_serves_everything_raw_when_it_fits() {
+        let cluster = [2u64, 4];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 8, &cluster, &[]); // no settle needed
+
+        let report = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            100_000,
+            Vec::new(),
+        )
+        .expect("everything fits");
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| matches!(item, WakeItem::Fact { .. }))
+        );
+        assert_eq!(report.items.len(), 8);
+        let first = raw_ids(&report)[0];
+        assert!(cluster.contains(&first), "a cluster fact leads: {first}");
+        let task = report.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 2);
+        assert_eq!(task.dropped_scored, 0);
+        assert!(!report.truncated);
     }
 
     // --- property suite (brief F6.8: tiling math) ------------------------------
@@ -757,7 +1260,7 @@ mod tests {
             let (facts, store) = setup(tmp.path(), n, &locked);
             settle_all(&facts, &store);
 
-            let report = wake(&facts, &store, budget, Vec::new()).expect("settled tree wakes");
+            let report = wake(&facts, &store, None, budget, Vec::new()).expect("settled tree wakes");
 
             // Budget respected — or honestly truncated to pinned-only.
             let only_pinned = report
@@ -803,6 +1306,82 @@ mod tests {
                         }
                         prev_end = Some(hi);
                     }
+                }
+            }
+        });
+    }
+
+    /// The ranked-pass contract, over randomized logs and budgets: budget
+    /// respected (or honestly over with only pinned raws left), locks
+    /// exactly once raw and never under a summary, no summary covers a
+    /// served fact, the score-positive raw count is exactly what the task
+    /// block reports (dropped facts never ride raw), and every summary
+    /// still satisfies the bias rule. Two query regimes alternate by `n`:
+    /// one matching every fact's vocabulary (all-positive) and one the
+    /// store does not carry (none-positive) — the in-between shapes are
+    /// the unit fixtures' job.
+    #[test]
+    fn ranked_properties_hold_over_random_logs_and_budgets() {
+        let config = ProptestConfig::with_cases(24);
+        proptest!(config, |(n in 2u64..24, lock_bits in prop::collection::vec(any::<bool>(), 0..24), budget in 1u64..4000)| {
+            let locked: Vec<u64> = (0..n)
+                .filter(|id| lock_bits.get(*id as usize).copied().unwrap_or(false))
+                .collect();
+            let query = if n % 2 == 0 { "decision worth" } else { "zzz qqq absent" };
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let (facts, store) = setup(tmp.path(), n, &locked);
+            settle_all(&facts, &store);
+
+            let report = wake(&facts, &store, Some(query), budget, Vec::new())
+                .expect("settled tree wakes");
+            let task = report.task.as_ref().expect("task block");
+
+            // Score-positive raws, recomputed from the same scorer the
+            // pass used — the task block must agree with the items.
+            let scored = rank::Query::new(query, &facts);
+            let positive: Vec<u64> = facts
+                .iter()
+                .filter(|fact| scored.score(fact) > 0.0)
+                .map(|fact| fact.id)
+                .collect();
+            let raw = raw_ids(&report);
+            let raw_positive = positive.iter().filter(|id| raw.contains(id)).count() as u64;
+            prop_assert_eq!(raw_positive, task.served_scored);
+            prop_assert_eq!(task.dropped_scored, positive.len() as u64 - task.served_scored);
+            prop_assert_eq!(report.truncated, task.dropped_scored > 0);
+            prop_assert_eq!(task.scorer, rank::SCORER);
+
+            // Budget respected — or honestly over with only pinned raws.
+            let only_pinned = report.items.iter().all(|item| match item {
+                WakeItem::Fact { id, flags, .. } => {
+                    positive.contains(id) || flags.contains(&MemoryFlag::ArchitecturalLock)
+                }
+                WakeItem::Summary { .. } => false,
+            });
+            prop_assert!(report.estimate <= budget || only_pinned,
+                "estimate {} budget {} items {:?}",
+                report.estimate, budget, report.items.len());
+
+            // Locks: exactly once, raw, never covered.
+            for id in &locked {
+                prop_assert_eq!(
+                    raw.iter().filter(|&&r| r == *id).count(),
+                    1,
+                    "lock {} present exactly once",
+                    id
+                );
+            }
+
+            // No summary covers a lock or a served (raw) fact; bias holds.
+            let total = n;
+            for item in &report.items {
+                if let WakeItem::Summary { covers, .. } = item {
+                    let (lo, hi) = *covers;
+                    for id in locked.iter().chain(raw.iter()) {
+                        prop_assert!(!(lo..hi).contains(id), "summary [{lo},{hi}) covers raw {id}");
+                    }
+                    prop_assert!(lo.is_multiple_of(hi - lo));
+                    prop_assert!(hi - lo <= PRESENT_BIAS_ALPHA * (total - hi), "bias [{lo},{hi})");
                 }
             }
         });

@@ -1,5 +1,28 @@
 ## [Unreleased] — v0.3.1 candidates
 
+### Added
+- **`wake --task "<query>"` — ranked recall (C1, PLAN-C2C §2)**: the
+  optional flag switches wake's recall from position to relevance. Every
+  fact is scored by store-local TF-IDF (tokens = lowercase alphanumeric
+  runs ≥ 2 chars; `idf = ln(1 + N/df)` over the store's own facts,
+  scorer declared in-band as `"tfidf-store"` — the ADR-0011 `estimator`
+  precedent, std-only, no regex/embeddings/network). Score-positive
+  facts take raw seats in serve order (score desc, ties to the newer
+  id) while the budget allows; the leftover budget fills with stored
+  summaries over the unserved ranges through the same biased tiling
+  (served facts pinned like locks; `E_NAP_PENDING` gate unchanged).
+  The payload gains an append-only `task` block
+  (`query`/`scorer`/`served_scored`/`dropped_scored`) — without the
+  flag the payload is byte-identical to before (golden fixtures pin
+  both passes; the ranked 439-fact store is fenced too). Retrieval
+  fixture, 40 facts with a 10-fact "daemon socket errors" cluster in
+  the oldest half at budget 1500: ranked serves 10/10 of the cluster
+  raw (estimate 1428, `dropped_scored` 0), the positional wake 3/10
+  (it buys summaries of the old blocks — the pinned lock and two
+  bias-tail facts are all that survive raw). Binary wall time at 20k
+  facts: ranked 912 ms vs positional 208 ms (C1 fence < 1.5 s). The
+  MCP `janitor_wake` tool accepts the same `task` argument.
+
 ### Changed
 - **wake reads each TREE level once per run (C3, PLAN-C2C §2)**:
   `TreeStore::summary` re-read the whole level file on every lookup, so

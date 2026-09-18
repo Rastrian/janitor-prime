@@ -123,15 +123,22 @@ fn settled_store(dir: &Path, n: u64) -> (Vec<FactRecord>, TreeStore) {
 }
 
 /// One `janitor wake` through the real binary (env-isolated like
-/// memory_e2e so the global layer stays the embedded one).
-fn janitor_wake(dir: &Path, budget: u64) -> (Option<i32>, serde_json::Value, std::time::Duration) {
+/// memory_e2e so the global layer stays the embedded one); `task`
+/// switches to the C1 ranked pass.
+fn janitor_wake(
+    dir: &Path,
+    task: Option<&str>,
+    budget: u64,
+) -> (Option<i32>, serde_json::Value, std::time::Duration) {
     let started = Instant::now();
-    let out = Command::new(env!("CARGO_BIN_EXE_janitor"))
-        .current_dir(dir)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_janitor"));
+    cmd.current_dir(dir)
         .env("XDG_CONFIG_HOME", dir.join("xdg-absent"))
-        .args(["wake", "--budget", &budget.to_string()])
-        .output()
-        .expect("binary runs");
+        .args(["wake", "--budget", &budget.to_string()]);
+    if let Some(query) = task {
+        cmd.args(["--task", query]);
+    }
+    let out = cmd.output().expect("binary runs");
     let elapsed = started.elapsed();
     (
         out.status.code(),
@@ -141,10 +148,11 @@ fn janitor_wake(dir: &Path, budget: u64) -> (Option<i32>, serde_json::Value, std
 }
 
 /// The wake core over the generated store, in-process (what C3 owns: no
-/// binary startup, no environment probes ride on this clock).
-fn lib_wake(dir: &Path, n: u64, budget: u64) -> WakeReport {
+/// binary startup, no environment probes ride on this clock). `task`
+/// switches to the C1 ranked pass; `None` is the positional pass.
+fn lib_wake(dir: &Path, n: u64, budget: u64, task: Option<&str>) -> WakeReport {
     let (facts, store) = settled_store(dir, n);
-    wake::wake(&facts, &store, budget, Vec::new()).expect("settled store wakes")
+    wake::wake(&facts, &store, task, budget, Vec::new()).expect("settled store wakes")
 }
 
 /// C3 acceptance (3): wall times on the settled synthetic generator.
@@ -157,7 +165,7 @@ fn settled_wake_wall_times_at_439_5k_20k() {
     for n in [439u64, 5_000, 20_000] {
         let tmp = tempfile::tempdir().expect("tempdir");
         settled_store(tmp.path(), n);
-        let (code, payload, elapsed) = janitor_wake(tmp.path(), 8192);
+        let (code, payload, elapsed) = janitor_wake(tmp.path(), None, 8192);
         assert_eq!(code, Some(0), "wake at {n} facts: {payload}");
         assert_eq!(payload["data"]["awake"], true, "{n} facts");
         let items = payload["data"]["items"].as_array().expect("items");
@@ -190,7 +198,7 @@ fn settled_wake_wall_times_at_439_5k_20k() {
 fn wake_payload_is_byte_identical_to_the_goldens() {
     for budget in GOLDEN_BUDGETS {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let report = lib_wake(tmp.path(), 439, budget);
+        let report = lib_wake(tmp.path(), 439, budget, None);
         let golden = std::fs::read_to_string(format!(
             "{}/tests/fixtures/wake/wake_golden_439_b{budget}.json",
             env!("CARGO_MANIFEST_DIR")
@@ -202,6 +210,62 @@ fn wake_payload_is_byte_identical_to_the_goldens() {
             "budget {budget}: the wake payload must stay byte-identical"
         );
     }
+}
+
+/// C1 hot-path fence: the ranked pass must not re-congest the read path
+/// C3 opened. Scoring is O(total bytes) — tokenize every fact twice (df
+/// pass + score pass) — plus the same batch-loaded tiling the positional
+/// pass runs; at 20k facts the target is < 1.5 s through the binary at
+/// budget 8192, against the positional 20k time the C3 test above prints.
+#[test]
+fn ranked_wake_wall_time_at_20k() {
+    let n = 20_000u64;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    settled_store(tmp.path(), n);
+    let (code, payload, elapsed) = janitor_wake(tmp.path(), Some("daemon socket errors"), 8192);
+    assert_eq!(code, Some(0), "ranked wake at {n} facts: {payload}");
+    assert_eq!(payload["data"]["task"]["scorer"], "tfidf-store");
+    println!(
+        "wake --task 'daemon socket errors' --budget 8192, {n} facts: {:>8} ms \
+         (binary wall time, served_scored {})",
+        elapsed.as_millis(),
+        payload["data"]["task"]["served_scored"]
+    );
+    assert!(
+        elapsed.as_millis() < 1_500,
+        "C1 fence: ranked 20k-fact wake under 1.5 s, measured {} ms",
+        elapsed.as_millis()
+    );
+}
+
+/// C1 determinism fence: the ranked payload over the seeded 439-fact
+/// store is pinned field for field, so any drift in the scorer's
+/// arithmetic (tokenizer, idf, ordering, serve loop) fails loudly.
+#[test]
+fn ranked_wake_payload_is_byte_identical_to_the_golden() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let report = lib_wake(tmp.path(), 439, 8192, Some("daemon socket errors"));
+    let golden = std::fs::read_to_string(format!(
+        "{}/tests/fixtures/wake/wake_task_golden_439_b8192.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("ranked golden fixture");
+    assert_eq!(
+        serde_json::to_string(&report).expect("report json"),
+        golden.trim(),
+        "the ranked wake payload must stay byte-identical"
+    );
+}
+
+/// Capture helper (ignored): prints the ranked golden payload — how the
+/// fixture was produced, and how to regenerate it honestly if the ranked
+/// contract ever deliberately changes.
+#[test]
+#[ignore = "capture helper: prints the golden ranked WakeReport JSON"]
+fn print_ranked_golden_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let report = lib_wake(tmp.path(), 439, 8192, Some("daemon socket errors"));
+    println!("{}", serde_json::to_string(&report).expect("report json"));
 }
 
 /// Audit helper (ignored): writes one settled store per size under
@@ -227,7 +291,7 @@ fn write_stores_for_strace() {
 fn print_golden_payloads() {
     for budget in GOLDEN_BUDGETS {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let report = lib_wake(tmp.path(), 439, budget);
+        let report = lib_wake(tmp.path(), 439, budget, None);
         println!(
             "--- budget {budget} ---\n{}",
             serde_json::to_string(&report).expect("report json")

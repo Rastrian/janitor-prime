@@ -335,12 +335,14 @@ impl Server {
         }
     }
 
-    /// `janitor_wake {budget?}` — the budgeted memory payload, or the
-    /// `E_NAP_PENDING` refusal whose details carry the actionable request.
+    /// `janitor_wake {budget?, task?}` — the budgeted memory payload
+    /// (ranked against `task` when given, C1), or the `E_NAP_PENDING`
+    /// refusal whose details carry the actionable request.
     fn tool_wake(&self, args: &Value) -> Result<Envelope<Value>, String> {
         let budget = opt_u64(args, "budget")?.unwrap_or(DEFAULT_BUDGET);
+        let task = opt_str(args, "task")?.map(str::to_owned);
         let session = Session::new();
-        Ok(match session.wake(budget) {
+        Ok(match session.wake(budget, task.as_deref()) {
             Ok(payload) => ok_envelope(&payload),
             Err(err) => err.into(),
         })
@@ -691,8 +693,9 @@ fn tool_specs() -> Vec<Value> {
             "title": "janitor wake",
             "description": "Recall janitor memory under a token budget: raw facts and \
         summaries, oldest-first, plus standing guidance and last-run state (docs/SCHEMA.md, wake). \
-        On E_NAP_PENDING the result carries the pending compression request — act on it via \
-        janitor_nap, then wake again.",
+        With task: a ranked pass — the best-scoring facts are served raw first (scorer \
+        tfidf-store). On E_NAP_PENDING the result carries the pending compression request — act \
+        on it via janitor_nap, then wake again.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -700,6 +703,11 @@ fn tool_specs() -> Vec<Value> {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Token budget (chars4 estimator); default 8192."
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Query to rank the recall by (store-local TF-IDF, \
+                    scorer tfidf-store); omit for the position-only tiling."
                     }
                 }
             },

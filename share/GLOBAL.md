@@ -8,6 +8,17 @@ what its own commands verify.
 
 - Run `janitor wake` before starting work; work from the state it returns,
   not from assumptions about the repository.
+- Run `janitor wake --task "<what you are working on>"` when the session
+  has a concrete question (an error message, a subsystem, a symbol):
+  the best-matching facts are served raw first, ranked by lexical
+  TF-IDF over the store itself (the payload's `task` block says what
+  was served and dropped). It trades coverage for relevance and says so
+  — `truncated: true` means relevant facts were dropped for budget, and
+  the plain positional recall above is unchanged, so re-run `wake`
+  without `--task` when you need the full chronological picture, not
+  the answer to one question. Matching is word-level only: give it the
+  project's own vocabulary ("daemon socket", not "why does networking
+  stall").
 - Record durable decisions with `janitor note` — one line, at most 280 bytes.
 - Anchor notes to real code with pointers taken from janitor's own `scan`
   output; never invent spans, offsets, or node ids.

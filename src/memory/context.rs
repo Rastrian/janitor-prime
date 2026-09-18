@@ -201,12 +201,14 @@ impl ContextManager {
         }
     }
 
-    /// `janitor wake --budget N`: the budgeted recall plus the global
-    /// layer, STATE.json status, hints, and the environment notes.
-    pub fn wake(&self, budget: u64) -> Result<WakePayload, JanitorError> {
+    /// `janitor wake --budget N [--task QUERY]`: the budgeted recall plus
+    /// the global layer, STATE.json status, hints, and the environment
+    /// notes. `task` switches the recall core to the ranked pass (C1);
+    /// the standing context around it is the same either way.
+    pub fn wake(&self, budget: u64, task: Option<&str>) -> Result<WakePayload, JanitorError> {
         self.ensure_initialized()?;
         let state = self.log().load()?;
-        let report = wake::wake(&state.facts, &self.store(), budget, state.warnings)?;
+        let report = wake::wake(&state.facts, &self.store(), task, budget, state.warnings)?;
         let repo = self.root.parent().unwrap_or_else(|| Path::new("."));
         Ok(WakePayload {
             report,
@@ -423,7 +425,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mem = manager_in(tmp.path());
         for code in [
-            mem.wake(100).expect_err("wake").code(),
+            mem.wake(100, None).expect_err("wake").code(),
             mem.append_note(None, AnchorMeta::default(), "x", false)
                 .expect_err("note")
                 .code(),
@@ -451,7 +453,7 @@ mod tests {
         mem.record_scan(7, 3, 1);
         mem.record_apply(2, 5, true);
 
-        let payload = mem.wake(10_000).expect("wake");
+        let payload = mem.wake(10_000, None).expect("wake");
         assert!(payload.report.awake && !payload.report.truncated);
         assert_eq!(payload.report.items.len(), 1);
         assert_eq!(payload.global.source, "embedded");
