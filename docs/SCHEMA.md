@@ -225,7 +225,7 @@ Success:
     "flags": [], "warnings": [] } }
 ```
 
-### `janitor wake --budget N` — budgeted recall
+### `janitor wake --budget N [--task QUERY]` — budgeted recall
 
 Default budget 8192 tokens; estimator `"chars4"`: each item's cost is
 `ceil(bytes/4)`, and the payload's `estimate` is the sum of served item
@@ -238,12 +238,31 @@ into parents and then whole tiles drop from the oldest end
 (`"truncated": true`); leftover budget splits the largest blocks.
 Locked facts are pinned raw always.
 
-Payload (flattened: the recall core plus the standing context):
+**`--task "<query>"` (v0.3, C1)** switches the recall to a ranked pass:
+every fact is scored by store-local TF-IDF (tokens = lowercase
+alphanumeric runs ≥ 2 chars; `score(q,f) = Σ_{t∈q} idf(t)·tf(t,f)` with
+`idf(t) = ln(1 + N/df(t))` over the store's own facts — lexical, not
+semantic, and declared in-band). The best-scoring facts are served raw
+in serve order (score desc, ties to the newer id) while their cost
+fits; a score-positive fact that does not fit is dropped from raw
+service (a stored summary may still cover it). Locked facts stay pinned
+raw under ranking, honestly over budget if it comes to that. The
+leftover budget fills with stored summaries over the unserved ranges —
+the same biased tiling, with served facts force-split out like locks,
+and the same `E_NAP_PENDING` gate. Item order under `--task`: the raw
+evidence first (serve order), then the compressed backdrop
+oldest-first. Without `--task` the payload is byte-identical to the
+positional pass above (golden fixtures pin it).
+
+Payload (flattened: the recall core plus the standing context; the
+`task` block appears **only** under `--task`):
 
 ```json
 { "schema": "janitor.v1", "ok": true, "data": {
     "awake": true, "budget_tokens": 30, "estimator": "chars4",
     "estimate": 18, "truncated": false,
+    "task": { "query": "daemon socket errors", "scorer": "tfidf-store",
+              "served_scored": 10, "dropped_scored": 0 },
     "items": [
       { "kind": "fact", "id": 0, "text": "…",
         "ptr": { "sha": "…" }, "flags": [] },
@@ -258,8 +277,17 @@ Payload (flattened: the recall core plus the standing context):
       "servers": [
         { "name": "rust-analyzer", "available": true },
         { "name": "pyright", "available": false } ],
-      "git": { "available": true, "dirty": false } } } }
+      "git": { "available": true, "dirty": false } } }
+}
 ```
+
+`task.query` is the query as given; `task.scorer` names the statistic
+(the `"estimator": "chars4"` precedent, ADR-0011 — the scorer's limits
+are auditable in-band); `served_scored`/`dropped_scored` count the
+score-positive facts by raw service (`served + dropped` = the
+score-positive count). Under `--task`, `truncated: true` means
+**score-positive facts were dropped for budget** — the fill's shaping of
+score-zero material is not a truncation the agent needs to act on.
 
 `global.estimate` is informational — the budget governs the memory
 payload, not the standing instructions. `state` is STATE.json's contents
