@@ -264,8 +264,18 @@ fn wake_ranked(
     budget: u64,
     warnings: Vec<LogWarning>,
 ) -> Result<WakeReport, JanitorError> {
-    let scored = rank::Query::new(query, facts);
-    let scores: Vec<f64> = facts.iter().map(|fact| scored.score(fact)).collect();
+    // Score: one tokenization per fact feeds both the document
+    // statistics and the scoring — O(total bytes), the fence the C1
+    // timing test pins.
+    let tokenized: Vec<Vec<String>> = facts
+        .iter()
+        .map(|fact| rank::tokenize(&fact.text))
+        .collect();
+    let scored = rank::Query::over_token_lists(query, &tokenized);
+    let scores: Vec<f64> = tokenized
+        .iter()
+        .map(|tokens| scored.score_tokens(tokens))
+        .collect();
 
     // 1. Everything fits raw ⇒ nothing is compressed, TREE untouched —
     //    the same first rule as the positional pass (an unsettled
@@ -988,6 +998,246 @@ mod tests {
         );
     }
 
+    // --- C1: the ranked pass ---------------------------------------------------
+
+    /// The retrieval fixture at unit scale: `n` facts of realistic length
+    /// where the `cluster` ids (callers put them in the oldest half)
+    /// carry the "daemon socket errors" vocabulary and everything else
+    /// is filler that shares none of it — the query terms are
+    /// discriminative by construction, and the filler keeps one id-word
+    /// per fact so no two texts tokenize identically.
+    fn cluster_setup(
+        tmp: &std::path::Path,
+        n: u64,
+        cluster: &[u64],
+        locked: &[u64],
+    ) -> (Vec<FactRecord>, TreeStore) {
+        let root = tmp.join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let filler = "the overlay txn flush atomic rename fsync budget tiling summary lock span \
+                      anchor drift gate nap wake log tree cache probe token bytes level rank slot \
+                      record keeps the invariant honest and the payload small";
+        let facts = (0..n)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-18T00:00:00Z".to_owned(),
+                ptr: None,
+                text: if cluster.contains(&id) {
+                    format!("fact {id}: daemon socket errors under load with backoff; {filler}")
+                } else {
+                    format!("fact {id}: {filler} — run note {id}")
+                },
+                flags: if locked.contains(&id) {
+                    vec![MemoryFlag::ArchitecturalLock]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect();
+        (facts, TreeStore::new(&root))
+    }
+
+    /// The ids arriving as raw fact items.
+    fn raw_ids(report: &WakeReport) -> Vec<u64> {
+        report
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                WakeItem::Fact { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The retrieval claim (C1 acceptance, unit scale): at equal budget
+    /// the ranked pass serves the cluster raw while the positional pass
+    /// buys summaries of the old blocks — and says so in-band.
+    #[test]
+    fn ranked_pass_serves_the_cluster_that_positional_compresses() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect(); // 0..18: oldest half
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
+        settle_all(&facts, &store);
+
+        let ranked = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("ranked");
+        let positional = wake(&facts, &store, None, 600, Vec::new()).expect("positional");
+
+        let served = cluster
+            .iter()
+            .filter(|id| raw_ids(&ranked).contains(id))
+            .count();
+        let bought = cluster
+            .iter()
+            .filter(|id| raw_ids(&positional).contains(id))
+            .count();
+        assert!(served >= 9, "ranked served {served}/10 of the cluster");
+        assert!(bought <= 3, "positional served {bought}/10 of the cluster");
+
+        // Only cluster facts are score-positive here, so the counts say
+        // exactly what the items say.
+        let task = ranked.task.as_ref().expect("task block");
+        assert_eq!(task.query, "daemon socket errors");
+        assert_eq!(task.scorer, "tfidf-store");
+        assert_eq!(task.served_scored, served as u64);
+        assert_eq!(task.dropped_scored, 10 - served as u64);
+        assert_eq!(ranked.truncated, task.dropped_scored > 0);
+
+        // Append-only: the positional payload carries no task key at all.
+        assert!(positional.task.is_none());
+        let json = serde_json::to_value(&positional).expect("positional json");
+        assert!(json.get("task").is_none(), "the key must not appear");
+    }
+
+    /// Deterministic: identical inputs, byte-identical ranked payloads.
+    #[test]
+    fn ranked_wake_is_deterministic() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[5]);
+        settle_all(&facts, &store);
+        let a = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("a");
+        let b = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect("b");
+        assert_eq!(a, b);
+        assert_eq!(
+            serde_json::to_string(&a).expect("json a"),
+            serde_json::to_string(&b).expect("json b")
+        );
+    }
+
+    /// Locks survive ranking: always raw, exactly once, never under a
+    /// summary, even at a starved budget that fits nothing else — and a
+    /// starved ranked pass reports the score-positive drops.
+    #[test]
+    fn ranked_pass_pins_locks_raw_exactly_once() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let locked = [3u64, 37]; // one old filler, one recent filler
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &locked);
+        settle_all(&facts, &store);
+
+        let starved = wake(&facts, &store, Some("daemon socket errors"), 1, Vec::new())
+            .expect("starved ranked wake");
+        let raw = raw_ids(&starved);
+        for id in locked {
+            assert_eq!(
+                raw.iter().filter(|&&served| served == id).count(),
+                1,
+                "lock {id} exactly once, raw"
+            );
+            for item in &starved.items {
+                if let WakeItem::Summary { covers, .. } = item {
+                    assert!(
+                        !(covers.0..covers.1).contains(&id),
+                        "summary {covers:?} covers lock {id}"
+                    );
+                }
+            }
+        }
+        let task = starved.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 0, "nothing fits budget 1");
+        assert_eq!(task.dropped_scored, 10);
+        assert!(starved.truncated);
+    }
+
+    /// A score-positive fact the budget dropped from raw service never
+    /// rides raw through the layout's tail or a split — it was counted
+    /// dropped; a stored summary may cover it, or budget took it too.
+    #[test]
+    fn ranked_pass_never_serves_dropped_scored_facts_raw() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
+        settle_all(&facts, &store);
+
+        // ~3 cluster facts fit: the rest must be absent from the raw set.
+        let report = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            200,
+            Vec::new(),
+        )
+        .expect("ranked");
+        let task = report.task.as_ref().expect("task block");
+        let raw = raw_ids(&report);
+        let served_cluster = cluster.iter().filter(|id| raw.contains(id)).count() as u64;
+        assert_eq!(served_cluster, task.served_scored, "counts match items");
+        assert!(task.dropped_scored >= 1);
+        assert!(report.estimate <= 200, "estimate {}", report.estimate);
+    }
+
+    /// The completeness gate is unchanged under ranking: compression
+    /// needed, tiling needs an unwritten summary ⇒ the typed refusal.
+    #[test]
+    fn ranked_pass_keeps_the_completeness_gate() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]); // nothing settled
+        let err = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            600,
+            Vec::new(),
+        )
+        .expect_err("gate fires under --task");
+        assert_eq!(err.code(), "E_NAP_PENDING");
+    }
+
+    /// Everything fits ⇒ everything raw, in serve order (the cluster
+    /// leads), no summaries, no drops — TREE is never consulted, so an
+    /// unsettled store is fine.
+    #[test]
+    fn ranked_pass_serves_everything_raw_when_it_fits() {
+        let cluster = [2u64, 4];
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 8, &cluster, &[]); // no settle needed
+
+        let report = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            100_000,
+            Vec::new(),
+        )
+        .expect("everything fits");
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| matches!(item, WakeItem::Fact { .. }))
+        );
+        assert_eq!(report.items.len(), 8);
+        let first = raw_ids(&report)[0];
+        assert!(cluster.contains(&first), "a cluster fact leads: {first}");
+        let task = report.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 2);
+        assert_eq!(task.dropped_scored, 0);
+        assert!(!report.truncated);
+    }
+
     // --- property suite (brief F6.8: tiling math) ------------------------------
 
     use proptest::prelude::*;
@@ -1056,6 +1306,82 @@ mod tests {
                         }
                         prev_end = Some(hi);
                     }
+                }
+            }
+        });
+    }
+
+    /// The ranked-pass contract, over randomized logs and budgets: budget
+    /// respected (or honestly over with only pinned raws left), locks
+    /// exactly once raw and never under a summary, no summary covers a
+    /// served fact, the score-positive raw count is exactly what the task
+    /// block reports (dropped facts never ride raw), and every summary
+    /// still satisfies the bias rule. Two query regimes alternate by `n`:
+    /// one matching every fact's vocabulary (all-positive) and one the
+    /// store does not carry (none-positive) — the in-between shapes are
+    /// the unit fixtures' job.
+    #[test]
+    fn ranked_properties_hold_over_random_logs_and_budgets() {
+        let config = ProptestConfig::with_cases(24);
+        proptest!(config, |(n in 2u64..24, lock_bits in prop::collection::vec(any::<bool>(), 0..24), budget in 1u64..4000)| {
+            let locked: Vec<u64> = (0..n)
+                .filter(|id| lock_bits.get(*id as usize).copied().unwrap_or(false))
+                .collect();
+            let query = if n % 2 == 0 { "decision worth" } else { "zzz qqq absent" };
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let (facts, store) = setup(tmp.path(), n, &locked);
+            settle_all(&facts, &store);
+
+            let report = wake(&facts, &store, Some(query), budget, Vec::new())
+                .expect("settled tree wakes");
+            let task = report.task.as_ref().expect("task block");
+
+            // Score-positive raws, recomputed from the same scorer the
+            // pass used — the task block must agree with the items.
+            let scored = rank::Query::new(query, &facts);
+            let positive: Vec<u64> = facts
+                .iter()
+                .filter(|fact| scored.score(fact) > 0.0)
+                .map(|fact| fact.id)
+                .collect();
+            let raw = raw_ids(&report);
+            let raw_positive = positive.iter().filter(|id| raw.contains(id)).count() as u64;
+            prop_assert_eq!(raw_positive, task.served_scored);
+            prop_assert_eq!(task.dropped_scored, positive.len() as u64 - task.served_scored);
+            prop_assert_eq!(report.truncated, task.dropped_scored > 0);
+            prop_assert_eq!(task.scorer, rank::SCORER);
+
+            // Budget respected — or honestly over with only pinned raws.
+            let only_pinned = report.items.iter().all(|item| match item {
+                WakeItem::Fact { id, flags, .. } => {
+                    positive.contains(id) || flags.contains(&MemoryFlag::ArchitecturalLock)
+                }
+                WakeItem::Summary { .. } => false,
+            });
+            prop_assert!(report.estimate <= budget || only_pinned,
+                "estimate {} budget {} items {:?}",
+                report.estimate, budget, report.items.len());
+
+            // Locks: exactly once, raw, never covered.
+            for id in &locked {
+                prop_assert_eq!(
+                    raw.iter().filter(|&&r| r == *id).count(),
+                    1,
+                    "lock {} present exactly once",
+                    id
+                );
+            }
+
+            // No summary covers a lock or a served (raw) fact; bias holds.
+            let total = n;
+            for item in &report.items {
+                if let WakeItem::Summary { covers, .. } = item {
+                    let (lo, hi) = *covers;
+                    for id in locked.iter().chain(raw.iter()) {
+                        prop_assert!(!(lo..hi).contains(id), "summary [{lo},{hi}) covers raw {id}");
+                    }
+                    prop_assert!(lo.is_multiple_of(hi - lo));
+                    prop_assert!(hi - lo <= PRESENT_BIAS_ALPHA * (total - hi), "bias [{lo},{hi})");
                 }
             }
         });

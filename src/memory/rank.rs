@@ -63,18 +63,27 @@ impl TermStats {
     /// Count document frequencies over `facts` (a fact's token set, not
     /// its token multiset).
     pub fn new(facts: &[FactRecord]) -> Self {
+        Self::from_token_lists(&facts.iter().map(|f| tokenize(&f.text)).collect::<Vec<_>>())
+    }
+
+    /// The same count over already-tokenized texts — the ranked pass
+    /// tokenizes each fact once and feeds both this and scoring from the
+    /// same lists (one pass over the bytes, not two).
+    pub fn from_token_lists(lists: &[Vec<String>]) -> Self {
         let mut df = HashMap::new();
-        for fact in facts {
-            let mut tokens = tokenize(&fact.text);
-            tokens.sort();
-            tokens.dedup();
-            for token in tokens {
-                *df.entry(token).or_insert(0) += 1;
+        for tokens in lists {
+            // A borrowed, sorted copy: distinct tokens without owning a
+            // second list of Strings.
+            let mut distinct: Vec<&str> = tokens.iter().map(String::as_str).collect();
+            distinct.sort_unstable();
+            distinct.dedup();
+            for token in distinct {
+                *df.entry(token.to_owned()).or_insert(0) += 1;
             }
         }
         Self {
             df,
-            n: facts.len() as u64,
+            n: lists.len() as u64,
         }
     }
 
@@ -94,12 +103,22 @@ pub struct Query {
 }
 
 impl Query {
-    /// Parse `query` and drop every term the store does not carry
-    /// (`df = 0` would make `idf` infinite against an all-zero `tf` —
-    /// the term contributes nothing, so it is skipped, keeping the
-    /// arithmetic finite).
+    /// Parse `query` against `facts` — the one-call form callers outside
+    /// the ranked pass use.
     pub fn new(query: &str, facts: &[FactRecord]) -> Self {
-        let stats = TermStats::new(facts);
+        Self::over_token_lists(
+            query,
+            &facts.iter().map(|f| tokenize(&f.text)).collect::<Vec<_>>(),
+        )
+    }
+
+    /// The same parse over pre-tokenized texts (see
+    /// [`TermStats::from_token_lists`]). Drops every term the store does
+    /// not carry (`df = 0` would make `idf` infinite against an all-zero
+    /// `tf` — the term contributes nothing, so it is skipped, keeping
+    /// the arithmetic finite).
+    pub fn over_token_lists(query: &str, lists: &[Vec<String>]) -> Self {
+        let stats = TermStats::from_token_lists(lists);
         let mut terms = tokenize(query);
         terms.sort();
         terms.dedup();
@@ -111,10 +130,15 @@ impl Query {
     /// summed in token order (fixed), so two runs over the same store
     /// produce bit-identical scores.
     pub fn score(&self, fact: &FactRecord) -> f64 {
+        self.score_tokens(&tokenize(&fact.text))
+    }
+
+    /// [`Query::score`] over the fact's tokens (already in hand when the
+    /// caller tokenized the store once).
+    pub fn score_tokens(&self, tokens: &[String]) -> f64 {
         if self.terms.is_empty() {
             return 0.0;
         }
-        let tokens = tokenize(&fact.text);
         self.terms
             .iter()
             .map(|term| {
