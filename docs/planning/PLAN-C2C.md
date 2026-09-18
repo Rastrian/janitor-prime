@@ -201,3 +201,85 @@ mechanism, with testable acceptance per item.
   imports with `--confidence low` while seeding. C4 without B10 is still
   useful (any session can tag going forward); B10 without C4 cannot
   express the tag. No part of B9 is touched by any C-item.
+
+## 3. Ordering (value/effort), anti-backlog, and B9/B10
+
+| # | Item | Effort | Why this position |
+|---|------|--------|-------------------|
+| 1 | **C3 wake I/O hygiene** | S | Pure measured win (2.89 s → target < 0.7 s at 20k), zero contract growth, and it must land *before* C1 — the ranked pass adds scoring work on exactly the read path C3 decongests |
+| 2 | **C1 `wake --task`** | M | The headline: recall that answers the session's question instead of the calendar. Opt-in flag, byte-identical default path |
+| 3 | **C4 confidence flag** | S | Rides C1's ordering code; small standalone value (visible in `note` reports immediately), full value once ranked wake exists |
+| 4 | **C2 novelty + nap floor** | M | Fixes a live defect (placeholder summaries passed the gate on the real store) but needs the most judgment in calibration; the warning tier ships value even if the floor never fires |
+
+No item is L; every item carries the testable acceptance criterion above
+(B11 discipline — KP only where L, with C1's kill-point recorded in case
+it slips).
+
+### Anti-backlog — deliberately NOT next (new entries)
+
+- **Anything latent in the binary** — KV-cache, embeddings, learned
+  encoders. The paper's *mechanism* is agent-layer material only; janitor
+  imports its principles, never its tensors. This line is the C2C plan's
+  constitution; every C-item is bytes-in/bytes-out deterministic.
+- **Materialized disk retrieval index** (persisted term stats at `note`
+  time) — declined *with numbers* in C3: post-hygiene wake is one O(n)
+  parse + ≤ log₂ n reads; an index adds append-invalidations for < 100 ms.
+  ADR-0018's disk-parse-cache rejection is the precedent.
+- **Full BM25 / corpus-level learned weights / relevance feedback across
+  sessions** — persistence of feedback is nondeterminism across sessions
+  and a second truth to invalidate. `tfidf-store` is recomputed per wake
+  from LOG alone: reproducible, forgettable, honest.
+- **Regex in the scorer or novelty tokenizer** — B1's exact/glob posture
+  (PLAN-v0.3 §4) applies here too; no regex crate, ever.
+- **Auto-confidence / auto-seeding** — the binary detecting "this looks
+  migrated" would be the binary inventing facts. Agent-asserted only.
+- **Semantic similarity via the MCP layer as a workaround** — tempting
+  (the agent could embed), but it would make wake's output depend on
+  which consumer called it, breaking the one-payload reproducibility
+  that makes janitor debuggable.
+
+### B9/B10 (PLAN-v0.3, both unexecuted at v0.3.1 — verified: no seed
+recipe in `share/GLOBAL.md`, no tier work in CHANGELOG)
+
+- **B9** (experimental-tier promotion): zero overlap with any C-item;
+  untouched, still waits per PLAN-v0.3 §3.
+- **B10** (session-zero seeding): not absorbed — C4 *extends* it with
+  the confidence-tagging step (see C4's collision note). If B10 lands
+  first, its recipe should leave room for the tag; if C4 lands first,
+  B10 picks the step up. Either order converges; neither blocks.
+
+## 4. Risks and honest tradeoffs
+
+- **Lexical ranking is worse than semantic, and we ship it anyway —
+  why.** TF-IDF sees "socket" in "daemon socket", not that "wouldblock"
+  relates to "send timeout". The real store mixes Portuguese and
+  English; a PT query will not rank EN facts. The case for it anyway:
+  (a) the competitor is not semantic search, it is *position-only*
+  recall — deterministic lexical relevance strictly dominates ignoring
+  content; (b) opt-in: no `--task`, no change (byte-identical golden);
+  (c) in-band declaration (`scorer`) makes the limitation auditable;
+  (d) C1's kill-point retires it if the real-store probe fails.
+- **Windowed novelty is a proxy.** It misses duplicates older than 64
+  facts and under-scores facts whose boilerplate (`[optmem #N]`, dates)
+  inflates overlap. Mitigations: deterministic bracket-prefix strip; the
+  floor fires only on near-zero distinct words (the placeholder
+  signature), everything else is a warning. Novelty is guidance, not
+  truth — same posture as GLOBAL.md's heuristics.
+- **A density floor can brick an agent loop** if miscalibrated: wake
+  gates on completeness, nap refuses the submission, repeat forever.
+  Acceptance (2) pins the exit: any ≥ 10-distinct-word summary passes,
+  so the loop converges by construction; the refusal text carries the
+  observed counts.
+- **The ranked pass trades coverage for precision — deliberately.** The
+  no-task path guarantees complete chronological coverage under the
+  bias tiling; `--task` spends the budget on relevance and *says so*
+  (`dropped_scored`, `truncated`). An agent needing full history runs
+  the default path. The paper's wrong-layer result is the argument that
+  silent mediocrity is the worse failure mode.
+- **Confidence is agent-asserted and can be wrong.** A mistagged fact is
+  down-ranked, not deleted; append-only means the correction is a new
+  note. The binary treats the tag as weight, never as truth.
+- **Expectation management.** +3.1–5.4% and 2.5× are the paper's
+  numbers on its benchmarks with KV-cache. Janitor's analogues are the
+  acceptance criteria above — retrieval-fixture counts and wall-clock
+  targets — and those, not the paper's, are the claims v0.4 would make.
