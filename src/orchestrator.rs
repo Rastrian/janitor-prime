@@ -38,12 +38,14 @@ pub enum NoteTarget {
     Commit(String),
 }
 
-/// `janitor note` parameters (F6.7's CLI shape).
+/// `janitor note` parameters (F6.7's CLI shape; C4 adds `confidence`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NoteParams {
     pub target: Option<NoteTarget>,
     pub text: String,
     pub lock: bool,
+    /// Agent-asserted provenance (C4): `low` down-ranks the fact at wake.
+    pub confidence: Option<crate::memory::log::Confidence>,
 }
 
 impl Session {
@@ -224,7 +226,8 @@ impl Session {
                 }
             },
         };
-        self.mem.append_note(ptr, meta, &params.text, params.lock)
+        self.mem
+            .append_note(ptr, meta, &params.text, params.lock, params.confidence)
     }
 
     /// `janitor nap` (no args).

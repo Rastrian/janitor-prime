@@ -1473,9 +1473,11 @@ mod tests {
                 ts: "2026-09-14T00:00:00Z".to_owned(),
                 ptr: None,
                 text: format!("fact {id}: a real decision worth {id} tokens of context"),
-                flags: (id == 10)
-                    .then(|| vec![MemoryFlag::ArchitecturalLock])
-                    .unwrap_or_default(),
+                flags: if id == 10 {
+                    vec![MemoryFlag::ArchitecturalLock]
+                } else {
+                    Vec::new()
+                },
                 confidence: (id == 10).then_some(Confidence::Low),
             })
             .collect();

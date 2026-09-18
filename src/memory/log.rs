@@ -683,8 +683,10 @@ mod tests {
         assert_eq!(parsed.confidence, Some(Confidence::Low));
 
         // Old code (a reader struct without the field) over the tagged
-        // log: still an ordinary fact — the synthetic v0.3.1 reader.
+        // log: still an ordinary fact — the synthetic v0.3.1 reader
+        // (unread fields are the point: the old shape simply had them).
         #[derive(serde::Deserialize)]
+        #[expect(dead_code, reason = "the old reader parsed more than it read")]
         struct V031Record {
             v: u32,
             id: u64,

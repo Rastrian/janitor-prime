@@ -375,6 +375,7 @@ fn run_note(args: cli::NoteArgs, pretty: bool) -> ExitCode {
         target,
         text,
         lock: args.lock,
+        confidence: args.confidence.map(cli::ConfidenceArg::into),
     };
     let session = Session::new();
     match session.note(&params) {

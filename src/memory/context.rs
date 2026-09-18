@@ -110,6 +110,10 @@ pub struct NoteReport {
     pub reanchored: bool,
     pub drift: u64,
     pub flags: Vec<MemoryFlag>,
+    /// The agent-asserted confidence tag (C4) — echoed exactly as
+    /// asserted; an append-only key, absent on untagged facts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<log::Confidence>,
     /// Log-load warnings (a torn tail may have been quarantined first).
     pub warnings: Vec<LogWarning>,
 }
@@ -223,12 +227,15 @@ impl ContextManager {
     /// torn tail), append at the next position, fsync. Pointer *resolution*
     /// (against the live tree / git) happens before this, in the session —
     /// this is the storage half; `meta` echoes how the anchor went.
+    /// `confidence` (C4) is the agent's assertion, stored verbatim — the
+    /// binary never invents or infers a tag.
     pub fn append_note(
         &self,
         ptr: Option<SyntaxPointer>,
         meta: AnchorMeta,
         text: &str,
         lock: bool,
+        confidence: Option<log::Confidence>,
     ) -> Result<NoteReport, JanitorError> {
         log::validate_note_text(text)?;
         self.ensure_initialized()?;
@@ -245,7 +252,7 @@ impl ContextManager {
             ptr: ptr.clone(),
             text: text.to_owned(),
             flags: flags.clone(),
-            confidence: None,
+            confidence,
         };
         self.log().append(&record)?;
         Ok(NoteReport {
@@ -256,6 +263,7 @@ impl ContextManager {
             reanchored: meta.reanchored,
             drift: meta.drift,
             flags,
+            confidence,
             warnings: state.warnings,
         })
     }
@@ -413,7 +421,7 @@ mod tests {
         assert_eq!(err.code(), "E_ALREADY_INITIALIZED");
 
         // A note survives... and --force erases everything.
-        mem.append_note(None, AnchorMeta::default(), "one fact", false)
+        mem.append_note(None, AnchorMeta::default(), "one fact", false, None)
             .expect("note");
         mem.init(true).expect("force");
         let plan = mem.nap_next().expect("empty log after force");
@@ -427,7 +435,7 @@ mod tests {
         let mem = manager_in(tmp.path());
         for code in [
             mem.wake(100, None).expect_err("wake").code(),
-            mem.append_note(None, AnchorMeta::default(), "x", false)
+            mem.append_note(None, AnchorMeta::default(), "x", false, None)
                 .expect_err("note")
                 .code(),
             mem.nap_next().expect_err("nap").code(),
@@ -449,6 +457,7 @@ mod tests {
             AnchorMeta::default(),
             "the overlay invariants hold",
             false,
+            None,
         )
         .expect("note");
         mem.record_scan(7, 3, 1);
@@ -487,18 +496,20 @@ mod tests {
         assert_eq!(json["environment"]["janitor"], env!("CARGO_PKG_VERSION"));
     }
 
-    /// The note report: position-derived ids, lock flagging, and the
-    /// stored pointer echo.
+    /// The note report: position-derived ids, lock flagging, the stored
+    /// pointer echo, and the C4 confidence echo — present only when
+    /// asserted.
     #[test]
-    fn append_note_assigns_positions_and_flags() {
+    fn append_note_assigns_positions_flags_and_confidence() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mem = manager_in(tmp.path());
         mem.init(false).expect("init");
 
         let first = mem
-            .append_note(None, AnchorMeta::default(), "first fact", false)
+            .append_note(None, AnchorMeta::default(), "first fact", false, None)
             .expect("note");
         assert_eq!(first.id, 0);
+        assert_eq!(first.confidence, None);
         let second = mem
             .append_note(
                 Some(SyntaxPointer::Commit {
@@ -507,15 +518,39 @@ mod tests {
                 AnchorMeta::default(),
                 "second fact",
                 true,
+                None,
             )
             .expect("note");
         assert_eq!(second.id, 1);
         assert!(second.flags == vec![MemoryFlag::ArchitecturalLock]);
         assert!(matches!(second.ptr, Some(SyntaxPointer::Commit { .. })));
 
+        // The C4 tag: echoed in the report, persisted in the log.
+        let third = mem
+            .append_note(
+                None,
+                AnchorMeta::default(),
+                "third fact, imported unverified",
+                false,
+                Some(log::Confidence::Low),
+            )
+            .expect("note");
+        assert_eq!(third.id, 2);
+        assert_eq!(third.confidence, Some(log::Confidence::Low));
+        let json = serde_json::to_value(&third).expect("json");
+        assert_eq!(json["confidence"], "low");
+        let untagged = serde_json::to_value(&first).expect("json");
+        assert!(
+            untagged.get("confidence").is_none(),
+            "append-only: untagged reports carry no key"
+        );
+        let disk = fs::read_to_string(tmp.path().join(crate::memory::LOCAL_DIR).join("LOG.txt"))
+            .expect("log");
+        assert!(disk.contains("\"confidence\":\"low\""));
+
         // Discipline holds through the manager too.
         let err = mem
-            .append_note(None, AnchorMeta::default(), "no\nlines", false)
+            .append_note(None, AnchorMeta::default(), "no\nlines", false, None)
             .expect_err("multi-line");
         assert_eq!(err.code(), "E_NOTE_INVALID");
     }
