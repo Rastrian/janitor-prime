@@ -302,7 +302,8 @@ fn fingerprint_pass_allocates_nothing_per_node() {
         assert!(
             events <= FINGERPRINT_BUDGET,
             "fingerprint build over {table_participating} participating nodes allocated \
-             {events} times (measured 12 — one-time reserves only; budget \
+             {events} times (measured 12 locally, up to 108 on loaded CI runners — \
+             other-test-binary page pressure moves the one-time reserves; budget \
              {FINGERPRINT_BUDGET}, see the test docs)",
             table_participating = table.participating()
         );
