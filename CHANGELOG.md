@@ -1,6 +1,49 @@
 ## [Unreleased]
 
 ### Added
+- **B9 lane: measurable promotion criteria + the ocaml gate hole
+  closed (PLAN-v0.3 §2 B9)**. Three parts:
+  - **Lexical honesty probe in the apply gate** — the engine's one
+    documented apply-gate false negative is closed: tree-sitter-ocaml's
+    scanner recovers an unclosed `(*` comment silently (the whole file
+    tail becomes one `comment` node, zero ERROR/MISSING — measured
+    here, both ocaml LangIds), so such a diff used to flush. After the
+    clean whole-file re-parse, the gate descends the rightmost spine of
+    nodes ending exactly at EOF and refuses — new typed
+    `E_PARSE_UNCLOSED_COMMENT` with `path`/`lang`/`kind`/byte span in
+    `details` — iff the tail is a comment-class node whose text opens
+    the language's block-comment delimiter and never balances
+    (nesting-aware per the language's own law: ocaml/rust nest, the C
+    family is first-close; carried by the new `LangSpec::block_comment`
+    table — rust's unclosed `/*` stays on the MISSING path, measured).
+    Lexing of one case, never semantics (ADR-0017 untouched). Residual
+    known + documented: an unclosed string containing `*)` inside the
+    unclosed comment (`(* "*)` to EOF) still passes — fixing that means
+    re-implementing the grammar's string-in-comment scanner. Pinned
+    three ways (probe unit test, gate test, ocaml e2e leg — all
+    verified to fail with the probe neutered).
+  - **`tiers` in `--version` (append-only)** — the envelope gains
+    `data.tiers.stable`/`data.tiers.experimental` from build.rs's
+    grammar table; the flat `grammars` list, its order and the release
+    fence (`grammars | length == 8`) are untouched, `experimental` is
+    **absent** when the build carries no experimental grammar. CI's
+    experimental leg and the release smoke gain additive tier
+    assertions. A partition test fails if any grammar is tiered wrong
+    in any feature combo (verified by sabotage).
+  - **`docs/PROMOTION.md`** — the experimental→stable ladder as a
+    runnable checklist (C1–C6): curated trivia corpus ≥ 5 measured
+    fixtures (stable precedent: python/go/typescript each shipped 5;
+    today's tier sits at ruby 3 / ocaml 4 / elixir 3), determinism leg
+    (1-vs-8 threads byte-identical), the three apply-gate honesty
+    probes (unclosed comment generalized to the language's delimiters,
+    missing-token, atomic rename), norm tables + documented caveats
+    (the elixir no-def-kind precedent), a dedicated CI leg on both
+    toolchains, and dogfood sign-off recorded as re-checkable
+    `note --ptr/--commit` evidence. No subjective criteria; the
+    mechanics of flipping the switch (lang-all, build.rs tier column,
+    CI merge, the deliberate release-fence bump) in one commit.
+
+### Changed
 - **Session-zero bootstrap ritual in GLOBAL.md (B10, PLAN-v0.3 §2)**:
   a new "Session zero (empty store)" section — the recipe a first-session
   agent follows when `wake` returns 0–2 facts against a repo with real
