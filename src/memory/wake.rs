@@ -64,6 +64,16 @@
 //!    `truncated: true` now means "score-positive facts were dropped
 //!    for budget". Without `--task` the payload is byte-identical to
 //!    the positional pass (golden regression).
+//! 5. **ceiling (C1-R)** — the ranked pass runs only **below**
+//!    [`TASK_BUDGET_CEILING`]. The real-store KP probe (2026-09-19,
+//!    448 facts, 10 hand-labeled queries) measured the ranked pass
+//!    winning 7–8/10 at budget ≤ 300 and 0/10 at budget ≥ 400: at high
+//!    budget the positional layout already covers ~100% of the facts
+//!    through summaries — coverage is not ranking, and ordering has
+//!    nothing left to buy. At or above the ceiling the wake serves the
+//!    positional payload and says so in the `task` block
+//!    (`"degraded": "budget_at_or_above_ceiling"`, nothing scored)
+//!    instead of pretending to rank.
 
 use serde::Serialize;
 
@@ -81,6 +91,22 @@ pub const DEFAULT_BUDGET: u64 = 8192;
 /// Present-bias constant: a block stays whole only if
 /// `size ≤ PRESENT_BIAS_ALPHA × age`, where age is the count of newer facts.
 pub const PRESENT_BIAS_ALPHA: u64 = 8;
+
+/// The task-budget ceiling (C1-R): `--task` runs the ranked pass only
+/// **below** this budget; at or above it the wake degrades honestly to
+/// the positional pass (see [`wake_degraded`]). The KP probe on the real
+/// 448-fact store (2026-09-19, 10 hand-labeled queries, ranked vs
+/// positional at equal budget) measured the ranked pass winning 7–8/10
+/// at budget ≤ 300 and 0/10 at budget ≥ 400 — above the crossover the
+/// positional layout already covers ~100% of the facts via summaries, so
+/// relevance ordering has nothing left to buy. The crossover sits
+/// between 300 and 400; the owner set the ceiling at 350.
+pub const TASK_BUDGET_CEILING: u64 = 350;
+
+/// The `task.degraded` reason when a `--task` wake served positionally
+/// because the budget reached [`TASK_BUDGET_CEILING`] (append-only key:
+/// a ranked wake carries no `degraded` key at all).
+pub const TASK_DEGRADED_AT_CEILING: &str = "budget_at_or_above_ceiling";
 
 /// The estimator declared in every wake payload (ADR-0011).
 pub const ESTIMATOR: &str = "chars4";
@@ -153,6 +179,13 @@ pub struct TaskReport {
     /// Score-positive facts not served raw (budget); a summary may still
     /// cover them — compressed beats absent.
     pub dropped_scored: u64,
+    /// Why this `--task` wake did not run the ranked pass (C1-R,
+    /// append-only): [`TASK_DEGRADED_AT_CEILING`] when the budget reached
+    /// [`TASK_BUDGET_CEILING`] — the payload is the positional pass's,
+    /// nothing was scored, and the block says so instead of pretending
+    /// to rank. A ranked wake carries no `degraded` key at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<&'static str>,
 }
 
 /// One tile of the layout during construction.
@@ -182,8 +215,10 @@ impl Tile {
 
 /// Run `wake`: the budgeted tiling recall over one log + tree pair. The
 /// warnings collected at log load ride along unchanged. `task`, when
-/// given, switches recall to the ranked pass (see the module doc);
-/// `None` is the positional pass, byte-identical to pre-C1 payloads.
+/// given, switches recall to the ranked pass below [`TASK_BUDGET_CEILING`]
+/// and to the honest positional degradation at or above it (see the
+/// module doc); `None` is the positional pass, byte-identical to pre-C1
+/// payloads.
 ///
 /// The whole run reads each TREE level file exactly once (the C3 batch
 /// load): `store.load_levels` pays the I/O up front and every
@@ -203,6 +238,11 @@ pub fn wake(
         .into());
     }
     match task {
+        // At or above the ceiling ranking buys nothing (the KP probe's
+        // 0/10 at b ≥ 400): serve positional, report the degradation.
+        Some(query) if budget >= TASK_BUDGET_CEILING => {
+            wake_degraded(facts, store, query, budget, warnings)
+        }
         Some(query) => wake_ranked(facts, store, query, budget, warnings),
         None => wake_positional(facts, store, budget, warnings),
     }
@@ -266,8 +306,36 @@ fn wake_positional(
     })
 }
 
+/// The honest degradation at or above [`TASK_BUDGET_CEILING`] (C1-R):
+/// the ranked pass does not run — [`wake_positional`] serves the payload
+/// (items, estimate, `truncated` all positional), and the `task` block
+/// reports the state in-band instead of pretending to rank:
+/// `"degraded": "budget_at_or_above_ceiling"` ([`TASK_DEGRADED_AT_CEILING`]),
+/// `served_scored`/`dropped_scored` 0 (nothing was scored), `query` and
+/// `scorer` still declared — the `estimator` precedent: the limitation
+/// is auditable in the payload, not discovered by surprise.
+fn wake_degraded(
+    facts: &[FactRecord],
+    store: &TreeStore,
+    query: &str,
+    budget: u64,
+    warnings: Vec<LogWarning>,
+) -> Result<WakeReport, JanitorError> {
+    let mut report = wake_positional(facts, store, budget, warnings)?;
+    report.task = Some(TaskReport {
+        query: query.to_owned(),
+        scorer: rank::SCORER,
+        served_scored: 0,
+        dropped_scored: 0,
+        degraded: Some(TASK_DEGRADED_AT_CEILING),
+    });
+    Ok(report)
+}
+
 /// The ranked pass (`--task`): score → serve → fill → report ([`rank`]
-/// owns the arithmetic, the module doc the contract).
+/// owns the arithmetic, the module doc the contract). Runs only below
+/// [`TASK_BUDGET_CEILING`] — [`wake`] routes at-or-above budgets to
+/// [`wake_degraded`].
 fn wake_ranked(
     facts: &[FactRecord],
     store: &TreeStore,
@@ -436,6 +504,7 @@ fn task_report(query: &str, served_scored: u64, dropped_scored: u64) -> TaskRepo
         scorer: rank::SCORER,
         served_scored,
         dropped_scored,
+        degraded: None,
     }
 }
 
@@ -1050,12 +1119,15 @@ mod tests {
 
     // --- C1: the ranked pass ---------------------------------------------------
 
-    /// The retrieval fixture at unit scale: `n` facts of realistic length
-    /// where the `cluster` ids (callers put them in the oldest half)
-    /// carry the "daemon socket errors" vocabulary and everything else
-    /// is filler that shares none of it — the query terms are
-    /// discriminative by construction, and the filler keeps one id-word
-    /// per fact so no two texts tokenize identically.
+    /// The retrieval fixture at unit scale, C1-R-sized: the texts are
+    /// calibrated for [`TASK_BUDGET_CEILING`] — the ten cluster facts fit
+    /// raw inside budget 300 (below the ceiling, where the ranked pass
+    /// runs) while the 40-fact raw total stays well above it, so the
+    /// positional pass must compress. The `cluster` ids (callers put
+    /// them in the oldest half) carry the "daemon socket errors"
+    /// vocabulary and everything else is filler sharing none of it —
+    /// the query terms are discriminative by construction, and the
+    /// zero-padded id words keep no two texts tokenizing identically.
     fn cluster_setup(
         tmp: &std::path::Path,
         n: u64,
@@ -1064,9 +1136,8 @@ mod tests {
     ) -> (Vec<FactRecord>, TreeStore) {
         let root = tmp.join(crate::memory::LOCAL_DIR);
         std::fs::create_dir_all(&root).expect("root");
-        let filler = "the overlay txn flush atomic rename fsync budget tiling summary lock span \
-                      anchor drift gate nap wake log tree cache probe token bytes level rank slot \
-                      record keeps the invariant honest and the payload small";
+        let filler = "overlay txn flush atomic rename fsync budget tiling summary lock gate \
+                      nap wake log tree cache rank token bytes";
         let facts = (0..n)
             .map(|id| FactRecord {
                 v: 1,
@@ -1074,9 +1145,9 @@ mod tests {
                 ts: "2026-09-18T00:00:00Z".to_owned(),
                 ptr: None,
                 text: if cluster.contains(&id) {
-                    format!("fact {id}: daemon socket errors under load with backoff; {filler}")
+                    format!("fact {id:02}: daemon socket errors under load, backoff retry {id:02}")
                 } else {
-                    format!("fact {id}: {filler} — run note {id}")
+                    format!("fact {id:02}: {filler} — note {id:02}")
                 },
                 flags: if locked.contains(&id) {
                     vec![MemoryFlag::ArchitecturalLock]
@@ -1103,23 +1174,27 @@ mod tests {
 
     /// The retrieval claim (C1 acceptance, unit scale): at equal budget
     /// the ranked pass serves the cluster raw while the positional pass
-    /// buys summaries of the old blocks — and says so in-band.
+    /// buys summaries of the old blocks — and says so in-band. C1-R: the
+    /// budget must sit below [`TASK_BUDGET_CEILING`], where the ranked
+    /// pass runs — this is also the ceiling's low-budget teeth (a
+    /// ceiling that blocks tight budgets fails here).
     #[test]
     fn ranked_pass_serves_the_cluster_that_positional_compresses() {
         let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect(); // 0..18: oldest half
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
         settle_all(&facts, &store);
+        let budget = 300u64; // < TASK_BUDGET_CEILING: the ranked pass is live
 
         let ranked = wake(
             &facts,
             &store,
             Some("daemon socket errors"),
-            600,
+            budget,
             Vec::new(),
         )
         .expect("ranked");
-        let positional = wake(&facts, &store, None, 600, Vec::new()).expect("positional");
+        let positional = wake(&facts, &store, None, budget, Vec::new()).expect("positional");
 
         let served = cluster
             .iter()
@@ -1158,7 +1233,7 @@ mod tests {
             &facts,
             &store,
             Some("daemon socket errors"),
-            600,
+            300,
             Vec::new(),
         )
         .expect("a");
@@ -1166,7 +1241,7 @@ mod tests {
             &facts,
             &store,
             Some("daemon socket errors"),
-            600,
+            300,
             Vec::new(),
         )
         .expect("b");
@@ -1223,20 +1298,15 @@ mod tests {
         settle_all(&facts, &store);
 
         // ~3 cluster facts fit: the rest must be absent from the raw set.
-        let report = wake(
-            &facts,
-            &store,
-            Some("daemon socket errors"),
-            200,
-            Vec::new(),
-        )
-        .expect("ranked");
+        // (C1-R sizing: the budget must stay under TASK_BUDGET_CEILING.)
+        let report =
+            wake(&facts, &store, Some("daemon socket errors"), 50, Vec::new()).expect("ranked");
         let task = report.task.as_ref().expect("task block");
         let raw = raw_ids(&report);
         let served_cluster = cluster.iter().filter(|id| raw.contains(id)).count() as u64;
         assert_eq!(served_cluster, task.served_scored, "counts match items");
         assert!(task.dropped_scored >= 1);
-        assert!(report.estimate <= 200, "estimate {}", report.estimate);
+        assert!(report.estimate <= 50, "estimate {}", report.estimate);
     }
 
     /// The completeness gate is unchanged under ranking: compression
@@ -1250,7 +1320,7 @@ mod tests {
             &facts,
             &store,
             Some("daemon socket errors"),
-            600,
+            300,
             Vec::new(),
         )
         .expect_err("gate fires under --task");
@@ -1259,18 +1329,20 @@ mod tests {
 
     /// Everything fits ⇒ everything raw, in serve order (the cluster
     /// leads), no summaries, no drops — TREE is never consulted, so an
-    /// unsettled store is fine.
+    /// unsettled store is fine. C1-R: the budget must stay below
+    /// [`TASK_BUDGET_CEILING`] or the wake degrades to positional order.
     #[test]
     fn ranked_pass_serves_everything_raw_when_it_fits() {
         let cluster = [2u64, 4];
         let tmp = tempfile::tempdir().expect("tempdir");
         let (facts, store) = cluster_setup(tmp.path(), 8, &cluster, &[]); // no settle needed
+        let budget = 300u64; // < ceiling, and > the 8-fact raw total
 
         let report = wake(
             &facts,
             &store,
             Some("daemon socket errors"),
-            100_000,
+            budget,
             Vec::new(),
         )
         .expect("everything fits");
@@ -1287,6 +1359,125 @@ mod tests {
         assert_eq!(task.served_scored, 2);
         assert_eq!(task.dropped_scored, 0);
         assert!(!report.truncated);
+    }
+
+    // --- C1-R: the task-budget ceiling ----------------------------------------
+
+    /// The boundary is exact, at the owner's pinned value: one token
+    /// below 350 the ranked pass runs (no `degraded` key, facts actually
+    /// served scored); at 350 the wake degrades — the positional payload
+    /// plus the honest task block. The literal budgets (not
+    /// `TASK_BUDGET_CEILING ± 1`) are deliberate: moving or removing the
+    /// constant fails here, not just downstream.
+    #[test]
+    fn the_ceiling_boundary_is_exact_below_ranked_at_it_degraded() {
+        assert_eq!(
+            TASK_BUDGET_CEILING, 350,
+            "the owner's post-KP decision: crossover measured between 300 and 400"
+        );
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[]);
+        settle_all(&facts, &store);
+
+        let below = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            349,
+            Vec::new(),
+        )
+        .expect("ranked below the ceiling");
+        let task = below.task.as_ref().expect("task block");
+        assert_eq!(task.degraded, None, "below the ceiling nothing degrades");
+        assert!(
+            serde_json::to_value(task)
+                .expect("task json")
+                .get("degraded")
+                .is_none(),
+            "append-only: the key appears only on a degraded wake"
+        );
+        assert!(
+            task.served_scored > 0,
+            "the ranked pass really ran: {task:?}"
+        );
+
+        let at = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            350,
+            Vec::new(),
+        )
+        .expect("degraded at the ceiling");
+        let task = at.task.as_ref().expect("task block");
+        assert_eq!(task.degraded, Some(TASK_DEGRADED_AT_CEILING));
+        assert_eq!(task.query, "daemon socket errors");
+        assert_eq!(task.scorer, rank::SCORER);
+        assert_eq!(task.served_scored, 0, "nothing was scored");
+        assert_eq!(task.dropped_scored, 0);
+    }
+
+    /// Degradation serves the positional payload: above the ceiling the
+    /// items, estimate, and truncation are exactly the no-task wake's —
+    /// the task block is the only difference — and two runs are
+    /// byte-identical. Teeth: a removed ceiling, or a degradation that
+    /// serves ranked items instead of positional ones, diverges from the
+    /// positional payload here.
+    #[test]
+    fn degraded_task_wake_is_the_positional_payload_plus_the_task_block() {
+        let cluster: Vec<u64> = (0..10).map(|i| i * 2).collect();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = cluster_setup(tmp.path(), 40, &cluster, &[5]);
+        settle_all(&facts, &store);
+        let budget = 600u64; // above the ceiling, below everything-fits
+
+        let positional = wake(&facts, &store, None, budget, Vec::new()).expect("positional");
+        let degraded = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            budget,
+            Vec::new(),
+        )
+        .expect("degraded");
+        assert_eq!(
+            degraded.items, positional.items,
+            "the positional items serve verbatim"
+        );
+        assert_eq!(degraded.estimate, positional.estimate);
+        assert_eq!(degraded.truncated, positional.truncated);
+        assert!(positional.task.is_none());
+        let task = degraded.task.as_ref().expect("task block");
+        assert_eq!(task.degraded, Some(TASK_DEGRADED_AT_CEILING));
+        assert_eq!(task.served_scored, 0);
+        assert_eq!(task.dropped_scored, 0);
+
+        // Stripping the task block leaves the positional payload exactly:
+        // the one-key difference (both sides through `Value`, so the
+        // compare is structural — the per-field asserts above already
+        // pinned the typed equality).
+        let mut json = serde_json::to_value(&degraded).expect("degraded json");
+        json.as_object_mut().expect("report object").remove("task");
+        assert_eq!(
+            json,
+            serde_json::to_value(&positional).expect("positional json"),
+            "the task block is the only difference above the ceiling"
+        );
+
+        let again = wake(
+            &facts,
+            &store,
+            Some("daemon socket errors"),
+            budget,
+            Vec::new(),
+        )
+        .expect("degraded again");
+        assert_eq!(
+            serde_json::to_string(&degraded).expect("json a"),
+            serde_json::to_string(&again).expect("json b"),
+            "degraded wakes are byte-identical"
+        );
     }
 
     // --- C4: agent-asserted confidence ----------------------------------------
@@ -1633,7 +1824,9 @@ mod tests {
         });
     }
 
-    /// The ranked-pass contract, over randomized logs and budgets: budget
+    /// The ranked-pass contract, over randomized logs and budgets (C1-R:
+    /// always below [`TASK_BUDGET_CEILING`] — above it the ranked pass
+    /// does not run, and its own tests own that regime): budget
     /// respected (or honestly over with only pinned raws left), locks
     /// exactly once raw and never under a summary, no summary covers a
     /// served fact, the score-positive raw count is exactly what the task
@@ -1645,7 +1838,7 @@ mod tests {
     #[test]
     fn ranked_properties_hold_over_random_logs_and_budgets() {
         let config = ProptestConfig::with_cases(24);
-        proptest!(config, |(n in 2u64..24, lock_bits in prop::collection::vec(any::<bool>(), 0..24), budget in 1u64..4000)| {
+        proptest!(config, |(n in 2u64..24, lock_bits in prop::collection::vec(any::<bool>(), 0..24), budget in 1u64..TASK_BUDGET_CEILING)| {
             let locked: Vec<u64> = (0..n)
                 .filter(|id| lock_bits.get(*id as usize).copied().unwrap_or(false))
                 .collect();
@@ -1747,7 +1940,15 @@ mod tests {
 
             // Budget allows the whole log raw ⇒ every tagged fact is a
             // raw item in both passes, each exactly once, each tagged.
+            // C1-R: the `--task` leg must also stay below the ceiling or
+            // it degrades to positional — the fixture's short texts keep
+            // raw_total under it, and the assert makes that precondition
+            // loud if the fixture ever outgrows it.
             let raw_total: u64 = facts.iter().map(|f| tokens(f.text.len())).sum();
+            prop_assert!(
+                raw_total < TASK_BUDGET_CEILING,
+                "fixture outgrew the ranked budget range: raw_total {raw_total}"
+            );
             for task in [None, Some("decision worth")] {
                 let fits = wake(&facts, &store, task, raw_total, Vec::new())
                     .expect("everything fits, both passes");

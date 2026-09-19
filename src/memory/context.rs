@@ -213,8 +213,10 @@ impl ContextManager {
 
     /// `janitor wake --budget N [--task QUERY]`: the budgeted recall plus
     /// the global layer, STATE.json status, hints, and the environment
-    /// notes. `task` switches the recall core to the ranked pass (C1);
-    /// the standing context around it is the same either way.
+    /// notes. `task` switches the recall core to the ranked pass below
+    /// the task ceiling and to the honest positional degradation at or
+    /// above it (C1/C1-R); the standing context around it is the same
+    /// either way.
     pub fn wake(&self, budget: u64, task: Option<&str>) -> Result<WakePayload, JanitorError> {
         self.ensure_initialized()?;
         let state = self.log().load()?;

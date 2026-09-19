@@ -332,7 +332,9 @@ fn run_init(args: cli::InitArgs, pretty: bool) -> ExitCode {
 }
 
 /// `janitor wake [--budget N] [--task QUERY]` (F6.7; C1's ranked pass
-/// when --task is given): the budgeted memory payload.
+/// when --task is given below the 350-token ceiling, the honest
+/// positional degradation at or above it — C1-R): the budgeted memory
+/// payload.
 fn run_wake(args: cli::WakeArgs, pretty: bool) -> ExitCode {
     let session = Session::new();
     match session.wake(args.budget, args.task.as_deref()) {

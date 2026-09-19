@@ -75,7 +75,8 @@ pub enum Command {
     Init(InitArgs),
     /// Recall memory under a token budget: raw facts and summaries,
     /// oldest-first, plus the standing global layer and state (F6);
-    /// --task ranks the recall against a query (C1).
+    /// --task ranks the recall against a query below the 350-token
+    /// ceiling, degrades honestly to positional at or above it (C1/C1-R).
     Wake(WakeArgs),
     /// Append one validated fact (one line, ≤ 280 bytes — as an argument
     /// or piped via --stdin); --ptr anchors it with the notation
@@ -143,8 +144,13 @@ pub struct WakeArgs {
 
     /// Rank the recall against this query (store-local TF-IDF, scorer
     /// "tfidf-store"): the best-scoring facts are served raw while the
-    /// budget allows, the rest fills with stored summaries. Absent: the
-    /// position-only tiling, byte-identical to previous versions.
+    /// budget allows, the rest fills with stored summaries. Runs only
+    /// below the 350-token task ceiling (TASK_BUDGET_CEILING): at or
+    /// above it the positional payload serves and the task block says
+    /// why ("degraded": "budget_at_or_above_ceiling") — a big
+    /// positional budget already covers everything via summaries.
+    /// Absent: the position-only tiling, byte-identical to previous
+    /// versions.
     #[arg(long)]
     pub task: Option<String>,
 }

@@ -27,6 +27,11 @@ const SEED: u64 = 0xC3;
 /// merge/drop/truncate shaping, 8192 the default-budget layout.
 const GOLDEN_BUDGETS: [u64; 2] = [300, 8192];
 
+/// The task-wake golden pair (C1-R): 300 is inside the ranked regime
+/// (below `wake::TASK_BUDGET_CEILING`), 8192 above it — the honestly
+/// degraded, positional-item class.
+const TASK_GOLDEN_BUDGETS: [u64; 2] = [300, 8192];
+
 /// xorshift64* (Marsaglia) — deterministic, dependency-free.
 struct Rng(u64);
 
@@ -216,18 +221,26 @@ fn wake_payload_is_byte_identical_to_the_goldens() {
 /// C1 hot-path fence: the ranked pass must not re-congest the read path
 /// C3 opened. Scoring is O(total bytes) — tokenize every fact twice (df
 /// pass + score pass) — plus the same batch-loaded tiling the positional
-/// pass runs; at 20k facts the target is < 1.5 s through the binary at
-/// budget 8192, against the positional 20k time the C3 test above prints.
+/// pass runs; at 20k facts the target is < 1.5 s through the binary,
+/// against the positional 20k time the C3 test above prints. C1-R: the
+/// budget sits just below `wake::TASK_BUDGET_CEILING` so the ranked pass
+/// actually runs — at the old 8192 the wake would (honestly) degrade to
+/// positional and the fence would measure no scoring at all.
 #[test]
 fn ranked_wake_wall_time_at_20k() {
     let n = 20_000u64;
     let tmp = tempfile::tempdir().expect("tempdir");
     settled_store(tmp.path(), n);
-    let (code, payload, elapsed) = janitor_wake(tmp.path(), Some("daemon socket errors"), 8192);
+    let budget = wake::TASK_BUDGET_CEILING - 1; // inside the ranked regime
+    let (code, payload, elapsed) = janitor_wake(tmp.path(), Some("daemon socket errors"), budget);
     assert_eq!(code, Some(0), "ranked wake at {n} facts: {payload}");
     assert_eq!(payload["data"]["task"]["scorer"], "tfidf-store");
+    assert!(
+        payload["data"]["task"]["degraded"].is_null(),
+        "below the ceiling the ranked pass runs"
+    );
     println!(
-        "wake --task 'daemon socket errors' --budget 8192, {n} facts: {:>8} ms \
+        "wake --task 'daemon socket errors' --budget {budget}, {n} facts: {:>8} ms \
          (binary wall time, served_scored {})",
         elapsed.as_millis(),
         payload["data"]["task"]["served_scored"]
@@ -239,34 +252,50 @@ fn ranked_wake_wall_time_at_20k() {
     );
 }
 
-/// C1 determinism fence: the ranked payload over the seeded 439-fact
-/// store is pinned field for field, so any drift in the scorer's
-/// arithmetic (tokenizer, idf, ordering, serve loop) fails loudly.
+/// C1 determinism fence: the task-wake payload over the seeded 439-fact
+/// store is pinned field for field at both regimes — 300 the ranked
+/// pass (no `degraded` key), 8192 the honest degradation to the
+/// positional payload (`"degraded": "budget_at_or_above_ceiling"`) — so
+/// any drift in the scorer's arithmetic (tokenizer, idf, ordering,
+/// serve loop) or in the ceiling's routing fails loudly.
 #[test]
-fn ranked_wake_payload_is_byte_identical_to_the_golden() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let report = lib_wake(tmp.path(), 439, 8192, Some("daemon socket errors"));
-    let golden = std::fs::read_to_string(format!(
-        "{}/tests/fixtures/wake/wake_task_golden_439_b8192.json",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .expect("ranked golden fixture");
-    assert_eq!(
-        serde_json::to_string(&report).expect("report json"),
-        golden.trim(),
-        "the ranked wake payload must stay byte-identical"
-    );
+fn task_wake_payloads_are_byte_identical_to_the_goldens() {
+    for budget in TASK_GOLDEN_BUDGETS {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let report = lib_wake(tmp.path(), 439, budget, Some("daemon socket errors"));
+        let json = serde_json::to_value(&report).expect("report json");
+        assert_eq!(
+            json["task"]["degraded"] == "budget_at_or_above_ceiling",
+            budget >= wake::TASK_BUDGET_CEILING,
+            "budget {budget}: the degraded key must match the regime"
+        );
+        let golden = std::fs::read_to_string(format!(
+            "{}/tests/fixtures/wake/wake_task_golden_439_b{budget}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("task golden fixture");
+        assert_eq!(
+            serde_json::to_string(&report).expect("report json"),
+            golden.trim(),
+            "budget {budget}: the task wake payload must stay byte-identical"
+        );
+    }
 }
 
-/// Capture helper (ignored): prints the ranked golden payload — how the
-/// fixture was produced, and how to regenerate it honestly if the ranked
-/// contract ever deliberately changes.
+/// Capture helper (ignored): prints the task-wake golden payloads — how
+/// the fixtures were produced, and how to regenerate them honestly if
+/// the ranked contract ever deliberately changes (C1-R note: the b8192
+/// fixture changed class on purpose — the ranked golden of pre-C1-R
+/// became the degraded-positional payload when the ceiling landed).
 #[test]
-#[ignore = "capture helper: prints the golden ranked WakeReport JSON"]
+#[ignore = "capture helper: prints the golden task-wake WakeReport JSON"]
 fn print_ranked_golden_payload() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let report = lib_wake(tmp.path(), 439, 8192, Some("daemon socket errors"));
-    println!("{}", serde_json::to_string(&report).expect("report json"));
+    for budget in TASK_GOLDEN_BUDGETS {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let report = lib_wake(tmp.path(), 439, budget, Some("daemon socket errors"));
+        println!("--- budget {budget} ---");
+        println!("{}", serde_json::to_string(&report).expect("report json"));
+    }
 }
 
 /// Audit helper (ignored): writes one settled store per size under

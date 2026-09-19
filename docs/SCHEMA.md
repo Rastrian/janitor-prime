@@ -294,6 +294,18 @@ raw evidence first (serve order), then the compressed backdrop
 oldest-first. Without `--task` the payload is byte-identical to the
 positional pass above (golden fixtures pin it).
 
+The ranked pass runs only **below the task-budget ceiling**
+(`TASK_BUDGET_CEILING` = 350 tokens, chars4 — v0.4, C1-R): the KP probe
+on the real 448-fact store (2026-09-19, 10 hand-labeled queries)
+measured the ranked pass winning 7–8/10 at budget ≤ 300 and 0/10 at
+budget ≥ 400 — at high budget the positional layout already covers the
+whole store through summaries, and ordering has nothing left to buy.
+At or above the ceiling `--task` serves the positional payload above
+(items, estimate, `truncated` all positional) and the `task` block
+reports the honest degradation: `"degraded":
+"budget_at_or_above_ceiling"` with `served_scored`/`dropped_scored` 0
+(nothing was scored).
+
 Payload (flattened: the recall core plus the standing context; the
 `task` block appears **only** under `--task`):
 
@@ -332,6 +344,10 @@ score-positive facts by raw service (`served + dropped` = the
 score-positive count). Under `--task`, `truncated: true` means
 **score-positive facts were dropped for budget** — the fill's shaping of
 score-zero material is not a truncation the agent needs to act on.
+`task.degraded` (append-only, v0.4 C1-R) appears only on a degraded
+`--task` wake: the budget reached the 350-token ceiling, the payload is
+the positional pass's, nothing was scored, and `truncated` carries its
+positional meaning (oldest tiles dropped), not the ranked one.
 
 `global.estimate` is informational — the budget governs the memory
 payload, not the standing instructions. `state` is STATE.json's contents
