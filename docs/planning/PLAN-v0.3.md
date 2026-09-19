@@ -166,6 +166,10 @@ frictions of this session, (b) scan self-investigation, (c) clippy/compiler,
 - **Effort:** M. **Risk:** M — the ocaml fix may be grammar-level.
 
 ### B10. Memory bootstrap ritual *(process+docs)*
+> **EXECUTADO 2026-09-19** — recipe shipped as the "Session zero (empty
+> store)" section of `share/GLOBAL.md` (incl. the C4 `--confidence low`
+> seeding rule).
+
 - **Problem:** a repo with rich history wakes with an empty memory; wake-only
   reconstructability (the KP-11 standard) is left to luck.
 - **Evidence:** this session's opening `wake --budget 4000` returned **2

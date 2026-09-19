@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Added
+- **Session-zero bootstrap ritual in GLOBAL.md (B10, PLAN-v0.3 §2)**:
+  a new "Session zero (empty store)" section — the recipe a first-session
+  agent follows when `wake` returns 0–2 facts against a repo with real
+  git history: seed 5–10 notes BEFORE working (project goal, load-bearing
+  invariants anchored `--ptr` to spans copied from `scan`, key commits
+  `--commit`, where PLAN/CHANGELOG/README live), with literal commands.
+  Seeds inherit the C4 rule: migration-imported or otherwise unverified
+  facts are born `--confidence low` (down-weighted, never filtered);
+  agent-verified facts carry no tag. The unchanged rules are stated in
+  the section itself: the agent writes every seed (ADR-0013 — no
+  auto-summarization, the binary never invents), the 280-byte cap
+  applies, and spans are never invented (E_POINTER_DANGLING refuses
+  them). Docs-only: no code, no schema, no golden touched.
+
 ### Changed
 - **`wake --task` task-budget ceiling + honest degradation (C1-R,
   PLAN-C2C §2 C1 post-script)**: the C1 kill-point probe finally ran —

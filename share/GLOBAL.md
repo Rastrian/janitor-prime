@@ -47,6 +47,47 @@ what its own commands verify.
 - The fact log is append-only; supersede an old fact by appending a new
   note, never by rewriting LOG.txt.
 
+## Session zero (empty store)
+
+When the first `wake` in a repository returns an empty or near-empty
+store (0–2 facts) while the git history is rich, the memory — not the
+repo — is what is missing: reconstruction is left to luck unless you
+seed it. Seed BEFORE starting the session's actual work.
+
+- **When to seed:** the first wake in a fresh clone (or right after
+  `init`) serves 0–2 facts while `git log --oneline | wc -l` shows a
+  real history. A genuinely new repo (no history, no plan) seeds only
+  items 1 and 4 below.
+- **What to seed — 5–10 notes total, each one line, ≤ 280 bytes:**
+  1. the project's goal in one line, in your own words (read the README
+     first; say it, do not quote it);
+  2. the 2–4 load-bearing structural invariants — the rules a refactor
+     could silently break — each anchored with `--ptr` to a span taken
+     from a `scan` report you just ran, e.g.
+     `janitor note "scan reports are read-only, they never mutate files" --ptr "src/lib.rs:120-480:function_item"`.
+     Spans, offsets, and node ids invented from memory are refused with
+     E_POINTER_DANGLING — always copy the span from scan output;
+  3. the key commits — the decisions that shaped the repo (a rejection,
+     a cut, a protocol change), one note each with `--commit`, e.g.
+     `janitor note "no async runtime: std threads only, by decision" --commit 1a2b3c4`
+     (any hex object name `git rev-parse` resolves);
+  4. where the documentation lives — the PLAN, CHANGELOG, and README
+     paths — so the next wake knows where reconstruction starts from.
+- **Confidence on seeds:** a fact you verified yourself — you read the
+  code, or the span comes from your own `scan` — is written with NO
+  tag. A fact you cannot vouch for — imported from a migration, quoted
+  from another tool, read but never checked against the code — is born
+  `--confidence low` (append the flag to the `note` command):
+  down-weighted at wake, never filtered. When you later verify such a
+  claim, append a fresh untagged note rather than editing the old one.
+- **Never:** never let a tool auto-summarize the repo into memory — you
+  write every seed yourself (ADR-0013; janitor validates what you hand
+  it, it never invents facts); never dodge the 280-byte cap by splitting
+  one fact into three notes; never seed in bulk — ten notes, not a
+  hundred (if it does not fit in ten lines, the PLAN already says it
+  better and item 4 points there); never tag a verified fact `low` or
+  let an unverified one pass untagged.
+
 ## Generic AST heuristics (normalized vocabulary)
 
 These heuristics are phrased only over the normalized vocabulary — FUNCTION,
