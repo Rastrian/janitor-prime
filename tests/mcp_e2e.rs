@@ -677,3 +677,56 @@ fn b8_output_schema_and_prompts_round_trip() {
 
     session.finish();
 }
+
+/// C4 through MCP: `janitor_note` accepts `confidence: "low"` (the one
+/// asserted level), the report echoes the tag, the inputSchema declares
+/// it append-only, and any other value is the typed usage refusal with
+/// nothing appended.
+#[test]
+fn note_confidence_low_through_the_mcp_layer() {
+    let (_tmp, ws) = fixture();
+    janitor_cli(&ws, &["init"]);
+    let mut session = Session::start(&ws);
+    session.handshake();
+
+    let plain = session.call("janitor_note", json!({ "text": "hand-verified fact" }));
+    assert_eq!(plain["isError"], false);
+    assert!(
+        plain["structuredContent"]["data"]
+            .get("confidence")
+            .is_none()
+    );
+
+    let low = session.call(
+        "janitor_note",
+        json!({ "text": "migrated note imported unverified", "confidence": "low" }),
+    );
+    assert_eq!(low["isError"], false, "{low}");
+    assert_eq!(low["structuredContent"]["data"]["confidence"], "low");
+    assert_eq!(low["structuredContent"]["data"]["id"], 1);
+
+    // The declared schema carries the field, enum-pinned to "low".
+    let listed = session.request("tools/list", json!({}));
+    let note = listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "janitor_note")
+        .expect("janitor_note listed");
+    assert_eq!(
+        note["inputSchema"]["properties"]["confidence"]["enum"],
+        json!(["low"])
+    );
+
+    // Any other level is the typed refusal — and nothing was appended.
+    let misspelled = session.call(
+        "janitor_note",
+        json!({ "text": "t", "confidence": "medium" }),
+    );
+    assert_eq!(misspelled["isError"], true);
+    assert_eq!(misspelled["structuredContent"]["error"]["code"], "E_USAGE");
+    let log = std::fs::read_to_string(ws.join(".janitor/LOG.txt")).expect("LOG.txt");
+    assert_eq!(log.lines().count(), 2, "the refusal appended nothing");
+
+    assert_eq!(session.finish(), 0);
+}

@@ -149,10 +149,28 @@ pub struct WakeArgs {
     pub task: Option<String>,
 }
 
+/// `janitor note --confidence` (C4): the agent-asserted provenance
+/// level, spelled exactly as it is stored. One value ships (`low`); the
+/// mapping onto the memory-layer enum lives here so the core stays
+/// clap-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum ConfidenceArg {
+    Low,
+}
+
+impl From<ConfidenceArg> for crate::memory::log::Confidence {
+    fn from(value: ConfidenceArg) -> Self {
+        match value {
+            ConfidenceArg::Low => Self::Low,
+        }
+    }
+}
+
 /// `janitor note` (PLAN §1.5.3, F6.7): exactly one anchor flavor — the
 /// compact pointer notation, a full stored-pointer JSON, a commit sha —
 /// or none (a free fact). v0.3 B5 adds `--stdin` as the text source
-/// (piped input, same validation).
+/// (piped input, same validation); C4 adds `--confidence low`.
 #[derive(Debug, Parser)]
 #[command(
     group(clap::ArgGroup::new("anchor").args(["ptr", "commit"])),
@@ -179,6 +197,14 @@ pub struct NoteArgs {
     /// Mark the fact architectural_lock: never compressed, never dropped.
     #[arg(long)]
     pub lock: bool,
+
+    /// Tag the fact low confidence — YOUR assertion, never the binary's
+    /// (no auto-detection): ranked wakes (`wake --task`) tie-break
+    /// against it and drop it first under budget pressure; positional
+    /// wakes seat it one split level coarser. It still serves whenever
+    /// the budget allows — down-weighted, never filtered.
+    #[arg(long, value_enum)]
+    pub confidence: Option<ConfidenceArg>,
 
     /// The fact itself: one line, ≤ 280 bytes (or pipe it via --stdin).
     pub text: Option<String>,
@@ -633,7 +659,29 @@ mod tests {
         };
         assert_eq!(args.text.as_deref(), Some("the overlay invariants hold"));
         assert!(args.ptr.is_none() && args.commit.is_none() && !args.lock);
+        assert_eq!(args.confidence, None, "untagged is the default");
         assert!(!args.stdin, "the argument is the default source");
+
+        // C4: --confidence low parses (and composes with --lock); any
+        // other level is a usage error — the one asserted value ships.
+        let cli = Cli::try_parse_from([
+            "janitor",
+            "note",
+            "--confidence",
+            "low",
+            "--lock",
+            "migrated import, truncated mid-thought",
+        ])
+        .expect("low-confidence lock");
+        let Some(Command::Note(args)) = cli.command else {
+            unreachable!("note subcommand");
+        };
+        assert_eq!(args.confidence, Some(ConfidenceArg::Low));
+        assert!(args.lock);
+        let err = Cli::try_parse_from(["janitor", "note", "--confidence", "high", "t"])
+            .expect_err("one asserted level ships");
+        let (_envelope, code) = clap_error_envelope(&err);
+        assert_eq!(code, envelope::EXIT_USAGE);
 
         let cli = Cli::try_parse_from([
             "janitor",

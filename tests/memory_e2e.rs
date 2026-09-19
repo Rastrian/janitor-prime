@@ -533,3 +533,62 @@ fn force_resets_and_memory_stays_local() {
         "no layer ever lands in $HOME"
     );
 }
+
+/// C4 (PLAN-C2C §2): `note --confidence low` through the real binary —
+/// the report echoes the agent's assertion, the LOG line carries it as an
+/// optional field, the wake item surfaces it, and an untagged note keeps
+/// the exact pre-C4 shape everywhere (append-only). The tag is the
+/// agent's; the binary never invents one.
+#[test]
+fn note_confidence_low_round_trips_through_the_binary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    janitor(dir, &["init"]);
+
+    // An untagged note first: its report and LOG line carry no key.
+    let (code, plain) = janitor(dir, &["note", "hand-verified fact"]);
+    assert_eq!(code, Some(0), "{plain}");
+    assert!(plain["data"].get("confidence").is_none());
+    assert!(!log_lines(dir)[0].contains("confidence"));
+
+    // The tagged note: report echo, LOG field, id 1.
+    let (code, low) = janitor(
+        dir,
+        &["note", "--confidence", "low", "imported fact, unverified"],
+    );
+    assert_eq!(code, Some(0), "{low}");
+    assert_eq!(low["data"]["confidence"], "low");
+    assert_eq!(low["data"]["id"], 1);
+    let lines = log_lines(dir);
+    assert!(lines[1].contains("\"confidence\":\"low\""), "{}", lines[1]);
+    assert!(
+        !lines[0].contains("confidence"),
+        "line 0 stays v0.3.1-shaped"
+    );
+
+    // The wake item surfaces the tag at recall time (everything fits, so
+    // both facts serve raw), and only on the tagged fact.
+    let (code, wake) = janitor(dir, &["wake", "--budget", "1000"]);
+    assert_eq!(code, Some(0), "{wake}");
+    let items = wake["data"]["items"].as_array().expect("items");
+    let by_id = |id: i64| {
+        items
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap_or(&Value::Null)
+            .clone()
+    };
+    assert_eq!(by_id(1)["confidence"], "low");
+    assert!(by_id(0).get("confidence").is_none());
+
+    // `--confidence high` is a usage error: exactly one asserted level
+    // ships, and clap's refusal is the JSON envelope.
+    let (code, err) = janitor(dir, &["note", "--confidence", "high", "t"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(code_of(&err), "E_USAGE");
+    assert_eq!(
+        log_lines(dir).len(),
+        2,
+        "nothing was appended by the refusal"
+    );
+}

@@ -445,13 +445,25 @@ impl Server {
         })
     }
 
-    /// `janitor_note {text, ptr?, commit?, lock?}` — the anchored append.
-    /// The ptr's path is containment-checked before the anchor resolves.
+    /// `janitor_note {text, ptr?, commit?, lock?, confidence?}` — the
+    /// anchored append. The ptr's path is containment-checked before the
+    /// anchor resolves. `confidence` takes exactly `"low"` (C4).
     fn tool_note(&self, args: &Value) -> Result<Envelope<Value>, String> {
         let text = req_str(args, "text")?.to_owned();
         let ptr = opt_str(args, "ptr")?;
         let commit = opt_str(args, "commit")?;
         let lock = opt_bool(args, "lock")?.unwrap_or(false);
+        let confidence = match opt_str(args, "confidence")? {
+            None => None,
+            Some("low") => Some(crate::memory::log::Confidence::Low),
+            Some(other) => {
+                return Ok(Envelope::error(
+                    "E_USAGE",
+                    "confidence takes exactly \"low\" — the one asserted level",
+                    Some(json!({ "confidence": other })),
+                ));
+            }
+        };
         if ptr.is_some() && commit.is_some() {
             return Ok(Envelope::error(
                 "E_USAGE",
@@ -475,10 +487,17 @@ impl Server {
             .map(|spelled| NoteTarget::Ptr(spelled.to_owned()))
             .or_else(|| commit.map(|sha| NoteTarget::Commit(sha.to_owned())));
         let session = Session::new();
-        Ok(match session.note(&NoteParams { target, text, lock }) {
-            Ok(report) => ok_envelope(&report),
-            Err(err) => err.into(),
-        })
+        Ok(
+            match session.note(&NoteParams {
+                target,
+                text,
+                lock,
+                confidence,
+            }) {
+                Ok(report) => ok_envelope(&report),
+                Err(err) => err.into(),
+            },
+        )
     }
 
     /// `janitor_nap {slot?, text?}` — bare returns the next pending
@@ -834,6 +853,14 @@ fn tool_specs() -> Vec<Value> {
                         "type": "boolean",
                         "description": "Mark the fact architectural_lock: never \
         compressed, never dropped."
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": ["low"],
+                        "description": "Tag the fact low confidence — your assertion, \
+        never the binary's: ranked recall tie-breaks against it and drops it first under \
+        budget pressure; positional recall seats it one split level coarser. It still serves \
+        whenever the budget allows."
                     }
                 },
                 "required": ["text"]

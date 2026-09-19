@@ -36,6 +36,7 @@ fn fact(id: u64, text: &str, locked: bool) -> FactRecord {
         } else {
             Vec::new()
         },
+        confidence: None,
     }
 }
 

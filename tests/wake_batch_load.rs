@@ -78,6 +78,7 @@ fn synth_facts(n: u64) -> Vec<FactRecord> {
             ptr: None,
             text: format!("fact {id}: {}", words(&mut rng, 8, 20)),
             flags: Vec::new(),
+            confidence: None,
         })
         .collect()
 }

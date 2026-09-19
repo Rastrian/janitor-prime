@@ -20,7 +20,10 @@
 //!   [`MemoryError::LogUnrecoverable`] refusal — never a silent rewrite;
 //! - **flags from day one**: `flags: ["architectural_lock"]` is honored by
 //!   the whole stack (exempt from compression, always surfaced raw,
-//!   §1.5.2).
+//!   §1.5.2);
+//! - **confidence is an optional field** (C4): `"confidence": "low"` marks
+//!   an agent-demoted fact — a field, not a flag, so older binaries ignore
+//!   it where a new flag variant would read as corruption.
 //!
 //! Why JSONL and not OptMem's fixed 320-byte records: our facts carry
 //! structured pointers that do not fit fixed width, and the local layer is
@@ -57,6 +60,25 @@ pub enum MemoryFlag {
     ArchitecturalLock,
 }
 
+/// Agent-asserted provenance (C4, PLAN-C2C §2): `low` demotes the fact at
+/// recall — tie-broken against in the ranked serve order, dropped before
+/// normal facts under budget pressure, seated one split level coarser in
+/// the positional tiling. Never deleted, never filtered: down-weight, not
+/// removal. The tag is the *agent's* assertion and nothing else — the
+/// binary never detects or invents it (`note --confidence low` is the only
+/// writer; the anti-hallucination stance B10 inherits).
+///
+/// An optional **field**, never a `MemoryFlag` variant — the asymmetry is
+/// load-bearing: serde ignores unknown fields by default, so a v0.3.1
+/// binary parses a tagged log line for line, whereas an unknown enum
+/// variant inside `flags` would read as corruption and hit
+/// [`MemoryError::LogUnrecoverable`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    Low,
+}
+
 /// One logged fact: the JSONL line, verbatim shape (ADR-0006).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactRecord {
@@ -73,12 +95,21 @@ pub struct FactRecord {
     pub text: String,
     #[serde(default)]
     pub flags: Vec<MemoryFlag>,
+    /// Agent-asserted [`Confidence`] (C4) — absent on untagged facts, so
+    /// the v0.3.1 line shape serializes byte-identically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
 }
 
 impl FactRecord {
     /// Whether this fact carries [`MemoryFlag::ArchitecturalLock`].
     pub fn is_locked(&self) -> bool {
         self.flags.contains(&MemoryFlag::ArchitecturalLock)
+    }
+
+    /// Whether the agent tagged this fact [`Confidence::Low`] (C4).
+    pub fn is_low_confidence(&self) -> bool {
+        self.confidence == Some(Confidence::Low)
     }
 }
 
@@ -344,6 +375,7 @@ mod tests {
             ptr: None,
             text: text.to_owned(),
             flags: Vec::new(),
+            confidence: None,
         }
     }
 
@@ -551,6 +583,8 @@ mod tests {
 
     /// The serialized line shape is the ADR-0006 contract: exact keys, in
     /// order, with the pointer as the nested object the plan sketches.
+    /// C4: the confidence field appears only when asserted — the v0.3.1
+    /// shape is pinned byte for byte above.
     #[test]
     fn record_serializes_to_the_documented_shape() {
         let record = FactRecord {
@@ -565,6 +599,7 @@ mod tests {
             }),
             text: "Overlay read_dir must never consult the buffer".to_owned(),
             flags: vec![MemoryFlag::ArchitecturalLock],
+            confidence: None,
         };
         let line = serde_json::to_string(&record).expect("json");
         assert_eq!(
@@ -575,5 +610,110 @@ mod tests {
              \"text\":\"Overlay read_dir must never consult the buffer\",\
              \"flags\":[\"architectural_lock\"]}"
         );
+
+        // The C4 tag lands as the trailing optional field.
+        let low = FactRecord {
+            confidence: Some(Confidence::Low),
+            ..fact(7, "migrated import, truncated mid-thought")
+        };
+        assert_eq!(
+            serde_json::to_string(&low).expect("json"),
+            "{\"v\":1,\"id\":7,\"ts\":\"2026-09-14T00:00:00Z\",\"ptr\":null,\
+             \"text\":\"migrated import, truncated mid-thought\",\"flags\":[],\
+             \"confidence\":\"low\"}"
+        );
+    }
+
+    /// C4 round trip: `confidence: low` survives append (fsync) and load
+    /// exactly, an untagged fact stays untagged, and the on-disk lines say
+    /// the same — the key is present only on the tagged line.
+    #[test]
+    fn confidence_round_trips_through_the_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = log_in(tmp.path());
+        log.append(&fact(0, "hand-verified fact"))
+            .expect("append 0");
+        let low = FactRecord {
+            confidence: Some(Confidence::Low),
+            ..fact(1, "imported fact, claims unverified")
+        };
+        log.append(&low).expect("append 1");
+
+        let state = log.load().expect("load");
+        assert_eq!(state.facts.len(), 2);
+        assert_eq!(state.facts[0].confidence, None);
+        assert!(!state.facts[0].is_low_confidence());
+        assert_eq!(state.facts[1], low);
+        assert!(state.facts[1].is_low_confidence());
+
+        let disk = std::fs::read_to_string(log.path()).expect("read log");
+        let mut lines = disk.lines();
+        let first = lines.next().expect("line 0");
+        let second = lines.next().expect("line 1");
+        assert!(
+            !first.contains("confidence"),
+            "untagged line is v0.3.1 shape"
+        );
+        assert!(second.contains("\"confidence\":\"low\""));
+    }
+
+    /// C4 compatibility, both directions of the version skew (the reason
+    /// the tag is a field, not a flag variant):
+    ///
+    /// - a pre-field v0.3.1 LOG parses identically before and after the
+    ///   change — every line loads as an untagged fact;
+    /// - a LOG *with* the field parses as ordinary facts under code that
+    ///   does not know the field (serde ignores unknown fields by default)
+    ///   — where an unknown `flags` variant would have been
+    ///   `LogUnrecoverable`, proved by the same fixture.
+    #[test]
+    fn confidence_field_is_forward_and_backward_compatible() {
+        let v031_line = "{\"v\":1,\"id\":0,\"ts\":\"2026-09-14T00:00:00Z\",\
+                         \"ptr\":null,\"text\":\"a v0.3.1 fact\",\"flags\":[]}";
+        let tagged_line = "{\"v\":1,\"id\":1,\"ts\":\"2026-09-18T12:00:00Z\",\
+                           \"ptr\":null,\"text\":\"a tagged fact\",\"flags\":[],\
+                           \"confidence\":\"low\"}";
+
+        // New code over the old log: identical parse, untagged.
+        let parsed: FactRecord = serde_json::from_str(v031_line).expect("v0.3.1 line parses");
+        assert_eq!(parsed, fact(0, "a v0.3.1 fact"));
+
+        // New code over the tagged log: the tag round-trips.
+        let parsed: FactRecord = serde_json::from_str(tagged_line).expect("tagged line parses");
+        assert_eq!(parsed.confidence, Some(Confidence::Low));
+
+        // Old code (a reader struct without the field) over the tagged
+        // log: still an ordinary fact — the synthetic v0.3.1 reader
+        // (unread fields are the point: the old shape simply had them).
+        #[derive(serde::Deserialize)]
+        #[expect(dead_code, reason = "the old reader parsed more than it read")]
+        struct V031Record {
+            v: u32,
+            id: u64,
+            ts: String,
+            ptr: Option<crate::memory::pointer::SyntaxPointer>,
+            text: String,
+            flags: Vec<MemoryFlag>,
+        }
+        let old: V031Record = serde_json::from_str(tagged_line).expect("old reader");
+        assert_eq!(old.id, 1);
+        assert_eq!(old.text, "a tagged fact");
+        assert_eq!(old.flags, Vec::<MemoryFlag>::new());
+
+        // The counterfactual that rules the flag variant out: an unknown
+        // enum variant inside flags is corruption (the load would refuse).
+        let unknown_flag = "{\"v\":1,\"id\":0,\"ts\":\"2026-09-13T12:00:00Z\",\
+                            \"ptr\":null,\"text\":\"x\",\"flags\":[\"confidence_low\"]}";
+        assert!(serde_json::from_str::<FactRecord>(unknown_flag).is_err());
+
+        // Both lines on disk, in one log: the full load carries both.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = log_in(tmp.path());
+        std::fs::write(log.path(), format!("{v031_line}\n{tagged_line}\n")).expect("write");
+        let state = log.load().expect("mixed log loads");
+        assert_eq!(state.facts.len(), 2);
+        assert_eq!(state.facts[0].confidence, None);
+        assert_eq!(state.facts[1].confidence, Some(Confidence::Low));
+        assert!(state.warnings.is_empty());
     }
 }

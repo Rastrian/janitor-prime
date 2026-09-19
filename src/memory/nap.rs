@@ -215,6 +215,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                confidence: None,
             })
             .collect();
         (facts, TreeStore::new(&root))

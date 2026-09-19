@@ -39,7 +39,7 @@ pub fn attach_output_schemas(tools: &mut [Value]) {
             "per-file results (flushed | refused with typed coordinates), sha_before/sha_after, edit counts, stats — all-or-nothing per diff",
         ),
         "janitor_note" => envelope_schema(
-            "appended note id, text echo, ptr (stamped or re-anchored with drift), flags",
+            "appended note id, text echo, ptr (stamped or re-anchored with drift), flags, confidence (only when asserted)",
         ),
         "janitor_nap" => envelope_schema(
             "next pending compression request (slot, covers, source facts/summaries, instruction) or the settled/nothing-pending report",

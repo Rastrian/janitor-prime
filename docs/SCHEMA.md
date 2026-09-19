@@ -151,13 +151,24 @@ the tool sequences, the agent writes every summary.
 indexes; the next id is the line count). Line shape:
 
 ```json
-{"v":1,"id":42,"ts":"2026-09-14T12:00:00Z","ptr":{…}|null,"text":"…","flags":[]}
+{"v":1,"id":42,"ts":"2026-09-14T12:00:00Z","ptr":{…}|null,"text":"…","flags":[],"confidence":"low"}
 ```
 
 - `text`: one line, ≤ 280 bytes (`E_NOTE_INVALID` otherwise);
 - `flags`: `["architectural_lock"]` marks a fact **exempt from
   compression** — never inside a summary block, never dropped by budget
   truncation, always surfaced raw at its position;
+- `confidence` (v0.3, C4): the optional field `"confidence": "low"` is
+  the **agent-asserted** demotion tag — set only by `note --confidence
+  low`, never detected or invented by the binary. A field, not a flag
+  variant, on purpose: serde ignores unknown fields, so a v0.3.1 binary
+  parses a tagged log line for line (an unknown enum variant in `flags`
+  would read as corruption). Absent on untagged facts, so older readers
+  and older payloads are unchanged. Tagged facts are **down-weighted,
+  never filtered**: tie-broken against in the ranked serve order, dropped
+  before normal facts under budget pressure, seated one split level
+  coarser in the positional tiling (below) — but they still serve
+  whenever the budget allows, and the log stays append-only;
 - a torn *trailing* line (crash mid-append) is quarantined to
   `QUARANTINE.txt` and LOG.txt is rewritten without it, with a warning in
   the next `wake`/`note` payload; corruption before the trailing line is
@@ -178,7 +189,7 @@ summarizes its two half-size children; blocks are built bottom-up.
 ### `janitor note` — pointers (ADR-0012)
 
 ```
-janitor note [--ptr <notation|json> | --commit <sha>] [--lock] TEXT
+janitor note [--ptr <notation|json> | --commit <sha>] [--lock] [--confidence low] TEXT
 ```
 
 The compact notation (byte offsets, split from the right so the path may
@@ -213,6 +224,10 @@ the same 16-hex SipHash convention as [`content_sha`](#content_sha).
 the stored pointer carries the resolved full sha. An unresolvable sha is
 `E_COMMIT_INVALID`.
 
+`--confidence low` (v0.3, C4) is the provenance tag — your assertion,
+never the binary's: it demotes the fact at recall (see `wake` below) but
+changes nothing else. Any other value is the `E_USAGE` envelope.
+
 Success:
 
 ```json
@@ -222,8 +237,11 @@ Success:
     "ptr": { "path": "lib.rs", "span": [27, 54],
              "kind_name": "function_item", "content_sha": "2fc7ae9ebd3514a4" },
     "reanchored": true, "drift": 27,
-    "flags": [], "warnings": [] } }
+    "flags": [], "confidence": "low", "warnings": [] } }
 ```
+
+`confidence` appears **only** when asserted (append-only key) — an
+untagged note's report is the pre-v0.3 shape exactly.
 
 ### `janitor wake --budget N [--task QUERY]` — budgeted recall
 
@@ -236,21 +254,30 @@ only if `size ≤ 8 × age`, where age is the count of newer facts — the
 newest facts are raw by construction); over budget, sibling blocks merge
 into parents and then whole tiles drop from the oldest end
 (`"truncated": true`); leftover budget splits the largest blocks.
-Locked facts are pinned raw always.
+Locked facts are pinned raw always. One v0.3 (C4) exception to the bias
+rule: a bias-demoted block covering a `low`-confidence fact stops one
+split level coarser — the cheaper seat for agent-demoted material,
+firing only when the coarser slot's summary is already settled (it never
+widens the `E_NAP_PENDING` gate). An untagged store tiles exactly as
+before.
 
 **`--task "<query>"` (v0.3, C1)** switches the recall to a ranked pass:
 every fact is scored by store-local TF-IDF (tokens = lowercase
 alphanumeric runs ≥ 2 chars; `score(q,f) = Σ_{t∈q} idf(t)·tf(t,f)` with
 `idf(t) = ln(1 + N/df(t))` over the store's own facts — lexical, not
 semantic, and declared in-band). The best-scoring facts are served raw
-in serve order (score desc, ties to the newer id) while their cost
-fits; a score-positive fact that does not fit is dropped from raw
-service (a stored summary may still cover it). Locked facts stay pinned
-raw under ranking, honestly over budget if it comes to that. The
-leftover budget fills with stored summaries over the unserved ranges —
-the same biased tiling, with served facts force-split out like locks,
-and the same `E_NAP_PENDING` gate. Item order under `--task`: the raw
-evidence first (serve order), then the compressed backdrop
+in serve order (score desc, ties to the higher confidence — a `low` tag
+demotes only, C4 — then to the newer id) while their cost fits; a
+score-positive fact that does not fit is dropped from raw service (a
+stored summary may still cover it). Seating runs in two tiers, normal
+confidence first and `low` with the leftover (C4): under budget pressure
+the low facts are the first dropped, after the score ordering, which
+still governs within each tier — down-weighted, never filtered. Locked
+facts stay pinned raw under ranking, honestly over budget if it comes to
+that. The leftover budget fills with stored summaries over the unserved
+ranges — the same biased tiling, with served facts force-split out like
+locks, and the same `E_NAP_PENDING` gate. Item order under `--task`: the
+raw evidence first (serve order), then the compressed backdrop
 oldest-first. Without `--task` the payload is byte-identical to the
 positional pass above (golden fixtures pin it).
 
@@ -265,7 +292,7 @@ Payload (flattened: the recall core plus the standing context; the
               "served_scored": 10, "dropped_scored": 0 },
     "items": [
       { "kind": "fact", "id": 0, "text": "…",
-        "ptr": { "sha": "…" }, "flags": [] },
+        "ptr": { "sha": "…" }, "flags": [], "confidence": "low" },
       { "kind": "summary", "slot": "0-2",
         "covers": [0, 2], "text": "…" } ],
     "warnings": [],
@@ -280,6 +307,10 @@ Payload (flattened: the recall core plus the standing context; the
       "git": { "available": true, "dirty": false } } }
 }
 ```
+
+A fact item's `confidence` key appears only on tagged facts (C4,
+append-only) — untagged items are the pre-v0.3 shape exactly, so the
+agent can always see which served evidence is agent-demoted.
 
 `task.query` is the query as given; `task.scorer` names the statistic
 (the `"estimator": "chars4"` precedent, ADR-0011 — the scorer's limits

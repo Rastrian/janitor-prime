@@ -56,7 +56,7 @@ through it is future work, deliberately out of this surface.
 | `janitor_wake` | `budget?: int`, `task?: string` | no | budgeted memory recall (facts, summaries, hints, state); `task` ranks it (TF-IDF, scorer `tfidf-store`); `E_NAP_PENDING` carries the pending request |
 | `janitor_scan` | `rule?`, `duplicates?`, `path?`, `lang?`, `include_virtual?`, `strict_trivia?`, `max_file_size?`, `min_size?` | no | structural search (DSL.md) or duplicate grouping (SCHEMA.md) |
 | `janitor_apply` | `diff: object`, `dry_run?: bool` | **yes** | transactional rewrite: whole-diff staged → re-parse-gated → flushed; any failure rolls everything back |
-| `janitor_note` | `text: string`, `ptr?`, `commit?`, `lock?` | yes (.janitor/) | append one validated fact, optionally anchored |
+| `janitor_note` | `text: string`, `ptr?`, `commit?`, `lock?`, `confidence?: "low"` | yes (.janitor/) | append one validated fact, optionally anchored; `confidence: "low"` is the agent-asserted demotion tag (C4) |
 | `janitor_nap` | `slot?`, `text?` | yes (.janitor/) | bare = next pending request; `slot`+`text` = settle |
 | `janitor_status` | — | no | cheap peek: version, grammars, memory layer summary, STATE.json |
 

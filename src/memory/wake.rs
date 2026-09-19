@@ -19,7 +19,10 @@
 //!    the newest facts are raw by construction); locked facts are
 //!    force-split out — any block containing one demotes until it is raw,
 //!    and locked facts are **pinned**: never compressed, never dropped by
-//!    truncation, always surfaced raw at their position (§1.5.1);
+//!    truncation, always surfaced raw at their position (§1.5.1). One C4
+//!    exception: a bias-demoted block covering an agent-tagged `low`
+//!    fact stops one split level coarser — the cheaper seat (see
+//!    [`tile`]);
 //! 3. **over budget** — adjacent sibling blocks merge (oldest mergeable
 //!    pair first) into their parent until the payload fits; if merging is
 //!    exhausted, whole tiles are dropped **from the oldest end** (pinned
@@ -44,11 +47,15 @@
 //! 1. **score** — every fact by store-local TF-IDF
 //!    ([`crate::memory::rank`], declared `"scorer": "tfidf-store"`);
 //! 2. **serve** — score-positive facts get raw seats in serve order
-//!    (score desc, ties to the newer id) while their cost fits; a fact
-//!    that does not fit is dropped from raw service and counted
-//!    (`dropped_scored`). Locked facts stay **pinned** — always raw,
-//!    never dropped, honestly over budget if it comes to that (the
-//!    §1.5.2 invariant survives ranking);
+//!    (score desc, ties to the higher confidence — a `low` tag demotes
+//!    only — then to the newer id) while their cost fits; a fact that
+//!    does not fit is dropped from raw service and counted
+//!    (`dropped_scored`). C4: seating runs in two tiers, normal
+//!    confidence first and `low` with the leftover — under budget
+//!    pressure the low facts are the first dropped, after the score
+//!    ordering. Locked facts stay **pinned** — always raw, never
+//!    dropped, honestly over budget if it comes to that (the §1.5.2
+//!    invariant survives ranking);
 //! 3. **fill** — the leftover budget buys stored summaries over the
 //!    unserved ranges through the same biased tiling, with served facts
 //!    pinned exactly like locks (blocks force-split around them) and the
@@ -61,7 +68,7 @@
 use serde::Serialize;
 
 use crate::error::{JanitorError, MemoryError};
-use crate::memory::log::{FactRecord, LogWarning, MemoryFlag};
+use crate::memory::log::{Confidence, FactRecord, LogWarning, MemoryFlag};
 use crate::memory::nap;
 use crate::memory::pointer::SyntaxPointer;
 use crate::memory::rank;
@@ -93,6 +100,10 @@ pub enum WakeItem {
         text: String,
         ptr: Option<SyntaxPointer>,
         flags: Vec<MemoryFlag>,
+        /// The agent-asserted confidence tag (C4) — an append-only key,
+        /// present only on tagged facts.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        confidence: Option<Confidence>,
     },
     /// A stored summary standing in for its whole block.
     Summary {
@@ -276,6 +287,7 @@ fn wake_ranked(
         .iter()
         .map(|tokens| scored.score_tokens(tokens))
         .collect();
+    let order = serve_order(facts, &scores);
 
     // 1. Everything fits raw ⇒ nothing is compressed, TREE untouched —
     //    the same first rule as the positional pass (an unsettled
@@ -290,9 +302,9 @@ fn wake_ranked(
             estimate: raw_total,
             truncated: false,
             task: Some(task_report(query, positive_count(&scores), 0)),
-            items: serve_order(&scores)
-                .into_iter()
-                .map(|id| raw_item(&facts[id as usize]))
+            items: order
+                .iter()
+                .map(|id| raw_item(&facts[*id as usize]))
                 .collect(),
             warnings,
         });
@@ -302,7 +314,10 @@ fn wake_ranked(
     //    their cost fits; a fact that does not fit is dropped from raw
     //    service and counted. Locked facts are pre-seated (their cost
     //    spent up front) and stay pinned — never dropped, honestly over
-    //    budget if it comes to that.
+    //    budget if it comes to that. C4 seats in two tiers, normal
+    //    confidence first (then `low`): under budget pressure the low
+    //    facts are the first dropped — after the score ordering, which
+    //    still governs within each tier.
     let mut served = lock_mask(facts);
     let mut spent: u64 = facts
         .iter()
@@ -310,19 +325,24 @@ fn wake_ranked(
         .map(|fact| tokens(fact.text.len()))
         .sum();
     let mut served_scored = 0u64;
-    for id in serve_order(&scores) {
-        if scores[id as usize] <= 0.0 {
-            break; // serve order is score desc: the rest cannot be positive
-        }
-        if served[id as usize] {
-            served_scored += 1; // a pinned lock with a positive score: seated
-            continue;
-        }
-        let cost = tokens(facts[id as usize].text.len());
-        if spent + cost <= budget {
-            served[id as usize] = true;
-            spent += cost;
-            served_scored += 1;
+    for low_tier in [false, true] {
+        for &id in &order {
+            if scores[id as usize] <= 0.0 {
+                break; // serve order is score desc: the rest cannot be positive
+            }
+            if facts[id as usize].is_low_confidence() != low_tier {
+                continue; // the other tier's fact seats in its own pass
+            }
+            if served[id as usize] {
+                served_scored += 1; // a pinned lock with a positive score: seated
+                continue;
+            }
+            let cost = tokens(facts[id as usize].text.len());
+            if spent + cost <= budget {
+                served[id as usize] = true;
+                spent += cost;
+                served_scored += 1;
+            }
         }
     }
     let dropped_scored = positive_count(&scores) - served_scored;
@@ -347,10 +367,10 @@ fn wake_ranked(
     // 4. Report: the raw evidence leads (serve order), then the layout's
     //    chronological backdrop — the score-zero tail raws the bias kept,
     //    and the summary blocks.
-    let mut items: Vec<WakeItem> = serve_order(&scores)
-        .into_iter()
-        .filter(|id| served[*id as usize])
-        .map(|id| raw_item(&facts[id as usize]))
+    let mut items: Vec<WakeItem> = order
+        .iter()
+        .filter(|id| served[**id as usize])
+        .map(|id| raw_item(&facts[*id as usize]))
         .collect();
     for tile in &tiles {
         match tile {
@@ -388,15 +408,17 @@ fn lock_mask(facts: &[FactRecord]) -> Vec<bool> {
     facts.iter().map(|fact| fact.is_locked()).collect()
 }
 
-/// Fact ids in serve order: score desc, ties to the newer id
+/// Fact ids in serve order: score desc, ties to the higher confidence
+/// (a `low` tag demotes — C4), then to the newer id
 /// ([`rank::scored_first`]).
-fn serve_order(scores: &[f64]) -> Vec<u64> {
+fn serve_order(facts: &[FactRecord], scores: &[f64]) -> Vec<u64> {
     let mut ranked: Vec<rank::Scored> = scores
         .iter()
         .enumerate()
         .map(|(id, score)| rank::Scored {
             id: id as u64,
             score: *score,
+            low: facts[id].is_low_confidence(),
         })
         .collect();
     ranked.sort_by(rank::scored_first);
@@ -490,6 +512,7 @@ fn raw_item(fact: &FactRecord) -> WakeItem {
         text: fact.text.clone(),
         ptr: fact.ptr.clone(),
         flags: fact.flags.clone(),
+        confidence: fact.confidence,
     }
 }
 
@@ -504,6 +527,15 @@ fn total_cost(tiles: &[Tile], facts: &[FactRecord]) -> u64 {
 /// fact. `pinned` marks the facts no block may swallow — locked facts
 /// always (the positional pass), plus the facts the ranked serve pass
 /// bought raw (they must surface raw, exactly like locks).
+///
+/// C4 clemency: a block the bias *demoted* stops one split level coarser
+/// when that coarser block covers an agent-tagged `low` fact — the
+/// cheaper seat for demoted material (the one documented exception to the
+/// bias rule). Clemency is strictly a downgrade and never widens the
+/// completeness gate: it fires only when the coarser slot is itself a
+/// legal block (compressible, unpinned) whose summary is already
+/// settled — the split pass's "refinement never trips the gate" rule,
+/// mirrored. A store with no tagged facts tiles exactly as before.
 fn tile(
     facts: &[FactRecord],
     levels: &LevelSnapshot,
@@ -526,8 +558,17 @@ fn tile(
         while size > 1 && (!plan.is_compressible(facts, size, p) || range_pinned(pinned, p, size)) {
             size /= 2;
         }
+        let capped = size; // the bias loop below only demotes from here
         while size > 1 && size > PRESENT_BIAS_ALPHA * (n - (p + size)) {
             size /= 2;
+        }
+        if size < capped
+            && range_low(facts, p, size * 2)
+            && plan.is_compressible(facts, size * 2, p)
+            && !range_pinned(pinned, p, size * 2)
+            && matches!(levels.summary(size * 2, p), Ok(Some(_)))
+        {
+            size *= 2;
         }
         if size == 1 {
             tiles.push(Tile::Fact {
@@ -542,6 +583,13 @@ fn tile(
         p += size;
     }
     Ok(tiles)
+}
+
+/// Whether any fact in `[lo, lo + size)` is agent-tagged low confidence.
+fn range_low(facts: &[FactRecord], lo: u64, size: u64) -> bool {
+    facts[lo as usize..(lo + size) as usize]
+        .iter()
+        .any(|fact| fact.is_low_confidence())
 }
 
 /// Whether any fact in `[lo, lo + size)` carries the pin mask.
@@ -691,6 +739,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                confidence: None,
             })
             .collect();
         (facts, TreeStore::new(&root))
@@ -946,6 +995,7 @@ mod tests {
                     format!("f{id}")
                 },
                 flags: Vec::new(),
+                confidence: None,
             })
             .collect();
         let store = TreeStore::new(&root);
@@ -1033,6 +1083,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
+                confidence: None,
             })
             .collect();
         (facts, TreeStore::new(&root))
@@ -1238,6 +1289,277 @@ mod tests {
         assert!(!report.truncated);
     }
 
+    // --- C4: agent-asserted confidence ----------------------------------------
+
+    /// Two equal-score facts under a budget that seats exactly one (the
+    /// C4 acceptance shape): the normal-confidence fact survives, the
+    /// `low` fact is the one dropped, and `truncated: true` reports it.
+    /// Pins the sabotage teeth both ways — an inverted preference (low
+    /// wins) or a filter (neither serves) fails here.
+    #[test]
+    fn ranked_tie_break_and_budget_pressure_drop_the_low_fact_first() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        // Two facts with identical query-term content (equal score by
+        // construction: same tf per term, same idf) and equal cost;
+        // filler facts carry none of the vocabulary and push the raw
+        // total over the budget so the serve pass runs.
+        let low_text = "daemon socket retry quota bravo under load";
+        let facts: Vec<FactRecord> = (0..12u64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-18T00:00:00Z".to_owned(),
+                ptr: None,
+                text: match id {
+                    2 => "daemon socket retry quota alpha under load".to_owned(),
+                    6 => low_text.to_owned(),
+                    _ => format!("fact {id}: the overlay tiling stays honest and the budget holds"),
+                },
+                flags: Vec::new(),
+                confidence: (id == 6).then_some(Confidence::Low),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        settle_all(&facts, &store);
+        let query = "daemon socket retry quota under load";
+        let equal_cost = tokens(facts[2].text.len());
+        assert_eq!(tokens(facts[6].text.len()), equal_cost);
+
+        // Budget seats exactly one of the two: the normal one, never the
+        // low one — the preference is pinned, not assumed.
+        let tight = wake(&facts, &store, Some(query), equal_cost + 2, Vec::new())
+            .expect("tight ranked wake");
+        let raw = raw_ids(&tight);
+        assert!(raw.contains(&2), "the normal fact keeps its seat: {raw:?}");
+        assert!(
+            !raw.contains(&6),
+            "the low fact is the dropped one: {raw:?}"
+        );
+        let task = tight.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 1);
+        assert_eq!(task.dropped_scored, 1);
+        assert!(tight.truncated, "the drop is reported");
+
+        // Room for both ⇒ both serve — down-weight, not filter. And the
+        // serve order says the demotion: equal score, normal first, even
+        // though the low fact is the newer id.
+        let roomy = wake(&facts, &store, Some(query), 6 * equal_cost, Vec::new())
+            .expect("roomy ranked wake");
+        let raw = raw_ids(&roomy);
+        assert!(raw.contains(&2) && raw.contains(&6), "both serve: {raw:?}");
+        assert_eq!(
+            &raw[..2],
+            &[2, 6],
+            "normal wins the tie ahead of the newer low"
+        );
+        let task = roomy.task.as_ref().expect("task block");
+        assert_eq!(task.served_scored, 2);
+        assert_eq!(task.dropped_scored, 0);
+        assert!(!roomy.truncated);
+    }
+
+    /// Clemency in the positional pass: the same log, one store with fact
+    /// 10 tagged `low` and one without — the tag alone moves the fact out
+    /// of its raw seat into the coarser (cheaper) block covering it.
+    /// Nothing is dropped: the fact still serves, under a summary.
+    #[test]
+    fn positional_clemency_seats_a_low_fact_one_level_coarser() {
+        let layouts = |low: bool| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path().join(crate::memory::LOCAL_DIR);
+            std::fs::create_dir_all(&root).expect("root");
+            let facts: Vec<FactRecord> = (0..12u64)
+                .map(|id| FactRecord {
+                    v: 1,
+                    id,
+                    ts: "2026-09-14T00:00:00Z".to_owned(),
+                    ptr: None,
+                    text: format!("fact {id}: a real decision worth {id} tokens of context"),
+                    flags: Vec::new(),
+                    confidence: (low && id == 10).then_some(Confidence::Low),
+                })
+                .collect();
+            let store = TreeStore::new(&root);
+            settle_all(&facts, &store);
+            wake(&facts, &store, None, 40, Vec::new()).expect("positional wake")
+        };
+
+        let plain = layouts(false);
+        let demoted = layouts(true);
+
+        // Untagged (the pre-C4 layout): fact 10 is raw, and the [8,12)
+        // region costs a pair summary plus two raw seats.
+        assert!(
+            raw_ids(&plain).contains(&10),
+            "plain layout keeps fact 10 raw: {:?}",
+            raw_ids(&plain)
+        );
+        let tail_cost = |report: &WakeReport| -> u64 {
+            report
+                .items
+                .iter()
+                .filter(|item| match item {
+                    WakeItem::Fact { id, .. } => *id >= 8,
+                    WakeItem::Summary { covers, .. } => covers.0 >= 8,
+                })
+                .map(|item| match item {
+                    WakeItem::Fact { text, .. } | WakeItem::Summary { text, .. } => {
+                        tokens(text.len())
+                    }
+                })
+                .sum()
+        };
+
+        // Tagged: fact 10 is not raw — a summary covers it — and the
+        // region it sits in costs strictly less (the cheaper seat). The
+        // clemency layout also fits the budget without dropping anything
+        // where the plain layout had to truncate the oldest block.
+        let raw = raw_ids(&demoted);
+        assert!(!raw.contains(&10), "clemency moved the low fact: {raw:?}");
+        let covering = demoted.items.iter().any(|item| match item {
+            WakeItem::Summary { covers, .. } => (covers.0..covers.1).contains(&10),
+            _ => false,
+        });
+        assert!(covering, "the low fact still serves, under a summary");
+        assert!(
+            tail_cost(&demoted) < tail_cost(&plain),
+            "cheaper seat: the [8,12) region costs {} tagged vs {} plain",
+            tail_cost(&demoted),
+            tail_cost(&plain)
+        );
+        assert!(!demoted.truncated, "the clemency layout fits un-truncated");
+        assert!(plain.truncated, "the plain layout had to drop the oldest");
+
+        // Everything fits ⇒ clemency is moot: every fact raw, low or not
+        // (the not-filter pin for the positional pass).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let facts: Vec<FactRecord> = (0..12u64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-14T00:00:00Z".to_owned(),
+                ptr: None,
+                text: format!("fact {id}: a real decision worth {id} tokens of context"),
+                flags: Vec::new(),
+                confidence: (id == 10).then_some(Confidence::Low),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        let fits = wake(&facts, &store, None, 100_000, Vec::new()).expect("everything fits");
+        assert!(raw_ids(&fits).contains(&10));
+        assert!(
+            fits.items
+                .iter()
+                .all(|item| matches!(item, WakeItem::Fact { .. }))
+        );
+    }
+
+    /// Pins beat clemency: a locked `low` fact stays raw exactly like any
+    /// lock (the §1.5.2 invariant is untouched by C4), and its payload
+    /// item carries both the flag and the tag.
+    #[test]
+    fn a_locked_low_fact_stays_raw_and_carries_both_marks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let facts: Vec<FactRecord> = (0..12u64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-14T00:00:00Z".to_owned(),
+                ptr: None,
+                text: format!("fact {id}: a real decision worth {id} tokens of context"),
+                flags: if id == 10 {
+                    vec![MemoryFlag::ArchitecturalLock]
+                } else {
+                    Vec::new()
+                },
+                confidence: (id == 10).then_some(Confidence::Low),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        settle_all(&facts, &store);
+
+        let report = wake(&facts, &store, None, 40, Vec::new()).expect("starved positional");
+        let raw = raw_ids(&report);
+        assert_eq!(raw.iter().filter(|&&id| id == 10).count(), 1, "lock raw");
+        for item in &report.items {
+            if let WakeItem::Summary { covers, .. } = item {
+                assert!(
+                    !(covers.0..covers.1).contains(&10),
+                    "no summary over the lock"
+                );
+            }
+        }
+
+        // The payload item carries both marks, and only tagged facts
+        // carry the key at all (append-only: untagged items are the
+        // pre-C4 shape) — checked at a roomy budget where the whole
+        // layout survives, summaries included.
+        let roomy = wake(&facts, &store, None, 60, Vec::new()).expect("roomy positional");
+        let item = roomy
+            .items
+            .iter()
+            .find_map(|item| match item {
+                WakeItem::Fact {
+                    id: 10,
+                    flags,
+                    confidence,
+                    ..
+                } => Some((flags, confidence)),
+                _ => None,
+            })
+            .expect("the locked low fact is served");
+        assert_eq!(*item.0, vec![MemoryFlag::ArchitecturalLock]);
+        assert_eq!(*item.1, Some(Confidence::Low));
+        let json = serde_json::to_value(&roomy).expect("json");
+        for item in json["items"].as_array().expect("items") {
+            if item["id"] == 10 {
+                assert_eq!(item["confidence"], "low");
+                assert_eq!(item["flags"], serde_json::json!(["architectural_lock"]));
+            } else {
+                assert!(
+                    item.get("confidence").is_none(),
+                    "untagged items carry no confidence key: {item}"
+                );
+            }
+        }
+    }
+
+    /// Deterministic with tagged facts in the store: identical inputs,
+    /// byte-identical payloads in both passes.
+    #[test]
+    fn tagged_wakes_are_deterministic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join(crate::memory::LOCAL_DIR);
+        std::fs::create_dir_all(&root).expect("root");
+        let facts: Vec<FactRecord> = (0..16u64)
+            .map(|id| FactRecord {
+                v: 1,
+                id,
+                ts: "2026-09-18T00:00:00Z".to_owned(),
+                ptr: None,
+                text: format!("fact {id}: a real decision worth {id} tokens of context"),
+                flags: Vec::new(),
+                confidence: (id % 3 == 0).then_some(Confidence::Low),
+            })
+            .collect();
+        let store = TreeStore::new(&root);
+        settle_all(&facts, &store);
+        for task in [None, Some("decision worth")] {
+            let a = wake(&facts, &store, task, 90, Vec::new()).expect("wake a");
+            let b = wake(&facts, &store, task, 90, Vec::new()).expect("wake b");
+            assert_eq!(
+                serde_json::to_string(&a).expect("json a"),
+                serde_json::to_string(&b).expect("json b")
+            );
+        }
+    }
+
     // --- property suite (brief F6.8: tiling math) ------------------------------
 
     use proptest::prelude::*;
@@ -1382,6 +1704,99 @@ mod tests {
                     }
                     prop_assert!(lo.is_multiple_of(hi - lo));
                     prop_assert!(hi - lo <= PRESENT_BIAS_ALPHA * (total - hi), "bias [{lo},{hi})");
+                }
+            }
+        });
+    }
+
+    /// The C4 contract over randomized tagged stores: a `low` tag
+    /// down-weights, it never filters. When the budget allows the whole
+    /// log raw, every tagged fact serves raw in BOTH passes (no tier,
+    /// no clemency can hide it); under arbitrary budgets the positional
+    /// pass never leaves a tagged fact unserved while budget remains —
+    /// clemency moves it under a summary, it does not drop it. The bias
+    /// invariant keeps holding for every block that covers no tagged
+    /// fact; a tagged block may sit one level coarser (the documented
+    /// exception), never more.
+    #[test]
+    fn confidence_properties_hold_over_random_tagged_logs() {
+        let config = ProptestConfig::with_cases(24);
+        proptest!(config, |(n in 2u64..24, low_bits in prop::collection::vec(any::<bool>(), 0..24), budget in 1u64..4000)| {
+            let tagged: Vec<u64> = (0..n)
+                .filter(|id| low_bits.get(*id as usize).copied().unwrap_or(false))
+                .collect();
+            if tagged.is_empty() {
+                return Ok(());
+            }
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path().join(crate::memory::LOCAL_DIR);
+            std::fs::create_dir_all(&root).expect("root");
+            let facts: Vec<FactRecord> = (0..n)
+                .map(|id| FactRecord {
+                    v: 1,
+                    id,
+                    ts: "2026-09-18T00:00:00Z".to_owned(),
+                    ptr: None,
+                    text: format!("fact {id}: a real decision worth {id} tokens of context"),
+                    flags: Vec::new(),
+                    confidence: tagged.contains(&id).then_some(Confidence::Low),
+                })
+                .collect();
+            let store = TreeStore::new(&root);
+            settle_all(&facts, &store);
+
+            // Budget allows the whole log raw ⇒ every tagged fact is a
+            // raw item in both passes, each exactly once, each tagged.
+            let raw_total: u64 = facts.iter().map(|f| tokens(f.text.len())).sum();
+            for task in [None, Some("decision worth")] {
+                let fits = wake(&facts, &store, task, raw_total, Vec::new())
+                    .expect("everything fits, both passes");
+                for id in &tagged {
+                    let hits = fits
+                        .items
+                        .iter()
+                        .filter(|item| matches!(item,
+                            WakeItem::Fact { id: fact, confidence: Some(Confidence::Low), .. }
+                                if fact == id))
+                        .count();
+                    prop_assert_eq!(hits, 1, "tagged fact {} raw exactly once under task {:?}", id, task);
+                }
+            }
+
+            // Arbitrary budget, positional: every fact is served (raw or
+            // under a summary) or the payload is honestly truncated — a
+            // tagged fact is never silently singled out.
+            let report = wake(&facts, &store, None, budget, Vec::new()).expect("positional wake");
+            let covered: Vec<u64> = report
+                .items
+                .iter()
+                .flat_map(|item| match item {
+                    WakeItem::Fact { id, .. } => vec![*id],
+                    WakeItem::Summary { covers, .. } => (covers.0..covers.1).collect(),
+                })
+                .collect();
+            if !report.truncated {
+                for id in 0..n {
+                    prop_assert!(covered.contains(&id), "fact {id} unserved without truncation");
+                }
+            }
+
+            // The bias invariant keeps its shape: every block either
+            // satisfies the rule or is exactly one level coarser than a
+            // rule-satisfying block AND covers a tagged fact.
+            let total = n;
+            for item in &report.items {
+                if let WakeItem::Summary { covers, .. } = item {
+                    let (lo, hi) = *covers;
+                    let size = hi - lo;
+                    let age = total - hi;
+                    if size > PRESENT_BIAS_ALPHA * age {
+                        let covers_tagged = tagged.iter().any(|id| (lo..hi).contains(id));
+                        let half_ok =
+                            size / 2 <= PRESENT_BIAS_ALPHA * (total - (lo + size / 2));
+                        prop_assert!(covers_tagged && half_ok,
+                            "block [{lo},{hi}) violates bias beyond the one-level clemency");
+                    }
                 }
             }
         });
