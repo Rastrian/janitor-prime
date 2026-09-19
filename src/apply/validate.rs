@@ -28,7 +28,7 @@ use serde::Serialize;
 use crate::apply::diff::FileEdit;
 use crate::apply::splice::splice_descending;
 use crate::ast::cache::ParseCache;
-use crate::ast::errors::{error_count, error_reports};
+use crate::ast::errors::{error_count, error_reports, unclosed_comment_at_eof};
 use crate::ast::ffi_shim::{Parser, Tree};
 use crate::ast::lang::{LangId, LangRegistry};
 use crate::ast::parse::{parse_snapshot, reparse_edited_multi};
@@ -158,7 +158,14 @@ pub fn validate_one(
     )?;
 
     // Step 7: the whole-file gate.
-    gate(&tree, lang, registry, &op.path, &validated.new_ranges)?;
+    gate(
+        &tree,
+        lang,
+        registry,
+        &op.path,
+        &validated.new_ranges,
+        &new_bytes,
+    )?;
 
     Ok(PreparedFile {
         key: key.clone(),
@@ -172,18 +179,39 @@ pub fn validate_one(
     })
 }
 
-/// The gate (KP-4): `error_count == 0` passes; anything else is
-/// `E_PARSE_INVALID` carrying every offending node with coordinates and
-/// the informational in-edited-range flag.
+/// The gate (KP-4 + the B9 probe): `error_count == 0` AND an honest file
+/// tail pass; anything else is `E_PARSE_INVALID` carrying every offending
+/// node with coordinates and the informational in-edited-range flag, or
+/// `E_PARSE_UNCLOSED_COMMENT` for the class a scanner recovers silently.
 pub fn gate(
     tree: &Tree,
     lang: LangId,
     registry: &LangRegistry,
     path: &str,
     new_ranges: &[Range<usize>],
+    bytes: &[u8],
 ) -> Result<(), ValidateError> {
     let root = tree.root_node();
     if error_count(root) == 0 {
+        // Zero ERROR/MISSING nodes is not the whole truth where a grammar
+        // recovers an unclosed block comment silently (ocaml, measured —
+        // docs/SCHEMA.md): the whole tail becomes one comment node and
+        // nothing errors. Probe the file tail before declaring clean.
+        if let Some(spec) = registry.spec(lang)
+            && let Some(report) =
+                unclosed_comment_at_eof(root, bytes, spec.trivia_kinds(), spec.block_comment())
+        {
+            return Err(ValidateError::UnclosedComment {
+                path: path.to_owned(),
+                lang: spec.name().to_owned(),
+                kind: registry
+                    .kind_name(lang, report.kind_id)
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| "comment".to_owned()),
+                start_byte: report.start_byte,
+                end_byte: report.end_byte,
+            });
+        }
         return Ok(());
     }
     let nodes: Vec<serde_json::Value> = error_reports(root)
@@ -269,7 +297,7 @@ mod tests {
         let clean: Arc<[u8]> = Arc::from(b"fn ok() -> u32 { 1 }\n".as_slice());
         let tree = parse_snapshot(&mut parser, &clean).expect("clean parses");
         let whole = 0..clean.len();
-        assert!(gate(&tree, lang, &registry, "ok.rs", &[whole]).is_ok());
+        assert!(gate(&tree, lang, &registry, "ok.rs", &[whole], &clean).is_ok());
 
         // The KP-4 false-negative shape: delete the `;` of a let — the
         // MISSING node parks at the NEXT statement's start, outside the
@@ -293,7 +321,7 @@ mod tests {
 
         let edited_range = at..at + "let a = 1".len();
         let new_ranges = [edited_range];
-        let err = gate(&tree, lang, &registry, "gate_b.rs", &new_ranges)
+        let err = gate(&tree, lang, &registry, "gate_b.rs", &new_ranges, &new_bytes)
             .expect_err("the MISSING ; must trip the whole-file gate");
         let ValidateError::ParseInvalid { count, nodes } = err else {
             unreachable!("asserted by construction");
@@ -312,6 +340,111 @@ mod tests {
         assert_eq!(node["start_point"]["column"], "    let a = 1".len());
         assert!(node["kind"].is_string() || node.get("kind").is_none());
         assert!(node["end_byte"].as_u64().unwrap_or_default() > 0);
+    }
+
+    /// B9: the ocaml honesty hole, pinned — an unclosed `(*` comment parses
+    /// with ZERO ERROR/MISSING nodes (the scanner swallows the file tail
+    /// silently; docs/SCHEMA.md), and the probe refuses it typedly with the
+    /// offending offset. This test FAILS if the probe is disabled: without
+    /// it the gate returns Ok on a file whose tail was just destroyed.
+    #[test]
+    #[cfg(feature = "lang-ocaml")]
+    fn gate_refuses_the_ocaml_unclosed_comment_false_negative() {
+        let registry = registry();
+        let ml = registry
+            .for_extension("ml")
+            .expect("lang-ocaml registers ocaml");
+        let mut parser = registry.parser(ml).expect("ABI pair");
+
+        let broken: Arc<[u8]> = Arc::from(b"let x = 1\n(* unclosed\nlet y = 2\n".as_slice());
+        let tree = parse_snapshot(&mut parser, &broken).expect("parses (silently)");
+        assert_eq!(
+            error_count(tree.root_node()),
+            0,
+            "the hole: zero ERROR/MISSING on an unclosed comment"
+        );
+        let err = gate(&tree, ml, &registry, "store.ml", &[], &broken)
+            .expect_err("the probe must refuse the silent recovery");
+        let ValidateError::UnclosedComment {
+            path,
+            lang,
+            kind,
+            start_byte,
+            end_byte,
+        } = &err
+        else {
+            unreachable!("asserted by construction");
+        };
+        assert_eq!(path.as_str(), "store.ml");
+        assert_eq!(lang.as_str(), "ocaml");
+        assert_eq!(kind.as_str(), "comment");
+        assert_eq!(*start_byte, 10, "the offset where the comment opened");
+        assert_eq!(*end_byte, broken.len(), "the comment swallows the tail");
+
+        // The typed surface: code + details with the offset.
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_PARSE_UNCLOSED_COMMENT");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({
+                "path": "store.ml",
+                "lang": "ocaml",
+                "kind": "comment",
+                "start_byte": 10,
+                "end_byte": broken.len()
+            }))
+        );
+
+        // The interface grammar shares the scanner (and the hole), and
+        // honest tails still pass: a BALANCED comment ending exactly at
+        // EOF — nested included — is a legal EOF, not a refusal.
+        let mli = registry
+            .for_extension("mli")
+            .expect("lang-ocaml registers ocaml_interface");
+        let mut parser = registry.parser(mli).expect("ABI pair");
+        let iface: Arc<[u8]> = Arc::from(b"val f : int\n(* broken\n".as_slice());
+        let tree = parse_snapshot(&mut parser, &iface).expect("parses silently");
+        assert_eq!(error_count(tree.root_node()), 0);
+        assert!(gate(&tree, mli, &registry, "store.mli", &[], &iface).is_err());
+
+        for clean in [
+            &b"val f : int\n(* a (* b *) *)"[..],
+            &b"(* header *)\nval f : int\n"[..],
+        ] {
+            let bytes: Arc<[u8]> = Arc::from(clean);
+            let tree = parse_snapshot(&mut parser, &bytes).expect("clean .mli parses");
+            assert!(
+                gate(&tree, mli, &registry, "store.mli", &[], &bytes).is_ok(),
+                "balanced comment tails pass: {clean:?}"
+            );
+        }
+    }
+
+    /// B9 control: rust's unclosed block comment is NOT the silent class —
+    /// tree-sitter-rust emits a MISSING `*/` (measured), so the refusal
+    /// stays on the pre-existing `E_PARSE_INVALID` path and the probe never
+    /// weakens it; balanced comments ending at EOF — nested, rust's law —
+    /// pass the probe.
+    #[test]
+    #[cfg(feature = "lang-rust")]
+    fn gate_keeps_rust_unclosed_blocks_on_the_missing_path() {
+        let registry = registry();
+        let lang = registry.for_extension("rs").expect("default feature");
+        let mut parser = registry.parser(lang).expect("ABI pair");
+
+        let broken: Arc<[u8]> = Arc::from(b"fn a() {}\n/* broken\nlet x = 1;\n".as_slice());
+        let tree = parse_snapshot(&mut parser, &broken).expect("recovers with errors");
+        let err = gate(&tree, lang, &registry, "a.rs", &[], &broken)
+            .expect_err("the MISSING */ trips the whole-file gate");
+        assert!(
+            matches!(err, ValidateError::ParseInvalid { .. }),
+            "the probe must not shadow the error-node path: {err:?}"
+        );
+
+        let clean: Arc<[u8]> = Arc::from(b"fn a() {}\n/* nested /* ok */ */".as_slice());
+        let tree = parse_snapshot(&mut parser, &clean).expect("balanced nesting parses");
+        assert_eq!(error_count(tree.root_node()), 0);
+        assert!(gate(&tree, lang, &registry, "a.rs", &[], &clean).is_ok());
     }
 
     /// `validate_one` end to end over a real tempdir file: happy path

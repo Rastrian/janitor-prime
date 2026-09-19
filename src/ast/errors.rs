@@ -21,6 +21,7 @@
 use std::ops::Range;
 
 use crate::ast::ffi_shim::{Node, Point};
+use crate::ast::lang::BlockComment;
 use crate::ast::walk::CursorPool;
 
 /// One ERROR or MISSING node, as copied values (Rule T4a) — the
@@ -97,6 +98,100 @@ fn collect_error_reports(root: Node<'_>, out: &mut Vec<ErrorReport>) {
 pub fn node_count(root: Node<'_>) -> u64 {
     let mut pool = CursorPool::new();
     pool.dfs(root).count() as u64
+}
+
+/// One comment node whose span runs to the file's last byte without a
+/// balancing close delimiter — the unclosed-comment honesty probe's report
+/// (B9). Plain copied values (Rule T4a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnclosedComment {
+    pub kind_id: u16,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+/// The B9 honesty probe, run AFTER the whole-file error gate passes: some
+/// grammars' scanners recover an unclosed block comment silently — ocaml
+/// measured: `(* …` to EOF parses with ZERO ERROR/MISSING nodes and the
+/// entire post-`(*` tail becomes one `comment` node — so `error_count == 0`
+/// is not the whole truth. The probe descends the rightmost spine of nodes
+/// ending exactly at EOF (a scanner that ran out of input consumes to the
+/// last byte, measured) and reports the tail node iff it is a comment-class
+/// node whose text opens the language's block-comment delimiter and never
+/// balances. Line comments (`#`, `//`) cannot be unclosed and never trigger
+/// it; languages without block comments (python, ruby, elixir) are
+/// vacuously clean. Lexing of one case, never semantics (ADR-0017).
+///
+/// Residual, documented (docs/SCHEMA.md): an unclosed *string* containing
+/// the close delimiter inside the unclosed comment (`(* "*)` to EOF) still
+/// balances naively and passes — closing that would mean re-implementing
+/// the grammar's string-in-comment scanner, i.e. a real lexer.
+pub fn unclosed_comment_at_eof(
+    root: Node<'_>,
+    bytes: &[u8],
+    trivia_kinds: &[&str],
+    block: Option<BlockComment>,
+) -> Option<UnclosedComment> {
+    let block = block?;
+    if root.end_byte() != bytes.len() {
+        return None;
+    }
+    // The deepest rightmost node ending exactly at EOF: children are in
+    // document order, so indices scanned from the end find the tail child
+    // in O(1) for every measured shape (the walk is O(depth), not O(n) —
+    // the clean-tree gate stays walk-free plus spine).
+    let mut node = root;
+    loop {
+        let next = (0..node.child_count())
+            .rev()
+            .filter_map(|i| node.child(i))
+            .find(|child| child.end_byte() == bytes.len());
+        match next {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+    if !trivia_kinds.iter().any(|kind| *kind == node.kind()) {
+        return None;
+    }
+    let text = bytes.get(node.start_byte()..node.end_byte())?;
+    if !text.starts_with(block.open) || balances(text, block) {
+        return None;
+    }
+    Some(UnclosedComment {
+        kind_id: node.kind_id(),
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+    })
+}
+
+/// Lexical balance of one block comment's bytes, under the language's own
+/// nesting law: the caller has already matched `block.open` at the start;
+/// nesting languages count opens against closes, first-close languages are
+/// satisfied by the first close (a legal C comment may contain a bare
+/// `/*`). Overlapping-delimiter shapes (`(*)`, `/*/`) land on the
+/// conservative side: no close sequence, no balance.
+fn balances(text: &[u8], block: BlockComment) -> bool {
+    let at = |i: usize, pat: &[u8]| -> bool {
+        text.len() - i >= pat.len() && &text[i..i + pat.len()] == pat
+    };
+    let mut i = block.open.len();
+    let mut depth = 1usize;
+    while i < text.len() {
+        if at(i, block.close) {
+            depth -= 1;
+            if depth == 0 {
+                return true;
+            }
+            i += block.close.len();
+        } else if block.nests && at(i, block.open) {
+            depth += 1;
+            i += block.open.len();
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -366,5 +461,102 @@ mod tests {
         // A range disjoint from every report matches nothing.
         let last_end = reports.iter().map(|r| r.end_byte).max().unwrap_or(0);
         assert!(errors_in_range(tree.root_node(), last_end..dirty.len() + 8).is_empty());
+    }
+
+    /// B9: the probe over the real ocaml grammar — the silent-recovery
+    /// measurement as a fence. An unclosed `(*` parses clean (error_count
+    /// 0) yet the probe reports it, with the node's kind id and span; every
+    /// honest EOF shape (balanced-at-EOF, nested-balanced, closed-then-
+    /// code, unclosed *string* which the grammar DOES error on) reports
+    /// nothing. Fails if the probe is disabled.
+    #[test]
+    #[cfg(feature = "lang-ocaml")]
+    fn ocaml_unclosed_comment_probe_reports_silent_recovery_only() {
+        let registry = crate::ast::lang::LangRegistry::new();
+        let id = registry
+            .for_extension("ml")
+            .expect("lang-ocaml registers ocaml");
+        let mut parser = registry.parser(id).expect("ABI pair");
+        let trivia = registry.spec(id).expect("spec").trivia_kinds();
+        let block = registry.spec(id).expect("spec").block_comment();
+
+        // The hole: silent recovery, zero error nodes — probe reports it.
+        let broken = b"let x = 1\n(* unclosed\nlet y = 2\n";
+        let tree = crate::ast::ffi_shim::parse_bytes(&mut parser, broken, None).expect("tree");
+        assert_eq!(error_count(tree.root_node()), 0, "the measured hole");
+        let report =
+            unclosed_comment_at_eof(tree.root_node(), broken, trivia, block).expect("reported");
+        assert_eq!(report.start_byte, 10);
+        assert_eq!(report.end_byte, broken.len());
+        assert_eq!(
+            registry.kind_name(id, report.kind_id).map(|n| n.as_str()),
+            Some("comment")
+        );
+
+        // Nested unclosed: one open too many — still silent, still reported.
+        let nested = b"let x = 1\n(* a (* b *)\nlet y = 2\n";
+        let tree = crate::ast::ffi_shim::parse_bytes(&mut parser, nested, None).expect("tree");
+        assert_eq!(error_count(tree.root_node()), 0);
+        assert!(unclosed_comment_at_eof(tree.root_node(), nested, trivia, block).is_some());
+
+        // Honest EOFs: balanced at EOF (nested included), a closed comment
+        // mid-file, code tails, and the unclosed STRING class (which this
+        // grammar errors on natively — the probe must stay out of its way).
+        for clean in [
+            &b"let x = 1\n(* a (* b *) *)"[..],
+            &b"(* header *)\nlet y = 2\n"[..],
+            &b"let x = 1\nlet y = 2"[..],
+            &b"let x = \"unclosed\nlet y = 2\n"[..],
+        ] {
+            let tree =
+                crate::ast::ffi_shim::parse_bytes(&mut parser, clean, None).expect("tree parses");
+            assert!(
+                unclosed_comment_at_eof(tree.root_node(), clean, trivia, block).is_none(),
+                "honest tail must not be refused: {clean:?}"
+            );
+        }
+
+        // No block delimiters, no probe: a line-comment tail is vacuously
+        // clean even when the language is disabled-adjacent — python-shaped
+        // bytes under a None block never report.
+        assert!(
+            unclosed_comment_at_eof(tree.root_node(), b"x = 1 # tail", &["comment"], None)
+                .is_none()
+        );
+    }
+
+    /// The lexical balance law, pure and feature-free: nesting languages
+    /// count opens against closes; first-close languages are satisfied by
+    /// the first close (`/* /* */` is a LEGAL C comment); overlapping
+    /// delimiter shapes never balance by accident.
+    #[test]
+    fn block_comment_balance_follows_the_language_law() {
+        use crate::ast::lang::BlockComment;
+
+        // Nesting (ocaml, rust): balanced pairs at any depth.
+        assert!(balances(b"(* ok *)", BlockComment::OCAML));
+        assert!(balances(b"(* a (* b *) *)", BlockComment::OCAML));
+        assert!(balances(b"/* a /* b */ */", BlockComment::RUST));
+        // One open too many, or none closed at all.
+        assert!(!balances(b"(* a (* b *)", BlockComment::OCAML));
+        assert!(!balances(b"(* never closed", BlockComment::OCAML));
+        // Overlaps: `(*)` and `/*/` carry no complete close sequence.
+        assert!(!balances(b"(*)", BlockComment::OCAML));
+        assert!(!balances(b"/*/", BlockComment::C_FAMILY));
+        assert!(balances(b"/**/", BlockComment::C_FAMILY));
+
+        // First-close (C family): a bare inner `/*` is TEXT, not nesting,
+        // and there is no string awareness — the close inside quotes IS
+        // the close (the reference lexers' law too).
+        assert!(balances(b"/* /* */", BlockComment::C_FAMILY));
+        assert!(balances(b"/* \"*/\" x", BlockComment::C_FAMILY));
+        assert!(!balances(b"/* \"*  x", BlockComment::C_FAMILY));
+
+        // The ocaml residual, pinned as a KNOWN limit (documented in
+        // docs/SCHEMA.md): an unclosed string containing the close
+        // delimiter inside the unclosed comment balances naively. A real
+        // fix means re-implementing the grammar's string-in-comment
+        // scanner — a lexer, not a probe.
+        assert!(balances(b"(* \"*)", BlockComment::OCAML));
     }
 }

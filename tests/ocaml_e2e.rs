@@ -14,9 +14,12 @@
 //!    internal calls in `store.ml`, plus the `val` specification in
 //!    `store.mli`) applied atomically, four edits, two files, two
 //!    grammars;
-//! 3. a syntax-breaking diff (an unclosed comment swallowing the rest
-//!    of `store.ml`) refused with `E_PARSE_INVALID` + coordinates, the
-//!    whole diff rolled back;
+//! 3. a syntax-breaking diff (a deleted `in` — a MISSING node) refused
+//!    with `E_PARSE_INVALID` + coordinates, the whole diff rolled back,
+//!    then the B9 leg: an UNCLOSSED `(*` comment (the class this
+//!    grammar's scanner recovers silently — zero error nodes, measured)
+//!    refused by the honesty probe with `E_PARSE_UNCLOSED_COMMENT` +
+//!    the opening offset, rolled back the same;
 //! 4. a pointer note that re-anchors after an edit above moves the
 //!    definition (content-hash match, exact drift).
 
@@ -274,6 +277,42 @@ fn ocaml_agent_loop_scan_apply_refuse_note_reanchor() {
         std::fs::read(dir.join("report.ml")).expect("report.ml"),
         before_report,
         "rollback: the OTHER file's valid edit is not flushed either"
+    );
+
+    // --- apply refused AGAIN: the unclosed-comment hole, the B9 probe -----
+    // The measured false negative this grammar's scanner owns: an edit
+    // that opens `(*` and never closes it recovers SILENTLY — the whole
+    // tail becomes one comment node, errors_after 0 — so the ERROR/MISSING
+    // gate alone would flush it. The B9 lexical honesty probe refuses it
+    // typedly instead (E_PARSE_UNCLOSED_COMMENT + the offset where the
+    // comment opened). This leg fails if the probe is disabled: without
+    // it this diff APPLIES and store.ml loses its tail to a comment.
+    let hole_payload = r#"{"operations":[
+        {"path":"store.ml","edits":[
+            {"start_byte":0,"old_end_byte":0,"new_text":"(* never closed\n"}
+        ]}
+    ]}"#;
+    let before_store = std::fs::read(dir.join("store.ml")).expect("store.ml");
+    let (code, holed) = janitor(dir, &["apply", "--diff", hole_payload]);
+    assert_eq!(code, Some(1), "the probe refuses: {holed}");
+    assert_eq!(holed["ok"], false);
+    assert_eq!(
+        holed["error"]["code"], "E_PARSE_UNCLOSED_COMMENT",
+        "the B9 honesty probe owns this breakage class: {holed}"
+    );
+    let details = &holed["error"]["details"];
+    assert_eq!(details["path"], "store.ml".to_string());
+    assert_eq!(details["lang"], "ocaml".to_string());
+    assert_eq!(details["kind"], "comment".to_string());
+    assert_eq!(details["start_byte"], 0, "the offset where `(*` opened");
+    assert!(
+        details["end_byte"].as_u64().unwrap_or_default() as usize > 10,
+        "the comment swallows the file tail: {holed}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("store.ml")).expect("store.ml"),
+        before_store,
+        "rollback: the silently-broken file is untouched"
     );
 
     // --- note: anchor to the renamed definition's name ---------------------

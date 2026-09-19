@@ -34,6 +34,48 @@ pub mod norm;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LangId(usize);
 
+/// A language's block-comment delimiters — the B9 honesty-probe basis: a
+/// comment node whose span runs to EOF without a balancing `close` is an
+/// unclosed comment the scanner recovered silently (the ocaml measurement),
+/// and lexical balance is decidable from the node's own bytes. This is
+/// lexing of one case, not semantics — ADR-0017's line holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockComment {
+    /// The opening delimiter (`(*` for ocaml, `/*` for the C family).
+    pub open: &'static [u8],
+    /// The closing delimiter (`*)`, `*/`).
+    pub close: &'static [u8],
+    /// Whether the delimiters nest (ocaml, rust — the language's rule) or
+    /// the first `close` wins (the C family). The balance law belongs to
+    /// the language; the probe only applies it.
+    pub nests: bool,
+}
+
+impl BlockComment {
+    /// The C-family shape: `/* … */`, first close wins — a legal C comment
+    /// may contain a bare `/*` (`/* /* */` closes at the `*/`).
+    pub const C_FAMILY: BlockComment = BlockComment {
+        open: b"/*",
+        close: b"*/",
+        nests: false,
+    };
+    /// The rust shape: `/* … */` with nesting (the reference lexer nests;
+    /// tree-sitter-rust additionally emits a MISSING `*/` for the unclosed
+    /// case, so the probe there is belt-and-braces, measured).
+    pub const RUST: BlockComment = BlockComment {
+        open: b"/*",
+        close: b"*/",
+        nests: true,
+    };
+    /// The ocaml shape: `(* … *)` with nesting — the grammar whose scanner
+    /// recovers the unclosed case with ZERO error nodes (measured, B9).
+    pub const OCAML: BlockComment = BlockComment {
+        open: b"(*",
+        close: b"*)",
+        nests: true,
+    };
+}
+
 /// One enabled language: its grammar, its file extensions, and the bundled
 /// fixture corpus its kind table is seeded from (E5).
 pub struct LangSpec {
@@ -45,6 +87,11 @@ pub struct LangSpec {
     /// (ADR-0010; the KP-6-pinned rust table plus the seeded v0.1 tables
     /// for the other grammars — full conformance lands at F9).
     trivia: &'static [&'static str],
+    /// The language's block-comment delimiters, when it has block comments
+    /// (python/ruby/elixir are line-comment-only and cannot be unclosed;
+    /// ruby's `=begin` block form ERRORs when unclosed — measured — so it
+    /// needs no probe). Feeds the B9 unclosed-comment honesty probe.
+    block_comment: Option<BlockComment>,
 }
 
 impl LangSpec {
@@ -67,6 +114,12 @@ impl LangSpec {
     /// (docs/DSL.md §5 carries the same table).
     pub fn trivia_kinds(&self) -> &'static [&'static str] {
         self.trivia
+    }
+
+    /// The language's block-comment delimiters, if it has block comments —
+    /// the B9 unclosed-comment honesty probe's lexical basis.
+    pub fn block_comment(&self) -> Option<BlockComment> {
+        self.block_comment
     }
 }
 
@@ -124,6 +177,7 @@ impl LangRegistry {
             language: ffi_shim::rust_language(),
             fixture: include_str!("lang/fixtures/rust.rs"),
             trivia: &["line_comment", "block_comment"],
+            block_comment: Some(BlockComment::RUST),
         });
         #[cfg(feature = "lang-python")]
         specs.push(LangSpec {
@@ -132,6 +186,7 @@ impl LangRegistry {
             language: ffi_shim::python_language(),
             fixture: include_str!("lang/fixtures/python.py"),
             trivia: &["comment"],
+            block_comment: None, // line comments only (# cannot be unclosed)
         });
         #[cfg(feature = "lang-go")]
         specs.push(LangSpec {
@@ -140,6 +195,7 @@ impl LangRegistry {
             language: ffi_shim::go_language(),
             fixture: include_str!("lang/fixtures/go.go"),
             trivia: &["comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         #[cfg(feature = "lang-javascript")]
         specs.push(LangSpec {
@@ -148,6 +204,7 @@ impl LangRegistry {
             language: ffi_shim::javascript_language(),
             fixture: include_str!("lang/fixtures/javascript.js"),
             trivia: &["comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         #[cfg(feature = "lang-typescript")]
         specs.push(LangSpec {
@@ -161,6 +218,7 @@ impl LangRegistry {
             // comment-class, so ADR-0010's table needs both kinds. The
             // v0.1 seeded table said `comment` only; corrected here.
             trivia: &["comment", "html_comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         // tsx is a second registered language from the same cargo feature
         // (F9b decision, docs/SCHEMA.md "Language support — typescript"):
@@ -177,6 +235,7 @@ impl LangRegistry {
             language: ffi_shim::tsx_language(),
             fixture: include_str!("lang/fixtures/tsx.tsx"),
             trivia: &["comment", "html_comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         #[cfg(feature = "lang-java")]
         specs.push(LangSpec {
@@ -185,6 +244,7 @@ impl LangRegistry {
             language: ffi_shim::java_language(),
             fixture: include_str!("lang/fixtures/java.java"),
             trivia: &["line_comment", "block_comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         #[cfg(feature = "lang-c")]
         specs.push(LangSpec {
@@ -193,6 +253,7 @@ impl LangRegistry {
             language: ffi_shim::c_language(),
             fixture: include_str!("lang/fixtures/c.c"),
             trivia: &["comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
         });
         // Experimental tier (F9c): appended after the stable seven so
         // registry order for any lang-all build is unchanged — the
@@ -204,6 +265,7 @@ impl LangRegistry {
             language: ffi_shim::ruby_language(),
             fixture: include_str!("lang/fixtures/ruby.rb"),
             trivia: &["comment"],
+            block_comment: None, // =begin unclosed ERRORs — measured; # cannot be unclosed
         });
         // One crate, two LangIds (F9c mapping decision): .ml compiles as
         // `ocaml`, .mli as `ocaml_interface`. The crate's third grammar
@@ -216,6 +278,7 @@ impl LangRegistry {
             language: ffi_shim::ocaml_language(),
             fixture: include_str!("lang/fixtures/ocaml.ml"),
             trivia: &["comment"],
+            block_comment: Some(BlockComment::OCAML),
         });
         #[cfg(feature = "lang-ocaml")]
         specs.push(LangSpec {
@@ -224,6 +287,7 @@ impl LangRegistry {
             language: ffi_shim::ocaml_interface_language(),
             fixture: include_str!("lang/fixtures/ocaml_interface.mli"),
             trivia: &["comment"],
+            block_comment: Some(BlockComment::OCAML),
         });
         // Experimental tier (F9d): appended after the stable seven so
         // registry order for any lang-all build is unchanged — the
@@ -238,6 +302,7 @@ impl LangRegistry {
             language: ffi_shim::elixir_language(),
             fixture: include_str!("lang/fixtures/elixir.ex"),
             trivia: &["comment"],
+            block_comment: None, // line comments only
         });
         let kind_tables = specs.iter().map(|_| OnceLock::new()).collect();
         Self { specs, kind_tables }

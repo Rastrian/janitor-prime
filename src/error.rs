@@ -110,6 +110,21 @@ pub enum ValidateError {
         /// TODO(F5): typed node report (path, span, kind, is_missing).
         nodes: Vec<Value>,
     },
+    /// B9: the whole-file gate passed (zero ERROR/MISSING) but the file
+    /// ends inside an unclosed block comment the scanner recovered
+    /// silently — the ocaml class, refused by the lexical honesty probe.
+    #[error(
+        "unclosed block comment at bytes {start_byte}..{end_byte} on {path}: \
+             {lang} {kind} swallows the file tail (scanner recovered silently; \
+             honesty probe refused)"
+    )]
+    UnclosedComment {
+        path: String,
+        lang: String,
+        kind: String,
+        start_byte: usize,
+        end_byte: usize,
+    },
     #[error("flush partially persisted: {summary}")]
     FlushPartial {
         summary: String,
@@ -292,6 +307,7 @@ impl JanitorError {
             Self::Edit(EditError::OutOfRange { .. }) => "E_EDIT_OUT_OF_RANGE",
             Self::Edit(EditError::Payload { .. }) => "E_EDIT_PAYLOAD",
             Self::Validate(ValidateError::ParseInvalid { .. }) => "E_PARSE_INVALID",
+            Self::Validate(ValidateError::UnclosedComment { .. }) => "E_PARSE_UNCLOSED_COMMENT",
             Self::Validate(ValidateError::FlushPartial { .. }) => "E_FLUSH_PARTIAL",
             Self::Memory(MemoryError::PointerDangling { .. }) => "E_POINTER_DANGLING",
             Self::Memory(MemoryError::NapPending { .. }) => "E_NAP_PENDING",
@@ -380,6 +396,19 @@ impl JanitorError {
             Self::Validate(ValidateError::ParseInvalid { nodes, .. }) => {
                 Some(serde_json::json!({ "nodes": nodes }))
             }
+            Self::Validate(ValidateError::UnclosedComment {
+                path,
+                lang,
+                kind,
+                start_byte,
+                end_byte,
+            }) => Some(serde_json::json!({
+                "path": path,
+                "lang": lang,
+                "kind": kind,
+                "start_byte": start_byte,
+                "end_byte": end_byte
+            })),
             Self::Parse(ParseError::SharedTree { count }) => {
                 Some(serde_json::json!({ "strong_count": count }))
             }
