@@ -85,16 +85,21 @@ and kill-point result is [docs/planning/PLAN.md](docs/planning/PLAN.md).
 **Easy install (binary + agent wiring):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Rastrian/janitor-prime/main/scripts/easy-install.sh \
-  | bash -s -- /path/to/your/repo
+gh repo clone Rastrian/janitor-prime ~/.local/share/janitor-prime
+bash ~/.local/share/janitor-prime/scripts/easy-install.sh /path/to/your/repo
 ```
 
-Installs the binary to `~/.local/bin` (or builds from source with
-`--from-source`), runs `janitor init` in the target repo, writes a committed
-`.mcp.json` for Claude Code (project scope — every agent that clones the repo
-inherits the server), and registers the MCP entry for Hermes when the `hermes`
-CLI is present. Docs: **docs/EASY-INSTALL.md** (what it does, per-wiring
-choices, and the two-line agent onboarding both platforms need).
+> The repo is private — the one-liner `curl … | bash` form works once it
+> goes public; while private, clone first (or use `gh repo clone`, which
+> uses your auth) and run the script from the checkout.
+
+Installs the binary to `~/.local/bin` (downloads the musl release, or builds
+from source with `--from-source`), runs `janitor init` in the target repo,
+writes a committed `.mcp.json` for Claude Code (project scope — every agent
+that clones the repo inherits the server), and registers the MCP entry for
+Hermes when the `hermes` CLI is present. Docs: **docs/EASY-INSTALL.md**
+(what it does, per-wiring choices, and the two-line agent onboarding both
+platforms need).
 
 Manual install: download the static binary from
 [releases](https://github.com/Rastrian/janitor-prime/releases)
