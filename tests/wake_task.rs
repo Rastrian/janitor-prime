@@ -1,6 +1,13 @@
 //! C1 acceptance (PLAN-C2C §2, item C1): `wake --task` ranked recall under
 //! budget, through the real binary.
 //!
+//! C1-R (post-KP reform): the ranked pass runs only **below** the task
+//! ceiling (`TASK_BUDGET_CEILING = 350` — the real-store probe measured
+//! 0/10 ranked wins at budget ≥ 400 and 7–8/10 at ≤ 300); at or above it
+//! the wake degrades honestly to the positional payload and says so in
+//! the `task` block. The retrieval fixture therefore runs at budget 300,
+//! inside the ranked regime; the degradation acceptance runs at 2500.
+//!
 //! The fixture is the plan's retrieval shape: 40 facts, realistic one-line
 //! lengths (raw total well over the budget), where the 10 facts carrying
 //! the "daemon socket errors" cluster live in the **oldest** half — the
@@ -22,7 +29,9 @@ const CLUSTER: [u64; 10] = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18];
 /// A lock inside the cluster (score-positive and pinned) and one outside.
 const LOCKS: [u64; 2] = [12, 35];
 const QUERY: &str = "daemon socket errors";
-const BUDGET: u64 = 1500;
+/// Inside the ranked regime (C1-R: the pass runs only below the
+/// task-budget ceiling of 350).
+const BUDGET: u64 = 300;
 
 fn fact(id: u64, text: &str, locked: bool) -> FactRecord {
     FactRecord {
@@ -40,22 +49,19 @@ fn fact(id: u64, text: &str, locked: bool) -> FactRecord {
     }
 }
 
-/// The fixture's deterministic texts: query vocabulary only in the cluster
-/// facts, filler vocabulary everywhere, lengths in the real store's spread
-/// so the log needs compression at budget 1500 (raw total ≈ 2.1k tokens).
+/// The fixture's deterministic texts (C1-R sizing): query vocabulary only
+/// in the cluster facts, filler vocabulary everywhere else, lengths
+/// calibrated so all ten cluster facts fit raw inside budget 300 (below
+/// the task ceiling, where the ranked pass runs) while the 40-fact raw
+/// total (~1.2k tokens) still forces compression. Zero-padded id words
+/// keep no two texts tokenizing identically.
 fn cluster_text(id: u64) -> String {
-    let filler = if id.is_multiple_of(2) {
-        "the overlay txn flush atomic rename fsync budget tiling summary lock span anchor \
-         drift gate keeps the invariant honest across runs"
-    } else {
-        "nap wake log tree cache probe token bytes level rank slot record the payload stays \
-         small and the recall stays honest"
-    };
-    let tail = " with durable decisions worth carrying forward in the log";
+    let filler = "overlay txn flush atomic rename fsync budget tiling summary lock gate \
+                  nap wake log tree cache rank token bytes";
     if CLUSTER.contains(&id) {
-        format!("fact {id}: {QUERY} under load, backoff exhausted, retry {id}; {filler}{tail}")
+        format!("fact {id:02}: {QUERY} under load, backoff retry {id:02}")
     } else {
-        format!("fact {id}: {filler}{tail} — run {id}")
+        format!("fact {id:02}: {filler} — run note {id:02}")
     }
 }
 
@@ -125,10 +131,12 @@ fn raw_ids(payload: &serde_json::Value) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// C1 acceptance (1): the retrieval fixture. `--task` serves ≥ 9 of the 10
-/// cluster facts raw at budget 1500; the budget-matched no-task wake serves
-/// ≤ 3 (it buys summaries of the old blocks). The task block declares the
-/// scorer and the counts, and is absent without the flag.
+/// C1 acceptance (1), the KP probe at fixture scale: `--task` serves ≥ 9
+/// of the 10 cluster facts raw at budget 300 (inside the ranked regime —
+/// this failing also means the ceiling wrongly blocks tight budgets);
+/// the budget-matched no-task wake serves ≤ 3 (it buys summaries of the
+/// old blocks). The task block declares the scorer and the counts, and
+/// is absent without the flag.
 #[test]
 fn ranked_recall_beats_positional_on_the_retrieval_fixture() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -255,4 +263,62 @@ fn a_query_the_store_does_not_carry_serves_nothing_scored() {
     assert_eq!(payload["data"]["truncated"], false);
     // The pinned locks still ride raw.
     assert!(raw_ids(&payload).contains(&LOCKS[0]));
+}
+
+/// C1-R acceptance: above the task ceiling the wake degrades honestly.
+/// At b=2500 the `--task` payload's items are IDENTICAL to the no-task
+/// wake's at the same budget; stripping the `task` block leaves the
+/// no-task payload exactly; the block itself says why
+/// (`degraded: "budget_at_or_above_ceiling"`, nothing scored), and two
+/// runs are byte-identical. Teeth: remove or ignore the ceiling and the
+/// ranked payload diverges from the positional one here; serve ranked
+/// items in the degradation and the same compare fails.
+#[test]
+fn above_the_ceiling_the_task_wake_degrades_to_the_positional_payload() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fixture_store(tmp.path());
+    let budget = 2500u64; // >= TASK_BUDGET_CEILING (350)
+
+    let (code, positional, _) = janitor_wake(tmp.path(), None, budget);
+    assert_eq!(code, Some(0), "positional wake: {positional}");
+    let (code, degraded, degraded_bytes) = janitor_wake(tmp.path(), Some(QUERY), budget);
+    assert_eq!(code, Some(0), "degraded task wake: {degraded}");
+
+    assert_eq!(
+        degraded["data"]["items"], positional["data"]["items"],
+        "the positional items serve verbatim above the ceiling"
+    );
+    assert_eq!(
+        degraded["data"]["estimate"], positional["data"]["estimate"],
+        "the estimate is the positional one"
+    );
+    assert_eq!(
+        degraded["data"]["truncated"], positional["data"]["truncated"],
+        "truncated reverts to the positional meaning"
+    );
+    assert!(
+        positional["data"]["task"].is_null(),
+        "append-only: no task key without --task"
+    );
+
+    let task = &degraded["data"]["task"];
+    assert_eq!(task["query"], QUERY);
+    assert_eq!(task["scorer"], "tfidf-store");
+    assert_eq!(task["degraded"], "budget_at_or_above_ceiling");
+    assert_eq!(task["served_scored"], 0, "nothing was scored");
+    assert_eq!(task["dropped_scored"], 0);
+
+    // The task block is the ONLY difference: strip it and the payloads
+    // compare equal (both sides through serde Value — structural).
+    let mut stripped = degraded["data"].clone();
+    stripped
+        .as_object_mut()
+        .expect("data object")
+        .remove("task");
+    assert_eq!(stripped, positional["data"], "only the task block differs");
+
+    // Deterministic: byte-identical reruns.
+    let (code_b, _, bytes_b) = janitor_wake(tmp.path(), Some(QUERY), budget);
+    assert_eq!(code_b, Some(0));
+    assert_eq!(degraded_bytes, bytes_b, "byte-identical envelopes");
 }
