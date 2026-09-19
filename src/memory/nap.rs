@@ -28,6 +28,7 @@
 use serde::Serialize;
 
 use crate::error::JanitorError;
+use crate::memory::density;
 use crate::memory::log::FactRecord;
 use crate::memory::tree_store::{BlockPlan, BlockSlot, LevelSnapshot, SettleOutcome, TreeStore};
 
@@ -57,6 +58,21 @@ pub struct ChildSummary {
     pub text: String,
 }
 
+/// The C2 density block of a compression request: each source fact's
+/// windowed novelty (against the 64 facts before it *in the log*, not
+/// just the block), index-aligned with `source.facts` — so the
+/// summarizer can see which facts carry information the window already
+/// had and which ones are the block's actual news. Computed at request
+/// time, never stored.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RequestDensity {
+    /// The novelty window length ([`density::NOVELTY_WINDOW`]).
+    pub window: u64,
+    /// One novelty score per source fact, in source order, each in
+    /// `[0, 1]`.
+    pub novelty: Vec<f64>,
+}
+
 /// One pending compression request — everything the agent needs to write
 /// the line, and exactly what an `E_NAP_PENDING` refusal carries.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -71,6 +87,11 @@ pub struct NapRequest {
     pub source: NapSource,
     /// How to write and submit the line.
     pub instruction: String,
+    /// Per-source-fact novelty (C2) — present only on `facts` sources
+    /// (novelty is a fact-level statistic; children sources are built
+    /// from stored summaries, which have no log window of their own).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density: Option<RequestDensity>,
 }
 
 /// The answer to `janitor nap`: the next request, or the settled message.
@@ -168,6 +189,18 @@ pub fn build_request(
             slot = slot.notation()
         ),
     };
+    // C2: per-source-fact novelty, windowed against the whole log (the
+    // block's facts each carry their own history with them). Facts
+    // sources only — see [`RequestDensity`].
+    let request_density = match &source {
+        NapSource::Facts { .. } => Some(RequestDensity {
+            window: density::NOVELTY_WINDOW as u64,
+            novelty: (slot.lo as usize..end as usize)
+                .filter_map(|i| density::novelty_at(facts, i))
+                .collect(),
+        }),
+        NapSource::Children { .. } => None,
+    };
     Ok(Some(NapRequest {
         slot: slot.notation(),
         level: slot.size,
@@ -179,6 +212,7 @@ pub fn build_request(
              Submit: janitor nap --slot {slot} --text \"<summary>\"",
             slot = slot.notation(),
         ),
+        density: request_density,
     }))
 }
 
@@ -302,6 +336,48 @@ mod tests {
         );
         assert!(children[0].text.contains("0-16"));
         assert!(request.instruction.contains("child summaries"));
+    }
+
+    /// C2: requests over raw facts carry each source fact's novelty
+    /// (index-aligned, windowed against the whole log); requests over
+    /// child summaries carry none — novelty is a fact-level statistic.
+    #[test]
+    fn requests_carry_per_fact_novelty_for_facts_sources_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (facts, store) = setup(tmp.path(), 32, &[]);
+
+        let plan = next_pending(&facts, &store).expect("plan");
+        let request = plan.request.expect("first request");
+        assert_eq!(request.slot, "0-2");
+        let density = request.density.expect("facts sources carry density");
+        assert_eq!(density.window, 64);
+        assert_eq!(density.novelty.len(), 2, "index-aligned with source.facts");
+        assert_eq!(density.novelty[0], 1.0, "fact 0 has no precedent");
+        assert!(
+            density
+                .novelty
+                .iter()
+                .all(|score| (0.0..=1.0).contains(score)),
+            "scores stay in [0, 1]"
+        );
+
+        // Follow the protocol to the 0-32 request (children source): the
+        // append-only key is absent, byte-shape unchanged from pre-C2.
+        let mut level32 = None;
+        for _ in 0..200 {
+            let plan = next_pending(&facts, &store).expect("plan");
+            let Some(request) = plan.request else { break };
+            let slot = BlockSlot::parse(&request.slot).expect("slot");
+            if request.level == 32 {
+                level32 = Some(request.clone());
+                break;
+            }
+            settle(&facts, &store, &request.slot, &summary_text(&slot)).expect("settle");
+        }
+        let request = level32.expect("the 0-32 block becomes pending");
+        assert!(request.density.is_none(), "children sources carry none");
+        let json = serde_json::to_value(&request).expect("json");
+        assert!(json.get("density").is_none());
     }
 
     /// Locked facts never enter compression: their slots are never

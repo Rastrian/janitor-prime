@@ -24,6 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{JanitorError, MemoryError, VfsError};
+use crate::memory::density::{self, Density};
 use crate::memory::environment::{self, EnvironmentNotes};
 use crate::memory::log::{self, FactLog, FactRecord, LogWarning, MemoryFlag};
 use crate::memory::nap::{self, NapPlan};
@@ -114,6 +115,11 @@ pub struct NoteReport {
     /// asserted; an append-only key, absent on untagged facts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<log::Confidence>,
+    /// The density signal (C2): this fact's windowed novelty against the
+    /// 64 facts before it, computed from the log at command time — never
+    /// stored (the log stays append-only). Surfaced at write time, the
+    /// moment the agent can still act on redundancy.
+    pub density: Density,
     /// Log-load warnings (a torn tail may have been quarantined first).
     pub warnings: Vec<LogWarning>,
 }
@@ -255,6 +261,14 @@ impl ContextManager {
             confidence,
         };
         self.log().append(&record)?;
+        // C2: novelty against the window that preceded the append —
+        // computed before the fact joins the log's history, from the log
+        // alone, and carried in the report only (never persisted).
+        let window_start = state.facts.len().saturating_sub(density::NOVELTY_WINDOW);
+        let density = Density {
+            novelty: density::novelty_of_text(text, &state.facts[window_start..]),
+            window: density::NOVELTY_WINDOW as u64,
+        };
         Ok(NoteReport {
             appended: true,
             id: record.id,
@@ -264,6 +278,7 @@ impl ContextManager {
             drift: meta.drift,
             flags,
             confidence,
+            density,
             warnings: state.warnings,
         })
     }
@@ -553,6 +568,76 @@ mod tests {
             .append_note(None, AnchorMeta::default(), "no\nlines", false, None)
             .expect_err("multi-line");
         assert_eq!(err.code(), "E_NOTE_INVALID");
+    }
+
+    /// C2: every note report carries the density block — novelty of the
+    /// appended fact against its window, in `[0, 1]`, window 64, computed
+    /// at command time (the log stores no score; recomputing over the
+    /// same log reproduces it).
+    #[test]
+    fn append_note_reports_windowed_density() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mem = manager_in(tmp.path());
+        mem.init(false).expect("init");
+
+        let first = mem
+            .append_note(
+                None,
+                AnchorMeta::default(),
+                "[optmem #1] daemon socket timeout retry attempt failed again later count three",
+                false,
+                None,
+            )
+            .expect("note");
+        assert_eq!(first.density.window, 64);
+        assert_eq!(first.density.novelty, 1.0, "no precedent: fully novel");
+
+        let near = mem
+            .append_note(
+                None,
+                AnchorMeta::default(),
+                "[optmem #2] daemon socket timeout retry attempt failed again later count four",
+                false,
+                None,
+            )
+            .expect("note");
+        assert!(
+            (0.0..=1.0).contains(&near.density.novelty),
+            "novelty stays in [0, 1]"
+        );
+        assert!(
+            near.density.novelty < 0.2,
+            "a near-duplicate reads as redundant: {}",
+            near.density.novelty
+        );
+
+        // The serialized shape: the append-only density key, floats and
+        // window, next to the C4 confidence key's slot.
+        let json = serde_json::to_value(&near).expect("json");
+        assert_eq!(json["density"]["window"], 64);
+        assert!(
+            json["density"]["novelty"]
+                .as_f64()
+                .is_some_and(|n| (0.0..=1.0).contains(&n)),
+            "density.novelty serializes as a number in [0, 1]"
+        );
+
+        // Never stored: the log line carries the fact only — recomputing
+        // from the loaded log reproduces the reported score exactly.
+        let state = mem.log().load().expect("load");
+        assert!(
+            !std::fs::read_to_string(
+                tmp.path()
+                    .join(crate::memory::LOCAL_DIR)
+                    .join(log::LOG_FILE)
+            )
+            .expect("log")
+            .contains("novelty")
+        );
+        assert_eq!(
+            near.density.novelty,
+            crate::memory::density::novelty_at(&state.facts, 1).expect("id 1")
+        );
     }
 
     /// The global layer honors the XDG override and only that surface
