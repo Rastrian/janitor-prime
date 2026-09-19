@@ -226,14 +226,27 @@ fn wake_payload_is_byte_identical_to_the_goldens() {
 /// budget sits just below `wake::TASK_BUDGET_CEILING` so the ranked pass
 /// actually runs — at the old 8192 the wake would (honestly) degrade to
 /// positional and the fence would measure no scoring at all.
+///
+/// The window is repeated and the MINIMUM taken (the C4 fence pattern):
+/// wall time on a loaded CI runner is noise, the structural claim is the
+/// order of magnitude (the C3 regression measured 1.17 s before the
+/// tokenize-once fix and stays ~4x under this bar after it). A single
+/// noisy run on a slow runner flaked the original single-shot assert.
 #[test]
 fn ranked_wake_wall_time_at_20k() {
     let n = 20_000u64;
     let tmp = tempfile::tempdir().expect("tempdir");
     settled_store(tmp.path(), n);
     let budget = wake::TASK_BUDGET_CEILING - 1; // inside the ranked regime
-    let (code, payload, elapsed) = janitor_wake(tmp.path(), Some("daemon socket errors"), budget);
-    assert_eq!(code, Some(0), "ranked wake at {n} facts: {payload}");
+    let mut best = std::time::Duration::from_secs(u64::MAX);
+    let mut payload = serde_json::Value::Null;
+    for _ in 0..3 {
+        let (code, run_payload, elapsed) =
+            janitor_wake(tmp.path(), Some("daemon socket errors"), budget);
+        assert_eq!(code, Some(0), "ranked wake at {n} facts: {run_payload}");
+        best = best.min(elapsed);
+        payload = run_payload;
+    }
     assert_eq!(payload["data"]["task"]["scorer"], "tfidf-store");
     assert!(
         payload["data"]["task"]["degraded"].is_null(),
@@ -241,14 +254,14 @@ fn ranked_wake_wall_time_at_20k() {
     );
     println!(
         "wake --task 'daemon socket errors' --budget {budget}, {n} facts: {:>8} ms \
-         (binary wall time, served_scored {})",
-        elapsed.as_millis(),
+         (binary wall time, best of 3, served_scored {})",
+        best.as_millis(),
         payload["data"]["task"]["served_scored"]
     );
     assert!(
-        elapsed.as_millis() < 1_500,
-        "C1 fence: ranked 20k-fact wake under 1.5 s, measured {} ms",
-        elapsed.as_millis()
+        best.as_millis() < 1_500,
+        "C1 fence: ranked 20k-fact wake under 1.5 s (best of 3), measured {} ms",
+        best.as_millis()
     );
 }
 
