@@ -30,6 +30,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{JanitorError, MemoryError, VfsError};
+use crate::memory::density;
 use crate::memory::log::{FactRecord, LogWarning};
 use crate::vfs::Os;
 
@@ -295,9 +296,11 @@ impl TreeStore {
     /// compressibility (alignment, range, lock-freedom); the dense prefix
     /// (every earlier compressible slot of the level settled); the
     /// children's availability (the two half-size summaries for size ≥ 4 —
-    /// size-2 blocks summarize raw facts, always present). Then either the
-    /// idempotent no-op (same text) or the refusal (different text), or
-    /// the append + fsync.
+    /// size-2 blocks summarize raw facts, always present); the density
+    /// floor (C2 — last, so every protocol refusal above keeps priority
+    /// and the idempotent no-op below never re-judges a stored line).
+    /// Then either the idempotent no-op (same text) or the refusal
+    /// (different text), or the append + fsync.
     pub fn settle(
         &self,
         facts: &[FactRecord],
@@ -344,6 +347,10 @@ impl TreeStore {
                 return Ok(SettleOutcome {
                     slot: slot.notation(),
                     idempotent: true,
+                    // Not re-judged: the line was accepted when it was
+                    // first written — density is a write gate, not a
+                    // standing verdict on stored records.
+                    density_warning: None,
                 });
             }
             return Err(MemoryError::SlotInvalid {
@@ -382,6 +389,17 @@ impl TreeStore {
             }
         }
 
+        // The density floor (C2): the last gate before the write. It sits
+        // below every protocol refusal so those keep priority, and above
+        // the write so a refused line never reaches the file. The
+        // idempotent no-op already returned above — a stored line is
+        // never re-judged, whatever its density.
+        let density_warning = density::floor(
+            &slot.notation(),
+            &facts[lo as usize..(lo + size) as usize],
+            text,
+        )?;
+
         let mut record = [0u8; RECORD_WIDTH];
         record[..text.len()].copy_from_slice(text.as_bytes());
         let path = self.file(size);
@@ -407,6 +425,7 @@ impl TreeStore {
         Ok(SettleOutcome {
             slot: slot.notation(),
             idempotent: false,
+            density_warning,
         })
     }
 }
@@ -484,12 +503,19 @@ thread_local! {
 }
 
 /// The `nap --slot --text` result.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SettleOutcome {
     /// The slot as submitted.
     pub slot: String,
     /// True when the identical text was already stored (idempotent no-op).
     pub idempotent: bool,
+    /// The C2 thin-summary notice — accepted with a warning when the
+    /// summary's distinct-word ratio against its block is below
+    /// [`density::THIN_RATIO`]. Append-only key: absent on dense lines,
+    /// and never present on the idempotent no-op (a stored line is not
+    /// re-judged).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub density_warning: Option<density::DensityWarning>,
 }
 
 /// The summary discipline: one line, ≤ [`MAX_SUMMARY_BYTES`] bytes, no NUL

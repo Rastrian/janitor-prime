@@ -237,11 +237,24 @@ Success:
     "ptr": { "path": "lib.rs", "span": [27, 54],
              "kind_name": "function_item", "content_sha": "2fc7ae9ebd3514a4" },
     "reanchored": true, "drift": 27,
-    "flags": [], "confidence": "low", "warnings": [] } }
+    "flags": [], "confidence": "low",
+    "density": { "novelty": 0.83, "window": 64 },
+    "warnings": [] } }
 ```
 
 `confidence` appears **only** when asserted (append-only key) — an
 untagged note's report is the pre-v0.3 shape exactly.
+
+`density` (v0.3, C2) is the redundancy signal, computed at append time:
+`novelty = 1 − max Jaccard(W(this fact), W(j))` over the `window` = 64
+facts that precede it, where `W` is a fact's distinct lowercase word
+tokens (runs ≥ 2 chars, C1's tokenizer discipline) after a deterministic
+bracket-prefix strip — leading `[…]` groups (`[optmem #N]`, dates) are
+migration boilerplate and are cut before tokenizing. In `[0, 1]`; 1.0
+means nothing in the window looked like this fact, near 0 means the
+window already said it. Nothing is stored — the score is recomputed
+from LOG alone and identical between runs; near-0 novelty is guidance
+to consolidate, never a refusal (`note` always appends).
 
 ### `janitor wake --budget N [--task QUERY]` — budgeted recall
 
@@ -359,12 +372,43 @@ build order (so every proposed block's children are already settled):
     "pending": true, "slot": "0-2", "level": 2, "covers": [0, 2],
     "source": { "kind": "facts", "facts": [ …two FactRecords… ] },
     "instruction": "Write ONE summary line (max 256 bytes, single line) … \
-Submit: janitor nap --slot 0-2 --text \"<summary>\"" } }
+Submit: janitor nap --slot 0-2 --text \"<summary>\"",
+    "density": { "window": 64, "novelty": [1.0, 0.14] } } }
 ```
 
-Blocks with more than 16 facts carry `"kind": "children"` — the two child
-summaries — as source. Summary lines are ≤ 256 bytes, single line
-(`E_SLOT_INVALID` otherwise). Nothing pending:
+`density` (v0.3, C2) appears **only** on `"kind": "facts"` sources:
+each source fact's windowed novelty (the same statistic `note` reports),
+index-aligned with `source.facts`, windowed against the whole log — so
+the summarizer can see which facts carry information the block's
+history already had and which ones are its actual news. Children
+sources are built from stored summaries, which have no log window of
+their own, and carry no `density` key.
+
+**The density floor (v0.3, C2)** — the last gate `nap --text` applies,
+after every protocol check (notation, ordering, children, idempotency)
+and before the write, so those refusals keep priority and an already
+settled line is never re-judged. The binary never scores *meaning*; it
+floors *emptiness*:
+
+- **`E_NAP_LOW_DENSITY`** — a summary with ≤ 3 distinct words
+  (tokenizer above) over a block covering ≥ 8 facts: the placeholder
+  signature (`"Fatos 0-32: "` passed the byte gate on the real
+  migration store; it cannot pass this one). `details` carries the
+  observed counts: `slot`, `distinct_words`, `source_distinct_words`,
+  `covered_facts`.
+- **`density_warning`** — accepted, but the summary's distinct-word
+  ratio against the block's facts is below 0.25: the settle payload
+  carries `"density_warning": {"kind": "nap_low_word_ratio",
+  "message", "distinct_words", "source_distinct_words", "ratio"}`
+  (append-only key, absent otherwise).
+
+**Any summary with ≥ 10 distinct words always passes** — it can be
+thin (warned), never refused — so the agent/nap loop converges by
+construction: rewrite the line with real words and the gate opens.
+Blocks smaller than 8 facts take no refusal at all.
+
+Summary lines are ≤ 256 bytes, single line (`E_SLOT_INVALID`
+otherwise). Nothing pending:
 
 ```json
 { "schema": "janitor.v1", "ok": true, "data": {
@@ -387,6 +431,7 @@ background routine exists, and no LLM lives in the binary.
 | `E_POINTER_DANGLING` | parsed pointer will not anchor (span gone/changed) |
 | `E_COMMIT_INVALID` | commit sha not hex, git missing, or unresolvable |
 | `E_SLOT_INVALID` | slot notation, ordering, idempotency, or summary text discipline |
+| `E_NAP_LOW_DENSITY` | summary ≤ 3 distinct words over ≥ 8 covered facts (the placeholder signature); counts in `details` |
 | `E_NAP_PENDING` | wake needs an unwritten summary; request in `details` |
 | `E_LOG_CORRUPT` | (taxonomy slot) torn-tail corruption events surface as `warnings`, not errors |
 | `E_LOG_UNRECOVERABLE` | corruption before the trailing line — refused, never renumbered |

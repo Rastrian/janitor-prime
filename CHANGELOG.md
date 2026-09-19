@@ -1,6 +1,32 @@
 ## [Unreleased] — v0.3.1 candidates
 
 ### Added
+- **Deterministic novelty score + nap density floor (C2, PLAN-C2C §2)**:
+  the system's first quality metric that is not bytes.
+  `novelty(fact) = 1 − max Jaccard(W(fact), W(j))` over the 64 preceding
+  facts (windowed — full pairwise is O(n²) and declined), `W` = the
+  fact's distinct lowercase word tokens after a deterministic
+  bracket-prefix strip (`[optmem #N]` boilerplate cannot inflate
+  overlap; C1's tokenizer discipline, no regex, no deps). Computed from
+  LOG at command time, never stored — the log stays append-only and the
+  score reproducible from it alone. Two payload surfaces: `note`
+  reports gain `"density": {"novelty", "window"}` (write-time — the
+  agent sees redundancy while it can still act), and nap requests over
+  raw facts carry per-source-fact novelty, index-aligned, so the
+  summarizer knows which facts are the block's actual news. The floor,
+  not a judge: `nap --text` refuses the degenerate case with the typed
+  `E_NAP_LOW_DENSITY` — a summary of ≤ 3 distinct words over a block of
+  ≥ 8 facts, the migration store's "Fatos 0-32: " signature, which
+  passed the byte gate on the real store — and accepts-with-warning
+  below a 0.25 distinct-word ratio against the block
+  (`density_warning` on the settle payload). Any summary with ≥ 10
+  distinct words always passes (pinned): the agent/nap loop converges by
+  construction, and the refusal carries the observed counts. The floor
+  is the last gate in settle — every protocol refusal (ordering,
+  children, idempotency) keeps priority, and the idempotent no-op never
+  re-judges a stored line. Wake payloads carry no C2 surface
+  (byte-identical, goldens pin it).
+- **`note --confidence low` — agent-asserted provenance, down-ranked at
 - **`note --confidence low` — agent-asserted provenance, down-ranked at
   wake (C4, PLAN-C2C §2)**: an optional `"confidence": "low"` field on
   the fact record — a serde field with default, deliberately *not* a

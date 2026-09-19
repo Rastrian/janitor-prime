@@ -179,6 +179,24 @@ pub enum MemoryError {
     /// limit (§1.5.4).
     #[error("slot {slot:?} rejected: {detail}")]
     SlotInvalid { slot: String, detail: String },
+    /// The nap density floor (C2, PLAN-C2C §2): a summary of ≤ 3
+    /// distinct words over a block of ≥ 8 facts — the placeholder
+    /// signature ("Fatos 0-32: ") the real migration store passed the
+    /// byte gate with. A floor, never a judge: any summary with ≥ 10
+    /// distinct words always passes, so the agent/nap loop converges by
+    /// construction. The counts observed are the payload — the agent
+    /// rewrites against numbers, not vibes.
+    #[error(
+        "summary for slot {slot:?} carries {distinct_words} distinct word(s) over \
+         {covered_facts} covered facts (source: {source_distinct_words} distinct) — below the \
+         density floor; any summary with at least 10 distinct words passes"
+    )]
+    NapLowDensity {
+        slot: String,
+        distinct_words: usize,
+        source_distinct_words: usize,
+        covered_facts: usize,
+    },
     #[error("tree store corrupt: {detail}")]
     TreeCorrupt { detail: String },
 }
@@ -286,6 +304,7 @@ impl JanitorError {
             Self::Memory(MemoryError::PointerNotation { .. }) => "E_POINTER_INVALID",
             Self::Memory(MemoryError::CommitInvalid { .. }) => "E_COMMIT_INVALID",
             Self::Memory(MemoryError::SlotInvalid { .. }) => "E_SLOT_INVALID",
+            Self::Memory(MemoryError::NapLowDensity { .. }) => "E_NAP_LOW_DENSITY",
             Self::Memory(MemoryError::TreeCorrupt { .. }) => "E_TREE_CORRUPT",
             Self::Output(OutputError::Serialization(_)) => "E_OUTPUT",
             Self::Output(OutputError::Io(_)) => "E_OUTPUT",
@@ -410,6 +429,17 @@ impl JanitorError {
             Self::Memory(MemoryError::SlotInvalid { slot, detail }) => {
                 Some(serde_json::json!({ "slot": slot, "detail": detail }))
             }
+            Self::Memory(MemoryError::NapLowDensity {
+                slot,
+                distinct_words,
+                source_distinct_words,
+                covered_facts,
+            }) => Some(serde_json::json!({
+                "slot": slot,
+                "distinct_words": distinct_words,
+                "source_distinct_words": source_distinct_words,
+                "covered_facts": covered_facts,
+            })),
             Self::Daemon(DaemonError::Bind { path, detail }) => {
                 Some(serde_json::json!({ "path": path, "detail": detail }))
             }
@@ -600,6 +630,17 @@ mod tests {
                 }
                 .into(),
                 "E_SLOT_INVALID",
+            ),
+            // C2: the density floor — exact code, counts in the details.
+            (
+                MemoryError::NapLowDensity {
+                    slot: "0-32".into(),
+                    distinct_words: 2,
+                    source_distinct_words: 41,
+                    covered_facts: 32,
+                }
+                .into(),
+                "E_NAP_LOW_DENSITY",
             ),
             (
                 MemoryError::TreeCorrupt { detail: "d".into() }.into(),
