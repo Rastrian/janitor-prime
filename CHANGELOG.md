@@ -1,4 +1,11 @@
-## [Unreleased] — v0.3.1 candidates
+## [0.4.0] - 2026-09-18
+
+The C2C release: all four PLAN-C2C items (docs/planning/PLAN-C2C.md) —
+wake I/O batch-load (C3), `wake --task` ranked recall (C1), `note
+--confidence low` (C4), novelty score + nap density floor (C2) —
+derived from "Cache-to-Cache" (arXiv 2510.03215) principles: selection
+over coverage, semantic density over bytes, cost paid at write time,
+provenance as recall weight. Zero new deps, zero ML, zero network.
 
 ### Added
 - **Deterministic novelty score + nap density floor (C2, PLAN-C2C §2)**:
@@ -26,7 +33,6 @@
   children, idempotency) keeps priority, and the idempotent no-op never
   re-judges a stored line. Wake payloads carry no C2 surface
   (byte-identical, goldens pin it).
-- **`note --confidence low` — agent-asserted provenance, down-ranked at
 - **`note --confidence low` — agent-asserted provenance, down-ranked at
   wake (C4, PLAN-C2C §2)**: an optional `"confidence": "low"` field on
   the fact record — a serde field with default, deliberately *not* a
