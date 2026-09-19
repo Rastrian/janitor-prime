@@ -510,16 +510,21 @@ mod tests {
 
         let tiers = &value["tiers"];
         assert_eq!(tiers["stable"], serde_json::json!(STABLE_GRAMMARS));
-        if EXPERIMENTAL_GRAMMARS.is_empty() {
-            assert!(
-                tiers.get("experimental").is_none(),
-                "no experimental grammars: the key is absent, not empty — {value}"
-            );
-        } else {
-            assert_eq!(
-                tiers["experimental"],
-                serde_json::json!(EXPERIMENTAL_GRAMMARS)
-            );
+        // `experimental` appears iff the build carries an experimental
+        // grammar — absence, not an empty array. Matched against a local
+        // copy of the const: the default-feature view would const-fold an
+        // `is_empty` branch (clippy 1.90's const_is_empty; the MSRV leg).
+        let expected_experimental: Vec<&str> = EXPERIMENTAL_GRAMMARS.to_vec();
+        match tiers.get("experimental") {
+            None => assert!(
+                expected_experimental.is_empty(),
+                "experimental grammars {expected_experimental:?} present but the key is absent — {value}"
+            ),
+            Some(list) => assert_eq!(
+                list,
+                &serde_json::json!(expected_experimental),
+                "the experimental tier must serialize exactly its grammar list"
+            ),
         }
 
         // Byte-determinism and append-only key order: the exact string is
