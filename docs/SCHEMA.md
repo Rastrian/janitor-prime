@@ -79,6 +79,10 @@ MISSING token at the *next* statement's start (measured 1/10
 false-negative rate for the localized variant). On failure the typed
 `E_PARSE_INVALID` carries each offending node as JSON (see below);
 `in_edited_range` is informational only — the gate stays whole-file.
+Since v0.4 (B9) a clean re-parse additionally clears a lexical honesty
+probe: the file must not end inside an unclosed block comment (the one
+silent-recovery class a grammar's scanner can own — ocaml, measured;
+refused as `E_PARSE_UNCLOSED_COMMENT`, below).
 
 ## `janitor apply` — the result
 
@@ -120,6 +124,18 @@ the offending nodes with coordinates in the **new** byte coordinates
 `E_FLUSH_PARTIAL`'s `details` is the flush report
 (`{persisted: [path…], removed: [path…], rolled_back: [path…],
 failures: [{path, error}…]}`).
+
+`E_PARSE_UNCLOSED_COMMENT` (v0.4, B9) is the lexical honesty probe's
+refusal: the re-parse had **zero** ERROR/MISSING nodes, but the file
+ends inside an unclosed block comment the grammar's scanner recovered
+silently (the ocaml class — see the OCaml section). `details` carries
+`path`, `lang`, `kind`, and the comment's byte span — `start_byte` is
+where the comment opened:
+
+```json
+{ "path": "store.ml", "lang": "ocaml", "kind": "comment",
+  "start_byte": 0, "end_byte": 512 }
+```
 
 ## `content_sha`
 
@@ -769,14 +785,23 @@ per-language facts a consumer needs.
 - **Trivia** (ADR-0010): `["comment"]` for both LangIds, measured in
   `tests/kp6_ocaml.rs` — byte-strict loses 20.0% of top-level binding
   pairs and 33.3% of val-specification pairs on the bundled corpus.
-- **Apply gate caveat** (measured in `tests/ocaml_e2e.rs`): the
-  whole-file re-parse gate is ERROR/MISSING-node based, and this
-  grammar's scanner recovers an **unclosed comment** silently
-  (`(* … ` to EOF parses with zero ERROR nodes) — that breakage class
-  is NOT caught for ocaml. Deleting mandatory tokens (`in`, `let`, `=`)
-  IS caught (MISSING nodes) and is what the e2e refusal demonstrates.
-  ADR-0010's equivalence semantics otherwise generalize unchanged;
-  this is the one per-language caveat the experimental tier records.
+- **Apply gate + the B9 honesty probe** (measured in
+  `tests/ocaml_e2e.rs`): this grammar's scanner recovers an **unclosed
+  comment** silently — `(* …` to EOF parses with zero ERROR/MISSING
+  nodes and the entire post-`(*` tail becomes one `comment` node — so
+  the ERROR/MISSING gate alone would flush such a breakage (v0.2–v0.3's
+  one documented false negative). Since v0.4 (B9) the gate runs a
+  lexical honesty probe after the clean re-parse: a comment-class node
+  ending exactly at EOF whose text never balances the delimiters
+  (nesting-aware, ocaml's law) is refused with
+  `E_PARSE_UNCLOSED_COMMENT` + the opening offset. Deleting mandatory
+  tokens (`in`, `let`, `=`) stays on the MISSING-node path
+  (`E_PARSE_INVALID`). **Residual, known:** an unclosed *string*
+  containing `*)` inside the unclosed comment (`(* "*)` to EOF) still
+  balances naively and passes — closing that would mean re-implementing
+  the grammar's string-in-comment scanner (a lexer, out of posture;
+  ADR-0010's equivalence semantics and ADR-0017's no-semantics line
+  otherwise generalize unchanged).
 
 ## The daemon (F10a, v0.2) — `janitor daemon` and the socket protocol
 

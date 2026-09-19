@@ -3,9 +3,10 @@
 //! `[build-dependencies]` is empty).
 //!
 //! Writes `$OUT_DIR/grammars.rs` defining `ENABLED_GRAMMARS: &[&str]` in
-//! registry order. With no language features enabled the list is empty and
-//! `--version` reports `"grammars": []` — an honest build fingerprint, not an
-//! error.
+//! registry order, plus the B9 tier split of that list
+//! (`STABLE_GRAMMARS`/`EXPERIMENTAL_GRAMMARS`). With no language features
+//! enabled the list is empty and `--version` reports `"grammars": []` — an
+//! honest build fingerprint, not an error.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::env;
@@ -13,25 +14,27 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
-/// Grammar name -> cargo env var set when its feature is enabled.
-/// Order is the canonical registry order surfaced by `--version`.
-/// tsx maps to the same env var as typescript: one cargo feature
-/// registers two grammars (the crate bundles both; F9b decision).
-const GRAMMAR_FEATURES: &[(&str, &str)] = &[
-    ("rust", "CARGO_FEATURE_LANG_RUST"),
-    ("python", "CARGO_FEATURE_LANG_PYTHON"),
-    ("go", "CARGO_FEATURE_LANG_GO"),
-    ("javascript", "CARGO_FEATURE_LANG_JAVASCRIPT"),
-    ("typescript", "CARGO_FEATURE_LANG_TYPESCRIPT"),
-    ("tsx", "CARGO_FEATURE_LANG_TYPESCRIPT"),
-    ("java", "CARGO_FEATURE_LANG_JAVA"),
-    ("c", "CARGO_FEATURE_LANG_C"),
+/// Grammar name -> cargo env var set when its feature is enabled, plus
+/// the grammar's tier (B9: stable vs experimental — the promotion state
+/// docs/PROMOTION.md gates). Order is the canonical registry order
+/// surfaced by `--version`. tsx maps to the same env var as typescript:
+/// one cargo feature registers two grammars (the crate bundles both; F9b
+/// decision).
+const GRAMMAR_FEATURES: &[(&str, &str, bool)] = &[
+    ("rust", "CARGO_FEATURE_LANG_RUST", true),
+    ("python", "CARGO_FEATURE_LANG_PYTHON", true),
+    ("go", "CARGO_FEATURE_LANG_GO", true),
+    ("javascript", "CARGO_FEATURE_LANG_JAVASCRIPT", true),
+    ("typescript", "CARGO_FEATURE_LANG_TYPESCRIPT", true),
+    ("tsx", "CARGO_FEATURE_LANG_TYPESCRIPT", true),
+    ("java", "CARGO_FEATURE_LANG_JAVA", true),
+    ("c", "CARGO_FEATURE_LANG_C", true),
     // Experimental tier (F9c+F9d): surfaced by --version the same way, but
     // NOT part of lang-all (ADR-0015 appended note) — the stable-set fence.
-    ("ruby", "CARGO_FEATURE_LANG_RUBY"),
-    ("ocaml", "CARGO_FEATURE_LANG_OCAML"),
-    ("ocaml_interface", "CARGO_FEATURE_LANG_OCAML"),
-    ("elixir", "CARGO_FEATURE_LANG_ELIXIR"),
+    ("ruby", "CARGO_FEATURE_LANG_RUBY", false),
+    ("ocaml", "CARGO_FEATURE_LANG_OCAML", false),
+    ("ocaml_interface", "CARGO_FEATURE_LANG_OCAML", false),
+    ("elixir", "CARGO_FEATURE_LANG_ELIXIR", false),
 ];
 
 fn cargo_error(message: &str) {
@@ -50,11 +53,24 @@ fn main() {
 
     let enabled: Vec<&str> = GRAMMAR_FEATURES
         .iter()
-        .filter(|(_, flag)| {
+        .filter(|(_, flag, _)| {
             println!("cargo:rerun-if-env-changed={flag}");
             env::var_os(flag).is_some()
         })
-        .map(|(name, _)| *name)
+        .map(|(name, _, _)| *name)
+        .collect();
+
+    // The tier split of the enabled set (B9): each list is registry order
+    // and their concatenation IS `ENABLED_GRAMMARS` — pinned by test.
+    let stable: Vec<&str> = GRAMMAR_FEATURES
+        .iter()
+        .filter(|(name, _, stable)| *stable && enabled.contains(name))
+        .map(|(name, _, _)| *name)
+        .collect();
+    let experimental: Vec<&str> = GRAMMAR_FEATURES
+        .iter()
+        .filter(|(name, _, stable)| !*stable && enabled.contains(name))
+        .map(|(name, _, _)| *name)
         .collect();
 
     let mut source = String::new();
@@ -62,6 +78,20 @@ fn main() {
     source.push_str("// Enabled grammar features, canonical registry order (PLAN \u{a7}3 F0.3).\n");
     source.push_str("pub const ENABLED_GRAMMARS: &[&str] = &[\n");
     for name in &enabled {
+        source.push_str(&format!("    {name:?},\n"));
+    }
+    source.push_str("];\n");
+    source.push_str("// Tier split of the enabled set (B9, docs/PROMOTION.md): stable is\n");
+    source.push_str("// the lang-all fence set; experimental is ruby/ocaml/elixir until a\n");
+    source.push_str("// language passes the promotion checklist. stable ++ experimental ==\n");
+    source.push_str("// ENABLED_GRAMMARS, registry order, both directions.\n");
+    source.push_str("pub const STABLE_GRAMMARS: &[&str] = &[\n");
+    for name in &stable {
+        source.push_str(&format!("    {name:?},\n"));
+    }
+    source.push_str("];\n");
+    source.push_str("pub const EXPERIMENTAL_GRAMMARS: &[&str] = &[\n");
+    for name in &experimental {
         source.push_str(&format!("    {name:?},\n"));
     }
     source.push_str("];\n");

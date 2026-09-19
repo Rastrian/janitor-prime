@@ -200,6 +200,14 @@ jobs:
             and .ok == true
             and .data.grammars == ["rust","ruby","ocaml","ocaml_interface","elixir"]
           '
+      - name: "--version tiers split stable from experimental"
+        # B9: the tier key is the promotion state made visible — the
+        # experimental leg's build must NOT list its grammars as stable.
+        run: |
+          ./target/debug/janitor --version | jq -e '
+            .data.tiers.stable == ["rust"]
+            and .data.tiers.experimental == ["ruby","ocaml","ocaml_interface","elixir"]
+          '
 
   musl-smoke:
     name: musl static build smoke (best-effort)

@@ -136,6 +136,16 @@ jobs:
             and .ok == true
             and (.data.grammars | length == 8)
           '
+      - name: "Smoke: tiers list all eight as stable, none experimental"
+        if: ${{ matrix.smoke == 'run' }}
+        # B9 append-only companion to the grammars fence above: the release
+        # build is lang-all, so every grammar is stable and the
+        # experimental key is ABSENT (docs/PROMOTION.md gates any change).
+        run: |
+          "target/$TARGET/release/janitor" --version | jq -e '
+            (.data.tiers.stable | length == 8)
+            and (.data.tiers | has("experimental") | not)
+          '
       - name: "Smoke: cross artifact (not executable on this runner)"
         if: ${{ matrix.smoke == 'file' }}
         # aarch64-musl on the x86_64 ubuntu runner: no emulation is

@@ -22,13 +22,29 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/grammars.rs"));
 }
 
-pub use generated::ENABLED_GRAMMARS;
+pub use generated::{ENABLED_GRAMMARS, EXPERIMENTAL_GRAMMARS, STABLE_GRAMMARS};
 
-/// Payload of the `--version` envelope (PLAN §3 F0.2).
+/// The tier split of a build's grammar set (B9): which enabled grammars
+/// are stable (the lang-all fence set) and which are experimental (not
+/// yet through docs/PROMOTION.md's checklist). Append-only sibling of the
+/// flat `grammars` list — that list is untouched.
+#[derive(Debug, Serialize)]
+pub struct VersionTiers {
+    pub stable: &'static [&'static str],
+    /// Absent when the build carries no experimental grammar (an empty
+    /// array would read as "a tier that happens to be empty"; absence is
+    /// the honest "this build has no experimental grammars").
+    #[serde(skip_serializing_if = "<[&str]>::is_empty")]
+    pub experimental: &'static [&'static str],
+}
+
+/// Payload of the `--version` envelope (PLAN §3 F0.2; `tiers` appended at
+/// B9 — `version` and `grammars` are byte-stable, key order included).
 #[derive(Debug, Serialize)]
 pub struct VersionData {
     pub version: &'static str,
     pub grammars: &'static [&'static str],
+    pub tiers: VersionTiers,
 }
 
 #[derive(Debug, Parser)]
@@ -425,6 +441,102 @@ mod tests {
                 "unknown grammar {grammar:?} embedded by build.rs"
             );
         }
+    }
+
+    /// B9: the `tiers` key is the append-only tier split of `grammars` —
+    /// stable holds exactly the enabled stable-set grammars, experimental
+    /// exactly the enabled experimental ones, and the two lists partition
+    /// `grammars` in registry order. This FAILS if any experimental
+    /// grammar is listed as stable (or vice versa), in any feature combo:
+    /// the expected tier of every grammar name is pinned here against the
+    /// build's actual split.
+    #[test]
+    fn version_tiers_split_grammars_by_promotion_state() {
+        for (name, stable_expected) in [
+            ("rust", true),
+            ("python", true),
+            ("go", true),
+            ("javascript", true),
+            ("typescript", true),
+            ("tsx", true),
+            ("java", true),
+            ("c", true),
+            ("ruby", false),
+            ("ocaml", false),
+            ("ocaml_interface", false),
+            ("elixir", false),
+        ] {
+            let enabled = ENABLED_GRAMMARS.contains(&name);
+            assert_eq!(
+                STABLE_GRAMMARS.contains(&name),
+                enabled && stable_expected,
+                "{name}: stable-tier membership must follow the promotion state"
+            );
+            assert_eq!(
+                EXPERIMENTAL_GRAMMARS.contains(&name),
+                enabled && !stable_expected,
+                "{name}: experimental-tier membership must follow the promotion state"
+            );
+        }
+        // Partition, registry order, both directions: no grammar vanishes
+        // from the split and none is counted twice.
+        let mut joined = STABLE_GRAMMARS.to_vec();
+        joined.extend_from_slice(EXPERIMENTAL_GRAMMARS);
+        assert_eq!(joined, ENABLED_GRAMMARS);
+        assert!(
+            STABLE_GRAMMARS
+                .iter()
+                .all(|g| !EXPERIMENTAL_GRAMMARS.contains(g))
+        );
+    }
+
+    /// B9: the serialized `--version` payload — `tiers` is a NEW key after
+    /// the byte-stable `version`/`grammars` pair; `experimental` appears
+    /// iff the build carries an experimental grammar; the bytes are
+    /// deterministic run to run (the pin-check fence relies on it).
+    #[test]
+    fn version_data_serializes_tiers_append_only_and_deterministically() {
+        let data = VersionData {
+            version: env!("CARGO_PKG_VERSION"),
+            grammars: ENABLED_GRAMMARS,
+            tiers: VersionTiers {
+                stable: STABLE_GRAMMARS,
+                experimental: EXPERIMENTAL_GRAMMARS,
+            },
+        };
+        let value = serde_json::to_value(&data).expect("serializes");
+        assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["grammars"], serde_json::json!(ENABLED_GRAMMARS));
+
+        let tiers = &value["tiers"];
+        assert_eq!(tiers["stable"], serde_json::json!(STABLE_GRAMMARS));
+        // `experimental` appears iff the build carries an experimental
+        // grammar — absence, not an empty array. Matched against a local
+        // copy of the const: the default-feature view would const-fold an
+        // `is_empty` branch (clippy 1.90's const_is_empty; the MSRV leg).
+        let expected_experimental: Vec<&str> = EXPERIMENTAL_GRAMMARS.to_vec();
+        match tiers.get("experimental") {
+            None => assert!(
+                expected_experimental.is_empty(),
+                "experimental grammars {expected_experimental:?} present but the key is absent — {value}"
+            ),
+            Some(list) => assert_eq!(
+                list,
+                &serde_json::json!(expected_experimental),
+                "the experimental tier must serialize exactly its grammar list"
+            ),
+        }
+
+        // Byte-determinism and append-only key order: the exact string is
+        // stable across serializations, `tiers` trailing.
+        let a = serde_json::to_string(&data).expect("serializes");
+        let b = serde_json::to_string(&data).expect("serializes");
+        assert_eq!(a, b);
+        assert!(
+            a.find("\"grammars\":")
+                .is_some_and(|g| a.find("\"tiers\":").is_some_and(|t| g < t)),
+            "tiers is the new trailing key: {a}"
+        );
     }
 
     #[test]
