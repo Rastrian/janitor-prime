@@ -155,7 +155,7 @@ pub fn novelty_of_text(text: &str, window: &[FactRecord]) -> f64 {
 /// [`NOVELTY_WINDOW`] facts before index `i`, per the log (not the
 /// block) it lives in. `None` when `i` is out of range.
 pub fn novelty_at(facts: &[FactRecord], i: usize) -> Option<f64> {
-    let start = i.checked_sub(NOVELTY_WINDOW).unwrap_or(0);
+    let start = i.saturating_sub(NOVELTY_WINDOW);
     facts
         .get(i)
         .map(|fact| novelty_of_text(&fact.text, &facts[start..i]))
@@ -262,8 +262,8 @@ mod tests {
     fn empty_word_sets_and_windows_follow_the_documented_conventions() {
         let wordless = fact(0, "9");
         let wordful = fact(1, "daemon socket timeout");
-        assert_eq!(novelty_of_text("7", &[wordless.clone()]), 0.0);
-        assert_eq!(novelty_of_text("7", &[wordful]), 1.0);
+        assert_eq!(novelty_of_text("7", std::slice::from_ref(&wordless)), 0.0);
+        assert_eq!(novelty_of_text("7", std::slice::from_ref(&wordful)), 1.0);
         assert_eq!(novelty_of_text("anything at all", &[]), 1.0);
     }
 
@@ -334,20 +334,19 @@ mod tests {
             .collect();
 
         let err = floor("0-32", &block, "Fatos 0-32: ").expect_err("the placeholder is refused");
-        match &err {
-            MemoryError::NapLowDensity {
-                slot,
-                distinct_words,
-                source_distinct_words,
-                covered_facts,
-            } => {
-                assert_eq!(*slot, "0-32");
-                assert_eq!(*distinct_words, 2, "'fatos' + '32'");
-                assert!(*source_distinct_words > 10);
-                assert_eq!(*covered_facts, 32);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
+        let MemoryError::NapLowDensity {
+            slot,
+            distinct_words,
+            source_distinct_words,
+            covered_facts,
+        } = &err
+        else {
+            unreachable!("the floor refuses with NapLowDensity, got {err:?}");
+        };
+        assert_eq!(*slot, "0-32");
+        assert_eq!(*distinct_words, 2, "'fatos' + '32'");
+        assert!(*source_distinct_words > 10);
+        assert_eq!(*covered_facts, 32);
         assert_eq!(
             crate::error::JanitorError::from(err).code(),
             "E_NAP_LOW_DENSITY"
