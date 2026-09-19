@@ -48,11 +48,15 @@ ladder, but fenced OUT of `lang-all` and the main gates matrix
 (ruby `.rb`; ocaml `.ml` + `.mli` as two languages — `ocaml` and
 `ocaml_interface`; elixir `.ex` + `.exs` as one `elixir` language — the
 extension split is script-vs-compile at the BEAM level, not a syntax
-split). CI runs the whole tier in one dedicated job. Promotion to the
-stable set requires full trivia-corpus curation; the measured
-per-language caveats (ruby's `heredoc_body` parking between statements;
-ocaml's right-nested `let..in` chains; elixir's `call`-shaped def
-clauses) are documented in docs/DSL.md §12–§15 and docs/SCHEMA.md.
+split). CI runs the whole tier in one dedicated job, and `--version`
+reports the split (`tiers.experimental`). Promotion to the stable set
+follows the measurable checklist in **docs/PROMOTION.md** (curated
+trivia corpus, determinism leg, apply-gate honesty probes including the
+unclosed-comment case, norm table + documented caveats, dedicated CI
+leg, dogfood sign-off); the measured per-language caveats (ruby's
+`heredoc_body` parking between statements; ocaml's right-nested
+`let..in` chains; elixir's `call`-shaped def clauses) are documented in
+docs/DSL.md §12–§15 and docs/SCHEMA.md.
 
 **F10a (v0.2): the warm-cache daemon.** `janitor daemon` runs a long-lived
 process over one workspace: a Unix-socket server (`$JANITOR_SOCK` or
@@ -86,10 +90,13 @@ cargo build --release          # rust grammar (default)
 cargo build --release --features lang-all   # all 8 grammars
 ```
 
-Every release artifact answers `--version` with the embedded grammar list:
+Every release artifact answers `--version` with the embedded grammar list
+and its tier split (`tiers` is the B9 append-only key — stable vs
+experimental, the promotion state `docs/PROMOTION.md` gates; the
+`experimental` key is absent in builds that carry none):
 
 ```json
-{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","tsx","java","c"]}}
+{"schema":"janitor.v1","ok":true,"data":{"version":"0.1.0","grammars":["rust","python","go","javascript","typescript","tsx","java","c"],"tiers":{"stable":["rust","python","go","javascript","typescript","tsx","java","c"]}}}
 ```
 
 ## Use cases

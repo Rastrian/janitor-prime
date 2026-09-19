@@ -27,6 +27,10 @@ fn main() -> ExitCode {
         let data = VersionData {
             version: env!("CARGO_PKG_VERSION"),
             grammars: cli::ENABLED_GRAMMARS,
+            tiers: cli::VersionTiers {
+                stable: cli::STABLE_GRAMMARS,
+                experimental: cli::EXPERIMENTAL_GRAMMARS,
+            },
         };
         return cli::emit(&Envelope::ok(data), cli.pretty, EXIT_SUCCESS);
     }
