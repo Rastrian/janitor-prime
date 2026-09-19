@@ -82,6 +82,17 @@ mechanism, with testable acceptance per item.
   scorer): ranked wake serves more labeled facts than position wake at
   equal budget on ≥ 7 of 10 — else the ranked pass is not earning its
   contract surface and C1 is killed (the no-task path remains).
+- **Post-script (2026-09-19, C1-R — the KP ran; item reformed by the
+  owner's decision):** measured on the real store (448 facts, 10 labeled
+  probes): ranked wake 0/10 wins vs positional at budget ≥ 400 and
+  7–8/10 wins at budget ≤ 300 — above the crossover the positional
+  layout already covers ~100% of the facts via summaries (coverage is
+  not ranking; recency never entered the score; a token-share fact
+  loses its raw seat anyway). Decision: the ranked pass runs only below
+  `TASK_BUDGET_CEILING = 350` tokens; at or above the ceiling the CLI
+  warns in-band (`task.degraded = "budget_at_or_above_ceiling"`, zero
+  counts) and serves the positional payload. Measurement: /tmp probes
+  of the dogfooding session; numbers recorded in the CHANGELOG.
 
 ### C2. Deterministic novelty score + nap density floor *(code)*
 - **Problem (P2):** the system's only quality metric is bytes. `nap`

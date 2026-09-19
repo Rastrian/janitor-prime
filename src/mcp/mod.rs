@@ -712,9 +712,10 @@ fn tool_specs() -> Vec<Value> {
             "title": "janitor wake",
             "description": "Recall janitor memory under a token budget: raw facts and \
         summaries, oldest-first, plus standing guidance and last-run state (docs/SCHEMA.md, wake). \
-        With task: a ranked pass — the best-scoring facts are served raw first (scorer \
-        tfidf-store). On E_NAP_PENDING the result carries the pending compression request — act \
-        on it via janitor_nap, then wake again.",
+        With task: a ranked pass below the 350-token ceiling — the best-scoring facts are served \
+        raw first (scorer tfidf-store); at or above it the positional payload serves and the \
+        task block reports the degradation (C1-R). On E_NAP_PENDING the result carries the \
+        pending compression request — act on it via janitor_nap, then wake again.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

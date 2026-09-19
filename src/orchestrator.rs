@@ -161,7 +161,8 @@ impl Session {
     }
 
     /// `janitor wake --budget N [--task QUERY]` (the ranked pass when
-    /// `task` is given, C1).
+    /// `task` is given below the task ceiling, the honest positional
+    /// degradation at or above it — C1/C1-R).
     pub fn wake(&self, budget: u64, task: Option<&str>) -> Result<WakePayload, JanitorError> {
         self.mem.wake(budget, task)
     }

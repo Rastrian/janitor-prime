@@ -1,3 +1,36 @@
+## [Unreleased]
+
+### Changed
+- **`wake --task` task-budget ceiling + honest degradation (C1-R,
+  PLAN-C2C §2 C1 post-script)**: the C1 kill-point probe finally ran —
+  on the real store (2026-09-19, 448 facts, 10 hand-labeled queries,
+  ranked vs positional at equal budget) the ranked pass **lost** at
+  high budget: 0/10 wins at budget ≥ 400, 7–8/10 wins only at
+  budget ≤ 300 (crossover between 300 and 400). Above the crossover
+  the positional layout already covers ~100% of the facts via
+  summaries — coverage is not ranking (and recency never entered the
+  score; a token-share fact loses its raw seat anyway). Owner's
+  decision: the ranked pass now runs only below
+  `TASK_BUDGET_CEILING = 350` (chars4 tokens, `src/memory/wake.rs`);
+  at or above the ceiling `--task` serves the **positional** payload
+  and reports the state in-band instead of pretending to rank —
+  append-only `"degraded": "budget_at_or_above_ceiling"` in the `task`
+  block, `served_scored`/`dropped_scored` 0 (nothing was scored),
+  `truncated` back to its positional meaning. Below the ceiling the
+  ranked pass is byte-identical to v0.4.0; without `--task` nothing
+  changed at all (positional goldens untouched).
+- **Golden class change (deliberate)**:
+  `tests/fixtures/wake/wake_task_golden_439_b8192.json` regenerated as
+  the degraded-positional payload (b8192 ≥ 350 routes to the
+  degradation); the ranked pass is now pinned by the new
+  `wake_task_golden_439_b300.json`. The retrieval acceptance fixture
+  moved from budget 1500 to 300 (inside the ranked regime; texts
+  recalibrated so the cluster still fits raw), and the C1 20k
+  wall-time fence measures at budget 349 — at 8192 it would measure no
+  scoring. Ceiling teeth verified by sabotage: ceiling removed fails
+  the degradation tests; ceiling blocking low budgets fails the
+  ranked-at-300 tests.
+
 ## [0.4.0] - 2026-09-18
 
 The C2C release: all four PLAN-C2C items (docs/planning/PLAN-C2C.md) —
