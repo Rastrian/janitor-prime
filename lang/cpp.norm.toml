@@ -1,0 +1,37 @@
+# Normalized-vocabulary table (PLAN §1.4.2): the four global-rule
+# classes mapped to this grammar's concrete kind names. This is the file
+# `share/GLOBAL.md`'s generic heuristics are phrased over — keep it tiny;
+# anything richer than FUNCTION/IDENT/LITERAL/BLOCK is post-v0.2.
+#
+# STABLE (docs/PROMOTION.md C1-C6 — cpp is the first language promoted
+# through the full checklist; tier flip in build.rs rides the same lane).
+#
+# Kind-name source (cite-on-edit): tree-sitter-cpp 0.23.4
+# `src/node-types.json` (vendored in the grammar crate), verified
+# 2026-09-20. Every entry must resolve through `LangRegistry::resolve_kind`
+# (conformance-fenced in src/ast/lang/norm.rs tests).
+#
+# Grammar notes (measured, docs/SCHEMA.md "Language support — cpp"):
+# FUNCTION is `function_definition` — bodies only. A function WITHOUT a
+# body (header prototype, in-class method declaration, constructor decl)
+# is a plain `declaration`/`field_declaration`, and `lambda_expression`
+# is expression-position (the python-lambda precedent keeps it out).
+# `function_declarator` is a fragment of a def, never a def itself.
+# IDENT is the generic `identifier` only: cpp namespace-types its names
+# (`field_identifier` for in-class members, `type_identifier` for types,
+# `namespace_identifier` for namespace/qualified prefixes) and those are
+# deliberately NOT IDENT (the ocaml namespace-typing precedent).
+# `compound_literal_expression` (`(T){…}`) is left out of LITERAL — it
+# carries a type and initializers, closer to a constructor expression
+# than a value; revisit with a use case. BLOCK is `compound_statement`
+# (statement suites); `declaration_list` (namespace/linkage bodies) is a
+# container of declarations, not a block.
+#
+# Format: strict subset of TOML — blank lines, `#` comments, and
+# `CLASS = ["kind", ...]` lines (one line per mapping; multi-line arrays
+# do not parse); nothing else parses.
+
+FUNCTION = ["function_definition"]
+IDENT = ["identifier"]
+LITERAL = ["char_literal", "false", "null", "number_literal", "raw_string_literal", "string_literal", "true"]
+BLOCK = ["compound_statement"]
