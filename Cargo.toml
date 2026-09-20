@@ -38,6 +38,7 @@ tree-sitter-javascript = { version = "=0.25.0", optional = true }  # ABI 15
 tree-sitter-typescript = { version = "=0.23.2", optional = true }  # ABI 14
 tree-sitter-java = { version = "=0.23.5", optional = true }        # ABI 14
 tree-sitter-c = { version = "=0.24.2", optional = true }           # ABI 15
+tree-sitter-cpp = { version = "=0.23.4", optional = true }         # ABI 14 (LANGUAGE_VERSION in parser.c, measured 2026-09-20)
 
 # --- experimental tier (F9c/F9d, ADR-0015 note): registered and e2e-tested
 # but NOT part of lang-all — the stable-set fence stays at seven grammars
@@ -55,6 +56,9 @@ lang-javascript = ["dep:tree-sitter-javascript"]
 lang-typescript = ["dep:tree-sitter-typescript"]
 lang-java = ["dep:tree-sitter-java"]
 lang-c = ["dep:tree-sitter-c"]
+# C++ promotion lane (docs/PROMOTION.md C1-C6): registered, corpus-curated
+# and e2e-tested ahead of the flip; joins lang-all in the promotion commit.
+lang-cpp = ["dep:tree-sitter-cpp"]
 lang-all = ["lang-rust", "lang-python", "lang-go", "lang-javascript",
             "lang-typescript", "lang-java", "lang-c"]
 # Experimental tier (F9c+F9d): ruby/ocaml/elixir build+test here; lang-all

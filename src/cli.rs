@@ -430,6 +430,10 @@ mod tests {
                     "tsx",
                     "java",
                     "c",
+                    // C++ promotion lane (docs/PROMOTION.md) — registered
+                    // while the C1-C6 gates run; the tier column in
+                    // build.rs flips with the promotion commit.
+                    "cpp",
                     // Experimental tier (F9c+F9d) — same --version surface,
                     // fenced out of lang-all (ADR-0015 appended note).
                     "ruby",
@@ -461,6 +465,11 @@ mod tests {
             ("tsx", true),
             ("java", true),
             ("c", true),
+            // Promotion lane: cpp registers experimental until the
+            // promotion commit flips build.rs's tier column — flipping
+            // this expectation without that commit (or vice versa) fails
+            // here first.
+            ("cpp", false),
             ("ruby", false),
             ("ocaml", false),
             ("ocaml_interface", false),

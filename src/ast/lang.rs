@@ -248,10 +248,35 @@ impl LangRegistry {
         });
         #[cfg(feature = "lang-c")]
         specs.push(LangSpec {
+            // `.h` moved to cpp at the C++ promotion (measured routing
+            // decision, docs/SCHEMA.md "Language support — cpp"): the C++
+            // grammar parses clean C headers as a near-superset, while the
+            // C grammar ERRORs on C++ headers (class/template/namespace
+            // shapes) — so `.h → cpp` is the only default that never
+            // produces a silently broken parse on one side. Residual known
+            // limitation (documented, not resolved): `.C` (capital, the
+            // Unix convention for C++) routes to *c* here because the
+            // router is case-insensitive and matches it against "c".
             name: "c",
-            extensions: &["c", "h"],
+            extensions: &["c"],
             language: ffi_shim::c_language(),
             fixture: include_str!("lang/fixtures/c.c"),
+            trivia: &["comment"],
+            block_comment: Some(BlockComment::C_FAMILY),
+        });
+        // C++ promotion lane (docs/PROMOTION.md C1-C6): registers in
+        // registry order right after c (build.rs's canonical order); the
+        // build.rs tier column and lang-all membership flip in the
+        // promotion commit once the checklist passes.
+        #[cfg(feature = "lang-cpp")]
+        specs.push(LangSpec {
+            name: "cpp",
+            extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"],
+            language: ffi_shim::cpp_language(),
+            fixture: include_str!("lang/fixtures/cpp.cpp"),
+            // C-family comment discipline: line and block comments are the
+            // one `comment` kind (measured against tree-sitter-cpp
+            // 0.23.4's node-types.json); block comments do not nest.
             trivia: &["comment"],
             block_comment: Some(BlockComment::C_FAMILY),
         });
@@ -1283,6 +1308,144 @@ mod tests {
                     .expect("seeded table knows the kind");
                 assert_eq!(name.as_str(), *kind, "id→name must round-trip");
             }
+        }
+    }
+
+    /// C++ promotion lane (docs/PROMOTION.md): the cpp registration,
+    /// same ladder as the stable set — extension routing (including the
+    /// measured `.h → cpp` decision and its capital-`.C` residue),
+    /// named-kind resolution against the real grammar, the typed
+    /// `UnknownKind`, and the E5 order-independent kind table. The
+    /// `.h` leg is the routing fence: if `.h` leaves cpp's extension
+    /// list (or lands back on c), this test fails — the decision is
+    /// pinned, not implied.
+    #[test]
+    #[cfg(feature = "lang-cpp")]
+    fn cpp_registry_resolution_is_typed_routed_and_seeded() {
+        let a = LangRegistry::new();
+        let b = LangRegistry::new();
+        let id = a
+            .for_extension("cpp")
+            .expect("lang-cpp builds register the cpp grammar");
+        assert_eq!(a.name(id), Some("cpp"));
+        assert_eq!(a.for_extension("CPP"), Some(id));
+        assert_eq!(a.for_extension("cc"), Some(id));
+        assert_eq!(a.for_extension("cxx"), Some(id));
+        assert_eq!(a.for_extension("hpp"), Some(id));
+        assert_eq!(a.for_extension("hh"), Some(id));
+        assert_eq!(a.for_extension("hxx"), Some(id));
+        assert_eq!(
+            a.for_extension("h"),
+            Some(id),
+            "the measured routing decision: .h parses as a near-superset under cpp"
+        );
+        assert_eq!(a.for_path(Path::new("/proj/src/engine/dsp.cpp")), Some(id),);
+        assert_eq!(a.for_path(Path::new("/proj/include/delay.h")), Some(id),);
+
+        // c keeps exactly `.c` — the .h move is a behavior change, fenced
+        // in both directions. Capital `.C` (Unix convention for C++) is
+        // the documented residue: case-insensitive routing sends it to c.
+        // (This leg needs both features on — lang-all builds and the
+        // promotion CI leg run exactly that combination.)
+        #[cfg(feature = "lang-c")]
+        {
+            let c_id = a
+                .for_extension("c")
+                .expect("lang-c builds register the c grammar");
+            assert_ne!(c_id, id, "c and cpp are distinct LangIds");
+            assert_eq!(a.name(c_id), Some("c"));
+            assert_eq!(a.for_extension("C"), Some(c_id), "the documented residue");
+        }
+
+        // Kind names verified against tree-sitter-cpp 0.23.4's
+        // node-types.json (213 named kinds) — the norm-table and KP-6-cpp
+        // anchors: the def shape, the body, the containers, the template
+        // surface, the literals, the trivia.
+        for kind in [
+            "translation_unit",
+            "function_definition",
+            "function_declarator",
+            "compound_statement",
+            "declaration",
+            "class_specifier",
+            "field_declaration_list",
+            "field_declaration",
+            "template_declaration",
+            "template_parameter_list",
+            "namespace_definition",
+            "lambda_expression",
+            "parameter_list",
+            "identifier",
+            "field_identifier",
+            "type_identifier",
+            "number_literal",
+            "string_literal",
+            "raw_string_literal",
+            "char_literal",
+            "preproc_include",
+            "using_declaration",
+            "virtual_specifier",
+            "comment",
+        ] {
+            assert!(
+                a.resolve_kind(id, kind).is_ok_and(|k| k != 0),
+                "cpp grammar must know {kind}"
+            );
+        }
+
+        // The honest probe: a rust kind name is unknown to the cpp
+        // grammar (same shape, provably absent).
+        let err = a
+            .resolve_kind(id, "function_item")
+            .expect_err("a rust kind name is unknown to the cpp grammar");
+        assert!(matches!(err, DslError::UnknownKind { .. }));
+        let umbrella: JanitorError = err.into();
+        assert_eq!(umbrella.code(), "E_DSL_UNKNOWN_KIND");
+        assert_eq!(
+            umbrella.details(),
+            Some(serde_json::json!({ "lang": "cpp", "kind": "function_item" }))
+        );
+
+        // E5 fence: order-independent seeding, round-tripping ids, seeded
+        // from the bundled fixture (namespaces, class + out-of-class
+        // methods, templates, lambdas, override — a real parse leg).
+        let resolved: Vec<u16> = [
+            "function_definition",
+            "class_specifier",
+            "template_declaration",
+            "identifier",
+            "comment",
+        ]
+        .iter()
+        .map(|kind| a.resolve_kind(id, kind).expect("kinds cpp knows"))
+        .collect();
+        let table_a = a.kind_table(id).expect("table seeds at first use");
+        let id_b = b
+            .for_extension("cpp")
+            .expect("lang-cpp builds register cpp");
+        let table_b = b.kind_table(id_b).expect("table seeds at first use");
+        assert_eq!(
+            table_a, table_b,
+            "E5: cpp seeding must not depend on usage order"
+        );
+        assert!(
+            !table_a.is_empty() && table_a.len() > 200,
+            "the cpp grammar carries its symbol table (213 named kinds)"
+        );
+        for (kind, kind_id) in [
+            "function_definition",
+            "class_specifier",
+            "template_declaration",
+            "identifier",
+            "comment",
+        ]
+        .iter()
+        .zip(resolved)
+        {
+            let name = a
+                .kind_name(id, kind_id)
+                .expect("seeded table knows the kind");
+            assert_eq!(name.as_str(), *kind, "id→name must round-trip");
         }
     }
 
