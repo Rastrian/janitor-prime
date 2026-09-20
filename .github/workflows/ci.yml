@@ -94,6 +94,13 @@ jobs:
         # against BOTH grammars), the ts/tsx agent-loop acceptance and
         # the cross-grammar determinism fence leg.
         run: cargo test --features lang-typescript
+      - name: test (lang-cpp e2e)
+        # C++ promotion lane (docs/PROMOTION.md C5): cpp joins the
+        # tested set — the registry (including the measured .h→cpp
+        # routing fence), KP-6-cpp trivia corpus, the cpp norm table,
+        # the cpp agent-loop acceptance with the three apply-gate
+        # honesty probes, and the cpp determinism fence leg.
+        run: cargo test --features lang-cpp
       - name: build with no default features
         run: cargo build --no-default-features
 
