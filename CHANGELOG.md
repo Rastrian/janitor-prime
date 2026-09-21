@@ -1,6 +1,45 @@
 ## [Unreleased]
 
 ### Added
+- **C++ promotion lane (docs/PROMOTION.md C1-C6)** — cpp is the first
+  language promoted through the full measurable checklist. Pin
+  tree-sitter-cpp =0.23.4 (ABI 14, measured; runtime dep
+  tree-sitter-language only). The ladder, all measured: C1 curated
+  trivia corpus (`tests/fixtures/kp6_cpp/`, 7 fixtures, hand-computed
+  strict/skip counts — module totals strict 3 / skip 5, 40% strict-loss;
+  sabotage-verified), C2 determinism leg (1-vs-8 threads byte-identical,
+  3 consecutive local runs hash-identical), C3 apply-gate honesty probes
+  (`tests/cpp_e2e.rs`: unclosed `/*` is the RUST/ERROR class here —
+  refusal is E_PARSE_INVALID with coordinates; a deleted parameter-list
+  `)` is the pure MISSING class while a deleted `;` is ERROR; atomic
+  4-edit/3-file rename incl. the `.h`), C4 STABLE norm table
+  (`lang/cpp.norm.toml`; FUNCTION = bodies only, IDENT = generic
+  identifier — namespace-typed names excluded) + caveats in SCHEMA.md /
+  GLOBAL.md, C5 dedicated CI leg on both toolchains, C6 dogfood
+  sign-off recorded as re-checkable notes in a real C++ repo.
+  Pinned adjacency caveats: `access_specifier` is content (breaks
+  member adjacency like a comment), ctor member-initializer lists break
+  declarator-body adjacency, `//` comments are one node per line.
+  **The flip** (one commit, "Flipping the switch" mechanics): lang-cpp
+  joined lang-all, build.rs's tier column flipped (`--version` lists
+  cpp under tiers.stable, after c in canonical order), the CI pin-check
+  fence and the release smokes bumped 8→9 grammars deliberately, and a
+  local lang-all envelope test pins the exact nine-name list (the
+  tier-sabotage and grammar-disappearance pins ride the same tests).
+- **`docs/PROMOTION.md` "Historical exemptions"**: c, java and
+  javascript entered lang-all in the v0.1 scaffold, before the checklist
+  existed — their missing corpora/norm tables/e2e are recorded as debt,
+  not waived.
+
+### Changed
+- **`.h` files route to the cpp grammar** (measured behavior change):
+  the C++ grammar parses clean C headers as a near-superset while the C
+  grammar ERRORs on C++ headers, so `.h → cpp` is the only default that
+  never silently mis-parses one side. `c` now owns exactly `.c`. Known
+  residue, documented: capital `.C` still routes to `c` (the router is
+  case-insensitive).
+
+### Added
 - **B9 lane: measurable promotion criteria + the ocaml gate hole
   closed (PLAN-v0.3 §2 B9)**. Three parts:
   - **Lexical honesty probe in the apply gate** — the engine's one

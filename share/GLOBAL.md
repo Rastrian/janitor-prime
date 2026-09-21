@@ -92,7 +92,13 @@ seed it. Seed BEFORE starting the session's actual work.
 
 These heuristics are phrased only over the normalized vocabulary — FUNCTION,
 IDENT, LITERAL, BLOCK — so they apply to any enabled language. They are
-prompts for you to verify with `scan`, not automated rules.
+prompts for you to verify with `scan`, not automated rules. Per-language
+divergences live in the norm tables and docs/SCHEMA.md's "Language
+support" sections — two that bite in practice: in **cpp** FUNCTION means
+a function WITH a body (a header prototype is a plain declaration, so
+def-shaped rules never match prototypes), and cpp namespace-types its
+names beyond IDENT (`type_identifier`, `field_identifier`,
+`namespace_identifier`).
 
 - Check a FUNCTION with many parameters; prefer grouping them or passing one options IDENT.
 - Flag deep BLOCK nesting (BLOCK within BLOCK within BLOCK); prefer early returns.
@@ -110,7 +116,8 @@ prompts for you to verify with `scan`, not automated rules.
 - Prefer one whole-diff over many small applies; batch related edits and flush once.
 - Janitor validates SYNTAX only (tree-sitter sees structure, not types or resolved
   imports). For semantic truth — types, unresolved symbols, dead code — rely on the
-  project's language server (rust-analyzer, pyright, gopls, ruby-lsp, elixir-ls...).
+  project's language server (rust-analyzer, pyright, gopls, clangd,
+  ruby-lsp, elixir-ls...).
   The `wake` payload's `environment.servers` block lists which of them its PATH
   probe found (`available: true`, one row per name). When a row says available,
   treat that server's diagnostics as the semantic layer and cross-check non-obvious

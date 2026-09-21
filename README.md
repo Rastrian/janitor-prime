@@ -107,7 +107,7 @@ Manual install: download the static binary from
 
 ```sh
 cargo build --release          # rust grammar (default)
-cargo build --release --features lang-all   # all 8 grammars
+cargo build --release --features lang-all   # all 9 grammars
 ```
 
 Every release artifact answers `--version` with the embedded grammar list
@@ -267,7 +267,7 @@ success, `1` operational error, `2` usage error.
 
 ```sh
 cargo build                                  # default: rust grammar only
-cargo build --features lang-all              # all 8 grammars
+cargo build --features lang-all              # all 9 grammars
 cargo build --no-default-features
 cargo test --all-features                    # full matrix
 ```

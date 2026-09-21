@@ -7,9 +7,11 @@
 > language, that language stays in `lang-experimental` and `--version`
 > reports it under `tiers.experimental`.
 
-**Tier today (v0.4):** stable = `rust, python, go, javascript, typescript,
-tsx, java, c` (the `lang-all` fence set); experimental = `ruby, ocaml,
-ocaml_interface, elixir`. `--version` is the visible state:
+**Tier today (post-cpp-promotion):** stable = `rust, python, go,
+javascript, typescript, tsx, java, c, cpp` (the `lang-all` fence set —
+cpp is the first language promoted through this full checklist);
+experimental = `ruby, ocaml, ocaml_interface, elixir`. `--version` is
+the visible state:
 
 ```
 cargo build --features lang-experimental && ./target/debug/janitor --version
@@ -128,6 +130,27 @@ session note with its `--ptr`/`--commit` anchors.
 4. `.github/workflows/release.yml`: `grammars | length == 8` is a
    **fence** — the bump to 9+ (and the tier-smoke's `stable | length`)
    happens deliberately in this commit, never as drive-by.
+
+## Historical exemptions (the pre-checklist stable set)
+
+`c`, `java` and `javascript` entered `lang-all` in the v0.1 scaffold
+wave — before this checklist existed (it is the v0.3 B9 deliverable).
+They carry **no kp6 trivia corpus, no norm table, and no dedicated e2e
+of their own**; that gap is recorded here as debt, not waived:
+
+- **c**: registered and fixture-fenced, but no `tests/kp6_c*`, no
+  `lang/c.norm.toml`, no `c_e2e`. Note the cpp promotion's measured
+  `.h → cpp` routing move (docs/SCHEMA.md "Language support — cpp")
+  already tightened c's surface to exactly `.c`.
+- **java**: same shape — grammar pinned (ABI 14) and bundled-fixture
+  fenced, corpus/norm/e2e absent.
+- **javascript**: same shape (`.js/.jsx/.mjs/.cjs`).
+
+Settling this debt = running C1-C6 per language (the ladder is
+language-generic by construction; cpp proved it end to end as the
+first full pass). Until then the three stay in `lang-all` on the
+strength of the pin-check ABI fence and the shared engine surfaces —
+the tier split reports what IS, not what is owed.
 
 ## Non-criteria (explicitly out)
 

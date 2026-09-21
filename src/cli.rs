@@ -430,6 +430,10 @@ mod tests {
                     "tsx",
                     "java",
                     "c",
+                    // C++ promotion lane (docs/PROMOTION.md) — registered
+                    // while the C1-C6 gates run; the tier column in
+                    // build.rs flips with the promotion commit.
+                    "cpp",
                     // Experimental tier (F9c+F9d) — same --version surface,
                     // fenced out of lang-all (ADR-0015 appended note).
                     "ruby",
@@ -441,6 +445,58 @@ mod tests {
                 "unknown grammar {grammar:?} embedded by build.rs"
             );
         }
+    }
+
+    /// The lang-all envelope, pinned exactly (the cpp promotion's
+    /// release-fence companion, sabotage-pin (c) of the promotion
+    /// checklist): when every stable language is compiled in, the nine
+    /// stable grammars ARE the stable tier, in canonical registry order
+    /// — a grammar dropping out of `--version` (feature removed from
+    /// lang-all, build.rs row lost, registry order broken) fails here,
+    /// not at release time. The cfg gates on the eight stable lang
+    /// features (lang-all or any superset, e.g. --all-features); under
+    /// a superset the experimental tier rides after the stable prefix,
+    /// which the tail assertion pins.
+    #[test]
+    #[cfg(all(
+        feature = "lang-rust",
+        feature = "lang-python",
+        feature = "lang-go",
+        feature = "lang-javascript",
+        feature = "lang-typescript",
+        feature = "lang-java",
+        feature = "lang-c",
+        feature = "lang-cpp"
+    ))]
+    fn lang_all_envelope_lists_exactly_the_stable_nine() {
+        const NINE: &[&str] = &[
+            "rust",
+            "python",
+            "go",
+            "javascript",
+            "typescript",
+            "tsx",
+            "java",
+            "c",
+            "cpp",
+        ];
+        assert_eq!(STABLE_GRAMMARS, NINE, "the stable tier is exactly nine");
+        // Registry order is stable-set-first: whatever is enabled begins
+        // with the canonical nine (a pure lang-all build IS the nine).
+        let enabled_head = ENABLED_GRAMMARS
+            .split_at(STABLE_GRAMMARS.len().min(ENABLED_GRAMMARS.len()))
+            .0;
+        assert_eq!(
+            enabled_head, NINE,
+            "enabled grammars start with the canonical stable nine"
+        );
+        // Superset builds (e.g. --all-features): everything beyond the
+        // nine is experimental — the tiers stay a partition.
+        let tail = &ENABLED_GRAMMARS[enabled_head.len()..];
+        assert!(
+            tail.iter().all(|g| EXPERIMENTAL_GRAMMARS.contains(g)),
+            "beyond the stable nine only experimental grammars ride: {tail:?}"
+        );
     }
 
     /// B9: the `tiers` key is the append-only tier split of `grammars` —
@@ -461,6 +517,11 @@ mod tests {
             ("tsx", true),
             ("java", true),
             ("c", true),
+            // The cpp promotion (docs/PROMOTION.md C1-C6): stable. This
+            // row is the tier-sabotage pin — build.rs's column flipping
+            // back to false (or this expectation drifting from it) fails
+            // here first, in every feature combo.
+            ("cpp", true),
             ("ruby", false),
             ("ocaml", false),
             ("ocaml_interface", false),

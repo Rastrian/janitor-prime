@@ -596,7 +596,7 @@ with it. Payload shapes are unchanged; the ts-specific facts:
 
 Elixir is registered, e2e-tested and documented, but **experimental**
 (ADR-0015 appended note): it lives in the `lang-experimental` feature,
-is NOT part of `lang-all` (the stable set stays the seven-grammar ABI
+is NOT part of `lang-all` (the stable set stays the lang-all ABI
 fence pin-check asserts), and is CI-tested in one dedicated job instead
 of the gates matrix. Promotion = full trivia-corpus curation + moving
 the feature into `lang-all`. Nothing below changes any payload shape —
@@ -720,7 +720,7 @@ values below 2 behave as 2).
 
 Ruby and ocaml are registered, e2e-tested and documented, but **experimental**
 (ADR-0015 appended note): they live in the `lang-experimental` feature, are
-NOT part of `lang-all` (the stable set stays the seven-grammar ABI fence
+NOT part of `lang-all` (the stable set stays the lang-all ABI fence
 pin-check asserts), and are CI-tested in one dedicated job instead of the
 gates matrix. Promotion = full trivia-corpus curation + moving the feature
 into `lang-all`. Nothing below changes any payload shape — these are the
@@ -802,6 +802,65 @@ per-language facts a consumer needs.
   the grammar's string-in-comment scanner (a lexer, out of posture;
   ADR-0010's equivalence semantics and ADR-0017's no-semantics line
   otherwise generalize unchanged).
+
+## Language support — cpp (promotion lane, docs/PROMOTION.md C1-C6)
+
+C++ is the first language promoted through the full checklist
+(`docs/PROMOTION.md` — the ladder itself is the v0.3 B9 deliverable).
+Payload shapes are unchanged; these are the cpp-specific facts a
+consumer needs:
+
+- **File routing and the `.h` decision** (measured): `.cpp`, `.cc`,
+  `.cxx`, `.hpp`, `.hh`, `.hxx` **and `.h`** (case-insensitive) → the
+  `cpp` grammar (`lang-cpp`, tree-sitter-cpp =0.23.4, ABI 14). `.h`
+  moved from `c` to `cpp` in this lane: the C++ grammar parses clean C
+  headers as a near-superset, while the C grammar ERRORs on C++
+  headers (class/template/namespace shapes) — so `.h → cpp` is the only
+  default that never produces a silently broken parse on one side. This
+  is a behavior change for `.h` files containing C++ (previously they
+  parsed as C, wrongly); plain C headers keep parsing clean. **Known
+  residue, documented not resolved:** `.C` (capital, the Unix
+  convention for C++ files) routes to `c` — the router is
+  case-insensitive and matches it against `c`'s extension list.
+- **Kind names in reports** are the grammar's own: `translation_unit`
+  is the root; **bodies make the kind** — a function WITH a body is
+  `function_definition` (free, out-of-class qualified `C::m`, in-class
+  inline, and template bodies alike; templates wrap as
+  `template_declaration > function_definition`), while a function
+  DECLARATION (header prototype, in-class method decl, constructor
+  decl) is a plain `declaration`/`field_declaration`. Bodies are
+  `compound_statement`; namespace bodies are `declaration_list` nodes
+  (the namespace's own children are just its name and that list). The
+  norm table is `lang/cpp.norm.toml` (STABLE header):
+  FUNCTION=`function_definition` (bodies only), IDENT=`identifier`
+  (cpp namespace-types its names — `field_identifier`,
+  `type_identifier`, `namespace_identifier` are deliberately not IDENT,
+  the ocaml precedent), LITERAL=`number_literal|string_literal|
+  char_literal|raw_string_literal|true|false|null`, BLOCK=
+  `compound_statement`.
+- **Two adjacency caveats** (both measured in `tests/kp6_cpp.rs`):
+  `access_specifier` (`public:`/`private:`) is a named, CONTENT sibling
+  inside `field_declaration_list` — it breaks byte-strict member
+  adjacency exactly like a comment and is never trivia; and a
+  constructor's member-initializer list (`field_initializer_list`)
+  parks between the declarator and the body, so a `(function_declarator,
+  compound_statement)` adjacency seq skips constructors by shape (the
+  e2e population fence pins this).
+- **Trivia** (ADR-0010): the table is `comment` only — line and block
+  comments are the one kind, and a `//` comment is **one node per
+  line** (a six-line header comment is six sibling nodes). Measured in
+  the KP-6-cpp corpus: byte-strict loses 40% of file-level
+  function-adjacency pairs on the bundled module (3 vs 5).
+- **The apply re-parse gate** runs under the cpp grammar — measured
+  classes, pinned in `tests/cpp_e2e.rs`: an unclosed `/*` follows the
+  RUST class (the grammar's own recovery emits ERROR nodes — no silent
+  swallow), so the refusal is `E_PARSE_INVALID` with coordinates (the
+  B9 lexical probe stays belt-and-braces behind the error-node gate); a
+  deleted parameter-list `)` recovers as a pure MISSING node while a
+  deleted `;` is a plain ERROR node — both refused whole-file, whole
+  diff rolled back. Atomic multi-file renames cover the C++ shape
+  (header prototype + doc mention, qualified definition, call site) in
+  one diff, `.h` included.
 
 ## The daemon (F10a, v0.2) — `janitor daemon` and the socket protocol
 

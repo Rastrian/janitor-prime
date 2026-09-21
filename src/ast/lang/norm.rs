@@ -206,6 +206,11 @@ pub fn embedded_source(lang: &str) -> Option<&'static str> {
         "python" => Some(include_str!("../../../lang/python.norm.toml")),
         #[cfg(feature = "lang-go")]
         "go" => Some(include_str!("../../../lang/go.norm.toml")),
+        // C++ promotion lane (docs/PROMOTION.md C1-C6): STABLE-headed from
+        // birth — cpp never shipped an EXPERIMENTAL table, it enters through
+        // the full checklist (the first language to do so).
+        #[cfg(feature = "lang-cpp")]
+        "cpp" => Some(include_str!("../../../lang/cpp.norm.toml")),
         // `typescript` and `tsx` share one table: the tsx kind space is
         // the JSX-bearing superset of the same grammar family, and the
         // conformance test below resolves every kind against EACH

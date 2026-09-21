@@ -104,6 +104,20 @@ pub fn c_language() -> Language {
     tree_sitter_c::LANGUAGE.into()
 }
 
+/// The C++ grammar (`lang-cpp`; promotion lane per docs/PROMOTION.md —
+/// routes `.cpp/.cc/.cxx/.hpp/.hh/.hxx` and, by the measured routing
+/// decision, `.h` as well: the C++ grammar parses clean C headers as a
+/// near-superset, while the C grammar ERRORs on C++ headers, so `.h →
+/// cpp` is the only default that never produces a silent error — see the
+/// registry comment in `src/ast/lang.rs` and docs/SCHEMA.md). Pin-check
+/// 2026-09-20: =0.23.4 is ABI 14 (`LANGUAGE_VERSION` in parser.c), inside
+/// core 0.27's 13..=15 window; runtime dep is `tree-sitter-language`
+/// only, matching the stable set's graph.
+#[cfg(feature = "lang-cpp")]
+pub fn cpp_language() -> Language {
+    tree_sitter_cpp::LANGUAGE.into()
+}
+
 // --- experimental tier (F9c, ADR-0015 appended note): registered and
 // e2e-tested, but fenced out of lang-all until each trivia corpus is fully
 // curated. Same `LanguageFn` constructor shape as the stable set. ---
