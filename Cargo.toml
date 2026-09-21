@@ -41,7 +41,7 @@ tree-sitter-c = { version = "=0.24.2", optional = true }           # ABI 15
 tree-sitter-cpp = { version = "=0.23.4", optional = true }         # ABI 14 (LANGUAGE_VERSION in parser.c, measured 2026-09-20)
 
 # --- experimental tier (F9c/F9d, ADR-0015 note): registered and e2e-tested
-# but NOT part of lang-all — the stable-set fence stays at seven grammars
+# but NOT part of lang-all — the stable-set fence stays at nine grammars
 # until each experimental grammar's trivia corpus is fully curated ---
 tree-sitter-ruby = { version = "=0.23.1", optional = true }         # ABI 14
 tree-sitter-ocaml = { version = "=0.26.0", optional = true }        # ABI 15 (ocaml + ocaml_interface + ocaml_type)
@@ -56,11 +56,11 @@ lang-javascript = ["dep:tree-sitter-javascript"]
 lang-typescript = ["dep:tree-sitter-typescript"]
 lang-java = ["dep:tree-sitter-java"]
 lang-c = ["dep:tree-sitter-c"]
-# C++ promotion lane (docs/PROMOTION.md C1-C6): registered, corpus-curated
-# and e2e-tested ahead of the flip; joins lang-all in the promotion commit.
+# C++ (docs/PROMOTION.md C1-C6 — the first full-checklist promotion):
+# passed the ladder, member of lang-all, tier column flipped in build.rs.
 lang-cpp = ["dep:tree-sitter-cpp"]
 lang-all = ["lang-rust", "lang-python", "lang-go", "lang-javascript",
-            "lang-typescript", "lang-java", "lang-c"]
+            "lang-typescript", "lang-java", "lang-c", "lang-cpp"]
 # Experimental tier (F9c+F9d): ruby/ocaml/elixir build+test here; lang-all
 # stays the "stable set" ABI fence (ADR-0015 appended note). Promotion =
 # move the feature into lang-all when its trivia corpus is fully curated.

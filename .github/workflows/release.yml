@@ -125,25 +125,25 @@ jobs:
           tar -czf "janitor-$TARGET.tar.gz" -C "$stage" \
             janitor LICENSE-MIT LICENSE-APACHE NOTICE README.md
           ls -l "janitor-$TARGET.tar.gz"
-      - name: "Smoke: envelope lists all eight grammars"
+      - name: "Smoke: envelope lists all nine grammars"
         if: ${{ matrix.smoke == 'run' }}
         # Executable legs: x86_64 musl is fully static, x86_64 gnu matches
         # the ubuntu runner's ABI, aarch64-apple matches the arm64 mac
-        # runner natively.
+        # runner natively. Nine since the cpp promotion (docs/PROMOTION.md).
         run: |
           "target/$TARGET/release/janitor" --version | jq -e '
             .schema == "janitor.v1"
             and .ok == true
-            and (.data.grammars | length == 8)
+            and (.data.grammars | length == 9)
           '
-      - name: "Smoke: tiers list all eight as stable, none experimental"
+      - name: "Smoke: tiers list all nine as stable, none experimental"
         if: ${{ matrix.smoke == 'run' }}
         # B9 append-only companion to the grammars fence above: the release
         # build is lang-all, so every grammar is stable and the
         # experimental key is ABSENT (docs/PROMOTION.md gates any change).
         run: |
           "target/$TARGET/release/janitor" --version | jq -e '
-            (.data.tiers.stable | length == 8)
+            (.data.tiers.stable | length == 9)
             and (.data.tiers | has("experimental") | not)
           '
       - name: "Smoke: cross artifact (not executable on this runner)"
@@ -168,7 +168,7 @@ jobs:
           file "target/$TARGET/release/janitor"
           file "target/$TARGET/release/janitor" | grep -q x86_64
           if arch -x86_64 "target/$TARGET/release/janitor" --version > "$RUNNER_TEMP/version.json" 2>/dev/null; then
-            jq -e '.schema == "janitor.v1" and .ok == true and (.data.grammars | length == 8)' "$RUNNER_TEMP/version.json"
+            jq -e '.schema == "janitor.v1" and .ok == true and (.data.grammars | length == 9)' "$RUNNER_TEMP/version.json"
           else
             echo "Rosetta unavailable — the file(1) arch check above is the gate"
           fi

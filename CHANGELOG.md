@@ -20,6 +20,12 @@
   Pinned adjacency caveats: `access_specifier` is content (breaks
   member adjacency like a comment), ctor member-initializer lists break
   declarator-body adjacency, `//` comments are one node per line.
+  **The flip** (one commit, "Flipping the switch" mechanics): lang-cpp
+  joined lang-all, build.rs's tier column flipped (`--version` lists
+  cpp under tiers.stable, after c in canonical order), the CI pin-check
+  fence and the release smokes bumped 8→9 grammars deliberately, and a
+  local lang-all envelope test pins the exact nine-name list (the
+  tier-sabotage and grammar-disappearance pins ride the same tests).
 - **`docs/PROMOTION.md` "Historical exemptions"**: c, java and
   javascript entered lang-all in the v0.1 scaffold, before the checklist
   existed — their missing corpora/norm tables/e2e are recorded as debt,

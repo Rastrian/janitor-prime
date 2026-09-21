@@ -7,9 +7,11 @@
 > language, that language stays in `lang-experimental` and `--version`
 > reports it under `tiers.experimental`.
 
-**Tier today (v0.4):** stable = `rust, python, go, javascript, typescript,
-tsx, java, c` (the `lang-all` fence set); experimental = `ruby, ocaml,
-ocaml_interface, elixir`. `--version` is the visible state:
+**Tier today (post-cpp-promotion):** stable = `rust, python, go,
+javascript, typescript, tsx, java, c, cpp` (the `lang-all` fence set —
+cpp is the first language promoted through this full checklist);
+experimental = `ruby, ocaml, ocaml_interface, elixir`. `--version` is
+the visible state:
 
 ```
 cargo build --features lang-experimental && ./target/debug/janitor --version

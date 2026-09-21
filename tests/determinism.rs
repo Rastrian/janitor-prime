@@ -280,7 +280,8 @@ fn cpp_scan_json_is_byte_identical_across_rayon_thread_counts() {
         .join("tests/fixtures/cpp")
         .canonicalize()
         .expect("fixture module");
-    let rule = "(under translation_unit (seq (kind function_definition) (kind function_definition)))";
+    let rule =
+        "(under translation_unit (seq (kind function_definition) (kind function_definition)))";
 
     let scan = |threads: u32, strict: bool| {
         let bin = env!("CARGO_BIN_EXE_janitor");

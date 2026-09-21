@@ -29,10 +29,10 @@ const GRAMMAR_FEATURES: &[(&str, &str, bool)] = &[
     ("tsx", "CARGO_FEATURE_LANG_TYPESCRIPT", true),
     ("java", "CARGO_FEATURE_LANG_JAVA", true),
     ("c", "CARGO_FEATURE_LANG_C", true),
-    // C++ promotion lane (docs/PROMOTION.md): registers experimental while
-    // the C1-C6 gates run; the tier column flips to true in the promotion
+    // C++ (docs/PROMOTION.md — first full-checklist promotion): C1-C6
+    // passed on the lane; the tier column flipped in the promotion
     // commit ("Flipping the switch"), never as a drive-by.
-    ("cpp", "CARGO_FEATURE_LANG_CPP", false),
+    ("cpp", "CARGO_FEATURE_LANG_CPP", true),
     // Experimental tier (F9c+F9d): surfaced by --version the same way, but
     // NOT part of lang-all (ADR-0015 appended note) — the stable-set fence.
     ("ruby", "CARGO_FEATURE_LANG_RUBY", false),

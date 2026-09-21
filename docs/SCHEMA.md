@@ -596,7 +596,7 @@ with it. Payload shapes are unchanged; the ts-specific facts:
 
 Elixir is registered, e2e-tested and documented, but **experimental**
 (ADR-0015 appended note): it lives in the `lang-experimental` feature,
-is NOT part of `lang-all` (the stable set stays the seven-grammar ABI
+is NOT part of `lang-all` (the stable set stays the lang-all ABI
 fence pin-check asserts), and is CI-tested in one dedicated job instead
 of the gates matrix. Promotion = full trivia-corpus curation + moving
 the feature into `lang-all`. Nothing below changes any payload shape —
@@ -720,7 +720,7 @@ values below 2 behave as 2).
 
 Ruby and ocaml are registered, e2e-tested and documented, but **experimental**
 (ADR-0015 appended note): they live in the `lang-experimental` feature, are
-NOT part of `lang-all` (the stable set stays the seven-grammar ABI fence
+NOT part of `lang-all` (the stable set stays the lang-all ABI fence
 pin-check asserts), and are CI-tested in one dedicated job instead of the
 gates matrix. Promotion = full trivia-corpus curation + moving the feature
 into `lang-all`. Nothing below changes any payload shape — these are the

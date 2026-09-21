@@ -120,14 +120,15 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Build all grammars against tree-sitter 0.27.0
         run: cargo build --features lang-all
-      - name: "--version envelope lists all eight grammars"
-        # F9b: the lang-typescript feature registers TWO grammars
-        # (typescript + tsx), so lang-all surfaces eight entries.
+      - name: "--version envelope lists all nine grammars"
+        # F9b made lang-all eight (typescript+tsx); the cpp promotion
+        # (docs/PROMOTION.md C1-C6) made it nine — cpp appended after c,
+        # canonical registry order.
         run: |
           ./target/debug/janitor --version | jq -e '
             .schema == "janitor.v1"
             and .ok == true
-            and .data.grammars == ["rust","python","go","javascript","typescript","tsx","java","c"]
+            and .data.grammars == ["rust","python","go","javascript","typescript","tsx","java","c","cpp"]
           '
 
   spikes:
