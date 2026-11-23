@@ -480,7 +480,6 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
             return;
         };
         let n = frame.children.len();
-        let nsyms = program.symbols.len();
         for s in 0..n {
             if !frame.accepts_get(s, entry as usize) {
                 continue;
