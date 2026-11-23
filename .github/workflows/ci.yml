@@ -48,7 +48,7 @@ env:
 jobs:
   gates:
     name: gates (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     strategy:
       fail-fast: false
       matrix:
@@ -106,7 +106,7 @@ jobs:
 
   pin-check:
     name: lang-all ABI pin-check (KP-5 fence)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -133,7 +133,7 @@ jobs:
 
   spikes:
     name: F1 spikes fence (build + test)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -154,7 +154,7 @@ jobs:
 
   supply-chain:
     name: supply chain (cargo-deny + cargo-audit)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -181,7 +181,7 @@ jobs:
 
   lang-experimental:
     name: experimental tier (ruby + ocaml + elixir)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -219,7 +219,7 @@ jobs:
 
   musl-smoke:
     name: musl static build smoke (best-effort)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tyr]
     continue-on-error: true
     env:
       RUSTUP_TOOLCHAIN: stable
