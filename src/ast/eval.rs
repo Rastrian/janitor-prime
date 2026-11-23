@@ -533,7 +533,7 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
             };
 
             let mut captures = Vec::new();
-            for sid in 0..nsyms {
+            for (sid, symbol) in program.symbols.iter().enumerate() {
                 let (start, end) = (
                     frame.cap_start.get(sid).copied().unwrap_or(-1),
                     frame.cap_end.get(sid).copied().unwrap_or(-1),
@@ -548,7 +548,7 @@ impl<'prog, 'tree> Matcher<'prog, 'tree> {
                     continue;
                 };
                 captures.push(CaptureReport {
-                    symbol: program.symbols[sid].clone(),
+                    symbol: symbol.clone(),
                     start_byte: from.start_byte(),
                     end_byte: to.end_byte(),
                     start_point: from.start_position().into(),
