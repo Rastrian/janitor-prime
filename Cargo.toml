@@ -14,16 +14,16 @@ path = "src/main.rs"
 
 [dependencies]
 # --- CLI & serialization ---
-clap = { version = "=4.6.6", features = ["derive"] }   # derive is NOT a default feature (verified)
+clap = { version = "=4.6.9", features = ["derive"] }   # derive is NOT a default feature (verified)
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-thiserror = "=2.0.20"                                   # 2.x is current; last 1.x = 1.0.69
+serde_json = "=1.0.154"
+thiserror = "=2.0.21"                                   # 2.x is current; last 1.x = 1.0.69
 
 # --- engine ---
 tree-sitter = "=0.27.0"            # 2026-08-30; parse_with_options era (parse_with removed in 0.26)
-tree-sitter-language = "=0.1.8"    # grammar crates' only runtime dep; same-day release as core 0.27.0
+tree-sitter-language = "=0.1.9"    # grammar crates' only runtime dep; same-day release as core 0.27.0
 rayon = "=1.12.0"
-smol_str = "=0.3.6"                # interned kind names backing store (crates.io name is smol_str; PLAN §2 writes smol-str)
+smol_str = "=0.3.7"                # interned kind names backing store (crates.io name is smol_str; PLAN §2 writes smol-str)
 dashmap = "=6.2.1"                 # ParseCache concurrent inserts from rayon workers
 
 # --- diagnostics (stderr only; stdout stays 100% JSON) ---
@@ -76,7 +76,7 @@ spikes = ["lang-rust"]
 
 [dev-dependencies]
 tempfile = "=3.27.0"
-proptest = "=1.11.0"               # PLAN §2 pins 1.8.2 — never published; real latest pinned instead
+proptest = "=1.12.0"               # PLAN §2 pins 1.8.2 — never published; real latest pinned instead
 criterion = "=0.8.2"               # PLAN §2 pins 0.11.0 — never published; real latest pinned instead
 
 [build-dependencies]
