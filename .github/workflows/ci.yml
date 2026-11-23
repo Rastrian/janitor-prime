@@ -66,7 +66,7 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: rustfmt
         run: cargo fmt --check
       - name: clippy (default features)
@@ -117,7 +117,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Build all grammars against tree-sitter 0.27.0
         run: cargo build --features lang-all
       - name: "--version envelope lists all nine grammars"
@@ -144,7 +144,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Build with --features spikes
         run: cargo build --features spikes
       - name: Test with --features spikes
@@ -165,7 +165,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Install cargo-deny and cargo-audit (--locked, from source)
         run: |
           cargo install cargo-deny --locked
@@ -192,7 +192,7 @@ jobs:
         with:
           toolchain: stable
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: Build the experimental tier
         run: cargo build --features lang-experimental
       - name: Test the experimental tier
@@ -232,7 +232,7 @@ jobs:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
       - name: Cache (Swatinem/rust-cache v2.9.2)
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - name: cargo-zigbuild (preferred)
         id: zigbuild
         run: |
